@@ -405,6 +405,8 @@ export interface ProjectAccess {
   billingShares?: boolean
   /** 能改每期款獎金分潤（再加分潤寫入權：老闆／platform_admin）。 */
   editBillingShares?: boolean
+  /** 能刪除專案（2026-11-12，DELETE /projects/:id）：只有老闆／platform_admin。舊版後端沒有這個鍵＝不顯示按鈕。 */
+  deleteProject?: boolean
 }
 
 /** project-money.ts computeMoney() 的原始輸出——欄位與後端逐一對照過。 */
@@ -928,6 +930,41 @@ export function humanizeProjectCodeError(err: unknown): string {
   if (msg.includes("project_no_invalid")) return "序號不可包含換行等特殊字元"
   if (msg.includes("forbidden")) return "您沒有修改此專案序號的權限"
   return msg || "序號儲存失敗"
+}
+
+/** 刪除專案的擋刪原因（409 project_has_data 的 blockers）。 */
+export interface ProjectDeleteBlocker {
+  key: string
+  label: string
+  count: number
+}
+
+/**
+ * 刪除打錯（key 錯）的專案（2026-11-12，DELETE /projects/:id，軟刪除）。只有老闆／platform_admin；
+ * confirmCode 須等於該專案序號（沒有序號的案用專案名稱）。有實際資料 → 409 project_has_data（err.body.blockers）。
+ */
+export function deleteProject(id: string, confirmCode: string) {
+  return apiFetch<{ id: string; code: string | null; deleted: true }>(`/projects/${id}`, {
+    method: "DELETE",
+    body: JSON.stringify({ confirmCode }),
+  })
+}
+
+/** 刪除專案的錯誤人性化；409 時回後端組好的說明（含每項原因與「改用封存」建議）。 */
+export function humanizeProjectDeleteError(err: unknown): { message: string; blockers: ProjectDeleteBlocker[] } {
+  const body = (err as { body?: unknown } | null)?.body as { error?: unknown; message?: unknown; blockers?: unknown } | undefined
+  const code = typeof body?.error === "string" ? body.error : err instanceof Error ? err.message : ""
+  const blockers = Array.isArray(body?.blockers) ? (body!.blockers as ProjectDeleteBlocker[]) : []
+  if (code === "project_has_data") {
+    return {
+      message: typeof body?.message === "string" ? body.message : "此專案已有實際資料，不能刪除。若只是不再使用，請改用「封存」。",
+      blockers,
+    }
+  }
+  if (code === "project_delete_forbidden" || code === "forbidden") return { message: "只有老闆或平台管理員可以刪除專案", blockers }
+  if (code === "confirm_mismatch") return { message: "輸入的序號與此專案不符", blockers }
+  if (code === "not_found") return { message: "找不到此專案（可能已被刪除）", blockers }
+  return { message: (err instanceof Error && err.message) || "刪除失敗", blockers }
 }
 
 /** 分潤改版 #6：只有老闆可以改分潤的兩個錯誤碼。 */

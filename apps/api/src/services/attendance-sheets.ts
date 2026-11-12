@@ -2371,6 +2371,7 @@ export async function patchSheetDay(tenantId: string, sheet: SheetRow, date: str
         .select("id")
         .eq("tenant_id", tenantId)
         .eq("id", patch.projectId)
+        .is("deleted_at", null)
         .maybeSingle()
       if (projErr) throw new Error(`patchSheetDay (project): ${projErr.message}`)
       if (!proj) throw new SheetError("invalid_project", 400, { projectId: patch.projectId })

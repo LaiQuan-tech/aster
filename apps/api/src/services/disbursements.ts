@@ -941,7 +941,7 @@ type PayableScope = {
  * 自然不會出現；每列帶 archived 讓前端打灰標。
  */
 async function loadPayableScope(tenantId: string, opts: { vendorId?: string; projectId?: string }): Promise<PayableScope> {
-  let pq = supabaseAdmin.from("projects").select(PROJECT_LITE_COLS).eq("tenant_id", tenantId)
+  let pq = supabaseAdmin.from("projects").select(PROJECT_LITE_COLS).eq("tenant_id", tenantId).is("deleted_at", null)
   if (opts.projectId) pq = pq.eq("id", opts.projectId)
   const { data: projData, error: projErr } = await pq
   if (projErr) throw new Error(`payables (projects): ${projErr.message}`)

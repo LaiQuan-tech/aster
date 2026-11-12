@@ -464,7 +464,7 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
   } else {
     projects = await fetchAll<ProjectRow>(
       (from, to) =>
-        supabaseAdmin.from("projects").select(cols).eq("tenant_id", tenantId).order("id", { ascending: true }).range(from, to),
+        supabaseAdmin.from("projects").select(cols).eq("tenant_id", tenantId).is("deleted_at", null).order("id", { ascending: true }).range(from, to),
       "bonus-run loadInputs (projects)",
     )
   }

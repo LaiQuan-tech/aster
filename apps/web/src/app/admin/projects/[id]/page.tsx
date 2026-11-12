@@ -81,6 +81,7 @@ import { ContractsCard } from "./_sections/ContractsCard";
 import { BillingsCard } from "./_sections/BillingsCard";
 import { SubcontractsCard } from "./_sections/SubcontractsCard";
 import { StatusCard } from "./_sections/StatusCard";
+import { DeleteProjectCard } from "./_sections/DeleteProjectCard";
 import { BonusShareCard } from "./_sections/BonusShareCard";
 import { DocumentsCard } from "./_sections/DocumentsCard";
 import { AdjustmentsCard } from "./_sections/AdjustmentsCard";
@@ -619,6 +620,10 @@ export default function AdminProjectDetailPage() {
       />
       {/* 分潤版本歷程：放在分潤卡下方、預設收起，只給看得到分潤的人。 */}
       {canBonus && <AdjustmentsCard adjustments={adjustments} />}
+      {/* 危險操作：刪除打錯（key 錯）的空殼專案（2026-11-12）。只給老闆／platform_admin，放在最底下避免誤按。 */}
+      {access.deleteProject && (
+        <DeleteProjectCard project={project} onDeleted={() => router.push("/admin/projects")} />
+      )}
       {/* 未儲存提醒列是 fixed 在底部，留出空間免得蓋住最下面的成員分潤。 */}
       {sheetDirtyCount > 0 && <div aria-hidden="true" className="h-16" />}
     </>

@@ -666,6 +666,13 @@
       "when": 1794400000000,
       "tag": "0094_project_code_ci_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1794500000000,
+      "tag": "0095_project_soft_delete",
+      "breakpoints": true
     }
   ]
 }

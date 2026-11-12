@@ -55,6 +55,7 @@ export async function autoArchiveProjects(params: {
     .select(CANDIDATE_COLS)
     .eq("tenant_id", params.tenantId)
     .is("archived_at", null)
+    .is("deleted_at", null)
     .in("status", ["closed", "terminated"])
   if (error) throw new Error(`autoArchiveProjects(scan): ${error.message}`)
 

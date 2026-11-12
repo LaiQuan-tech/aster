@@ -110,6 +110,7 @@ async function loadProject(tenantId: string, projectId: string) {
     .select("id, dept_id, lead_emp_id")
     .eq("tenant_id", tenantId)
     .eq("id", projectId)
+    .is("deleted_at", null)
     .maybeSingle()
   if (error) throw new Error(`project-documents loadProject: ${error.message}`)
   return data as { id: string; dept_id: string | null; lead_emp_id: string | null } | null

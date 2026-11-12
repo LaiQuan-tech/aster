@@ -165,6 +165,7 @@ async function loadSource(tenantId: string, projectId: string): Promise<SourceRo
     .select(SOURCE_COLS)
     .eq("tenant_id", tenantId)
     .eq("id", projectId)
+    .is("deleted_at", null)
     .maybeSingle()
   if (error) throw new Error(`project-duplicate loadSource: ${error.message}`)
   return (data as SourceRow | null) ?? null
@@ -507,6 +508,7 @@ async function loadLineageRow(tenantId: string, projectId: string): Promise<Line
     .select(LINEAGE_COLS)
     .eq("tenant_id", tenantId)
     .eq("id", projectId)
+    .is("deleted_at", null)
     .maybeSingle()
   if (error) throw new Error(`loadLineage(root): ${error.message}`)
   return (data as LineageRow | null) ?? null
@@ -537,7 +539,7 @@ export async function loadLineage(
   const rows = new Map<string, LineageRow>([[root.id, root]])
   let frontier = [root.id]
   for (let depth = 0; depth < 5 && frontier.length > 0; depth++) {
-    const children = await batch<LineageRow>("projects", LINEAGE_COLS, tenantId, frontier, "parent_project_id", false)
+    const children = await batch<LineageRow>("projects", LINEAGE_COLS, tenantId, frontier, "parent_project_id", true)
     frontier = []
     for (const c of children) {
       if (rows.has(c.id)) continue

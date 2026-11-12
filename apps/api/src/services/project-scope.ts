@@ -40,6 +40,7 @@ export async function loadProjectScope(
     .select("id, dept_id, lead_emp_id")
     .eq("tenant_id", tenantId)
     .eq("id", projectId)
+    .is("deleted_at", null)
     .maybeSingle()
   if (error) throw new Error(`loadProjectScope: ${error.message}`)
   if (!proj) return { ok: false, status: 404, error: "not_found" }
@@ -259,7 +260,8 @@ export async function financeProjectIds(
     supabaseAdmin
       .from("projects")
       .select("id, dept_id, lead_emp_id")
-      .eq("tenant_id", tenantId),
+      .eq("tenant_id", tenantId)
+      .is("deleted_at", null),
     supabaseAdmin
       .from("project_members")
       .select("project_id")

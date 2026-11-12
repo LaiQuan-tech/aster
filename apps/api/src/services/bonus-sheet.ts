@@ -212,7 +212,7 @@ export async function listOtherProjectIds(tenantId: string, exclude: ReadonlySet
   const ids: string[] = []
   const rows = await selectAllPages<{ id: string; archive_reason: string | null }>(
     (from, to) =>
-      supabaseAdmin.from("projects").select("id, archive_reason").eq("tenant_id", tenantId).order("id", { ascending: true }).range(from, to),
+      supabaseAdmin.from("projects").select("id, archive_reason").eq("tenant_id", tenantId).is("deleted_at", null).order("id", { ascending: true }).range(from, to),
     "bonus-sheet (projects)",
   )
   for (const r of rows) if (!exclude.has(r.id) && !isDuplicateReplacedArchive(r.archive_reason)) ids.push(r.id)
@@ -695,7 +695,7 @@ export function buildProjectPayouts(
 
 /** IO：專案不存在（或別租戶）→ null（路由回 404）。 */
 export async function loadProjectPayouts(tenantId: string, projectId: string): Promise<ProjectPayoutsResult | null> {
-  const { data, error } = await supabaseAdmin.from("projects").select("id, code, name").eq("tenant_id", tenantId).eq("id", projectId).maybeSingle()
+  const { data, error } = await supabaseAdmin.from("projects").select("id, code, name").eq("tenant_id", tenantId).eq("id", projectId).is("deleted_at", null).maybeSingle()
   if (error) throw new Error(`bonus-sheet payouts (project): ${error.message}`)
   if (!data) return null
   const { runs, items } = await listProjectRunItems(tenantId, projectId)

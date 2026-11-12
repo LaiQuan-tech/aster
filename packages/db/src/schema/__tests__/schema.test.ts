@@ -137,6 +137,20 @@ describe("projects table", () => {
     expect(idx!.config.unique).toBe(true)
   })
 
+  // 2026-11-12 刪除專案（軟刪除）：deleted_at／deleted_by_emp_id，序號唯一索引只對未刪除列生效（migrations/0095）。
+  it("有 deleted_at／deleted_by_emp_id，兩個序號唯一索引都是 partial（deleted_at is null）", () => {
+    const cfg = getTableConfig(projects)
+    const cols = cfg.columns.map((c) => c.name)
+    expect(cols).toContain("deleted_at")
+    expect(cols).toContain("deleted_by_emp_id")
+    for (const name of ["projects_tenant_code_uq", "projects_tenant_code_ci_uq"]) {
+      const idx = cfg.indexes.find((i) => i.config.name === name)
+      expect(idx, name).toBeDefined()
+      expect(idx!.config.unique).toBe(true)
+      expect(idx!.config.where, name).toBeDefined()
+    }
+  })
+
   // 承接公司（company_id）的查詢用一般 index。正式庫已由 sql/0046（migrations/0056）建好，
   // schema 補上宣告只是讓 drizzle 與實際 DB 一致，不需要新遷移。
   it("(tenant_id, company_id) 有一般 index（承接公司；與 sql/0046 對齊）", () => {

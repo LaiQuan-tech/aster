@@ -148,6 +148,8 @@ export async function nextProjectCode(
     .from("projects")
     .select("code")
     .eq("tenant_id", tenantId)
+    // 已刪除（軟刪除）的專案不占號：刪掉最後一號後，下一個新案可以補回同一號（partial unique index，migrations/0095）。
+    .is("deleted_at", null)
     .ilike("code", codeLikePrefix(format, year))
   if (error) throw new Error(`nextProjectCode: ${error.message}`)
   return pickNextCode(format, year, (data ?? []).map((row) => row.code as string | null))
@@ -231,6 +233,7 @@ export async function nextDuplicateCode(tenantId: string, rootCode: string): Pro
     .from("projects")
     .select("code")
     .eq("tenant_id", tenantId)
+    .is("deleted_at", null)
     .ilike("code", `${rootCode}-%`)
   if (error) throw new Error(`nextDuplicateCode: ${error.message}`)
 

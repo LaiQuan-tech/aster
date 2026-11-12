@@ -32,6 +32,12 @@ import {
 import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
 import { estimateProjectBonus, type ProjectBonusEstimate } from "../services/bonus-estimate.js"
 import { writeAuditLog } from "../services/audit.js"
+import {
+  planProjectDelete,
+  softDeleteProject,
+  blockerMessage as deleteBlockerMessage,
+  confirmMatches as confirmDeleteMatches,
+} from "../services/project-delete.js"
 import { DEFAULT_AUTO_ARCHIVE_MONTHS } from "../services/project-archive.js"
 import {
   DEFAULT_STAMP_DUTY_RATE,
@@ -556,6 +562,7 @@ async function validateParent(
     .select("id, kind")
     .eq("tenant_id", tenantId)
     .eq("id", parentProjectId)
+    .is("deleted_at", null)
     .maybeSingle()
   if (error) throw new Error(`validateParent: ${error.message}`)
   if (!data || (data.kind ?? "main") !== "main") return "invalid_parent"
@@ -777,6 +784,8 @@ export async function loadScope(
     .select(PROJECT_COLS)
     .eq("tenant_id", tenantId)
     .eq("id", projectId)
+    // 已刪除（軟刪除，2026-11-12）的專案一律當不存在：所有 /projects/:id/* 路由都經這裡 → 404。
+    .is("deleted_at", null)
     .maybeSingle()
   if (error) throw new Error(`loadScope: ${error.message}`)
   if (!proj) return { ok: false, status: 404, error: "not_found" }
@@ -894,6 +903,8 @@ projectsRouter.get(
       if (!includeArchived) query = query.is("archived_at", null)
       // 舊的預先取號空列（reserved_at 非空）還不是案子，一律不進列表，沒有參數可以打開。
       query = query.is("reserved_at", null)
+      // 已刪除（軟刪除）的專案永遠不進列表（含 ?includeArchived=1、Excel、下拉選單、MCP list_projects）。
+      query = query.is("deleted_at", null)
       if (year !== null) query = query.eq("fiscal_year", year)
       if (kinds !== null) query = query.in("kind", kinds)
       // 次要排序固定用 id：主排序值重複（同名／同狀態）時結果仍穩定可測。
@@ -1268,6 +1279,9 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     // 分潤資料本身不在這支回應裡（另打 GET /projects/:id/billing-shares），這裡只給前端決定要不要畫那兩欄。
     billingShares: scope.canManage && scope.canSeeBonus && scope.canSeeProfit,
     editBillingShares: scope.canManage && scope.canSeeBonus && scope.canSeeProfit && scope.bonusEdit.canEdit,
+    // 刪除打錯的專案（2026-11-12，DELETE /projects/:id）：只有老闆／platform_admin（同分潤寫入權的判斷）。
+    // 前端只拿來決定要不要畫「刪除專案」按鈕；後端 DELETE 自己再驗一次。
+    deleteProject: scope.bonusEdit.canEdit,
   }
   const core = await assembleProjectDetail(tenantId, scope.project, {
     finance: scope.canManage,
@@ -1372,6 +1386,7 @@ export async function buildApplicationSnapshot(tenantId: string, projectId: stri
     .select(PROJECT_COLS)
     .eq("tenant_id", tenantId)
     .eq("id", projectId)
+    .is("deleted_at", null)
     .maybeSingle()
   if (error) throw new Error(`buildApplicationSnapshot: ${error.message}`)
   if (!data) return null
@@ -1577,6 +1592,7 @@ projectsRouter.patch(
             .select("id")
             .eq("tenant_id", tenantId)
             .eq("parent_project_id", scope.project.id)
+            .is("deleted_at", null)
             .limit(1)
           if (childErr) throw new Error(`PATCH /projects/${scope.project.id} (children): ${childErr.message}`)
           if ((children ?? []).length > 0) {
@@ -1735,6 +1751,8 @@ projectsRouter.patch(
         .select("id, code")
         .eq("tenant_id", tenantId)
         .neq("id", scope.project.id)
+        // 已刪除專案的序號已釋放（partial unique index，migrations/0095），不算撞號。
+        .is("deleted_at", null)
         .ilike("code", escapeLikePattern(code))
       if (clashErr) throw new Error(`PATCH /projects/${scope.project.id}/code (clash): ${clashErr.message}`)
       if ((clash ?? []).some((row) => sameCodeIgnoreCase(row.code as string | null, code))) {
@@ -1771,6 +1789,87 @@ projectsRouter.patch(
         context: "手動調整專案序號",
       })
       res.status(200).json({ id: data.id, code: data.code })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// ── DELETE /projects/:id — 刪除打錯（key 錯）的空殼專案（軟刪除，2026-11-12） ─────
+/**
+ * body：{ confirmCode }＝該專案序號（沒有序號的案用專案名稱），不分大小寫、去頭尾空白。
+ * 權限：只有老闆／platform_admin（isBossOrPlatformAdmin，與分潤寫入權同一條；非在職一律否）→ 其餘 403。
+ * 擋刪：有任何實質資料（期程款已請款／開票／入帳、獎金分潤、工時、請款放款、文件、已簽約合約…，見
+ *   services/project-delete.ts）→ 409 project_has_data，附 blockers 與可直接顯示的 message（建議改用封存）。
+ * 成功：projects.deleted_at／deleted_by_emp_id，空的期程／未簽約合約／無發票副委託一併軟刪除；
+ *   audit_all 觸發器自動記每一列的 UPDATE，另寫一筆帶操作者與摘要的 audit_logs。序號立即釋放可重用。
+ * 已刪除或別租戶的專案 → 404（loadScope 已排除）。
+ */
+projectsRouter.delete(
+  "/projects/:id",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    try {
+      const scope = await loadScope(tenantId, userId, req.params.id as string)
+      if (!scope.ok) {
+        res.status(scope.status).json({ error: scope.error })
+        return
+      }
+      if (!scope.bonusEdit.canEdit) {
+        res.status(403).json({ error: "project_delete_forbidden", message: "只有老闆或平台管理員可以刪除專案" })
+        return
+      }
+      const project = scope.project
+      if (!confirmDeleteMatches((req.body as { confirmCode?: unknown } | undefined)?.confirmCode, project)) {
+        res.status(400).json({ error: "confirm_mismatch", message: "輸入的序號與此專案不符" })
+        return
+      }
+      const plan = await planProjectDelete(tenantId, project.id)
+      if (plan.blockers.length > 0) {
+        res.status(409).json({ error: "project_has_data", message: deleteBlockerMessage(plan.blockers), blockers: plan.blockers })
+        return
+      }
+      const deleted = await softDeleteProject(tenantId, project.id, scope.self.id, plan.cascade)
+      if (!deleted) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      await writeAuditLog({
+        tenantId,
+        tableName: "projects",
+        recordId: project.id,
+        action: "UPDATE",
+        oldRow: { code: project.code, name: project.name, deleted_at: null },
+        newRow: {
+          code: project.code,
+          name: project.name,
+          deleted: true,
+          cascade: {
+            billings: plan.cascade.billings.length,
+            contracts: plan.cascade.contracts.length,
+            subcontracts: plan.cascade.subcontracts.length,
+          },
+        },
+        actorEmpId: scope.self.id,
+        context: "刪除專案（軟刪除）",
+      })
+      res.status(200).json({
+        id: project.id,
+        code: project.code,
+        deleted: true,
+        cascade: {
+          billings: plan.cascade.billings.length,
+          contracts: plan.cascade.contracts.length,
+          subcontracts: plan.cascade.subcontracts.length,
+        },
+      })
     } catch (err) {
       next(err)
     }
@@ -2402,7 +2501,7 @@ projectsRouter.get(
       const { data, error } = await supabaseAdmin
         .from("project_members")
         .select(
-          "id, project_id, role_in_project, share_pct, share_amount, projects(name, status, share_mode, bonus_pool)",
+          "id, project_id, role_in_project, share_pct, share_amount, projects(name, status, share_mode, bonus_pool, deleted_at)",
         )
         .eq("tenant_id", tenantId)
         .eq("employee_id", self.id)
@@ -2411,14 +2510,18 @@ projectsRouter.get(
         next(new Error(`GET /my/project-shares: ${error.message}`))
         return
       }
+      // 已刪除（軟刪除）的專案：成員列留在 DB，但不出現在「我的專案」。
+      const memberRows = (data ?? []).filter(
+        (m) => !rel1<{ deleted_at?: string | null }>((m as { projects: unknown }).projects)?.deleted_at,
+      )
       const estimates = await estimatesByProject(
         tenantId,
-        [...new Set((data ?? []).map((m) => m.project_id as string))],
+        [...new Set(memberRows.map((m) => m.project_id as string))],
         "GET /my/project-shares",
       )
       // 專案毛利只有老闆／platform_admin／授權 HR 看得到（業主 2026-10-26）；一般成員（含經理／主辦／部門主管）不回。
       const canSeeProfit = await canSeeProjectProfit(tenantId, self, await loadProjectBossEmpId(tenantId))
-      const shares = (data ?? []).map((m) => {
+      const shares = memberRows.map((m) => {
         const est = estimates?.get(m.project_id as string)
         const mine = memberEstimateOf(est, self.id)
         const proj = rel1<{ name: string; status: string; share_mode: string; bonus_pool: string | null }>(

@@ -646,6 +646,7 @@ export async function buildAnnualTable(
     .select(ANNUAL_PROJECT_COLS)
     .eq("tenant_id", tenantId)
     .eq("fiscal_year", year)
+    .is("deleted_at", null)
   if (!opts.includeArchived) q = q.is("archived_at", null)
   const { data: projData, error: projErr } = await q
   if (projErr) throw new Error(`buildAnnualTable (projects): ${projErr.message}`)
@@ -680,7 +681,7 @@ export async function buildAnnualRows(
     batch<{ id: string; name: string }>("clients", "id, name", tenantId, uniq(projects.map((p) => p.client_id)), "id", false),
     batch<{ id: string; name: string }>("employees", "id, name", tenantId, uniq(projects.map((p) => p.lead_emp_id)), "id", false),
     // C2 防呆用：哪些母案底下掛了子案（子案可能在別的歸屬年度或已封存，所以另查，不從本年的列推）。
-    batch<{ parent_project_id: string }>("projects", "parent_project_id", tenantId, ids, "parent_project_id", false),
+    batch<{ parent_project_id: string }>("projects", "parent_project_id", tenantId, ids, "parent_project_id", true),
   ])
   const clientName = new Map(clients.map((c) => [c.id, c.name]))
   const empName = new Map(employees.map((e) => [e.id, e.name]))
@@ -938,6 +939,7 @@ export async function buildReceivables(
     .from("projects")
     .select("id, name, code, client_id, archived_at")
     .eq("tenant_id", tenantId)
+    .is("deleted_at", null)
   if (projErr) throw new Error(`buildReceivables (projects): ${projErr.message}`)
   const projects = ((projData ?? []) as Array<{ id: string; name: string; code: string | null; client_id: string | null; archived_at: string | null }>)
     .filter((p) => opts.projectIds === null || opts.projectIds.has(p.id))

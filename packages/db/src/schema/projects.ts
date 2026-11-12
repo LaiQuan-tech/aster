@@ -139,12 +139,20 @@ export const projects = pgTable(
      */
     openedOn: date("opened_on"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * 軟刪除（2026-11-12，migrations/0095 ＝ sql/0085）：打錯（key 錯）的空殼專案由老闆／platform_admin 刪除
+     * （DELETE /projects/:id）。非 null＝已刪除，API 所有讀取一律排除；序號唯一索引只對未刪除的列生效，刪掉的號可重用。
+     */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    /** 刪除者員工 id。DB 端 FK → employees(id) ON DELETE SET NULL（這裡不宣告 references，比照 leadEmpId 避免循環 import）。 */
+    deletedByEmpId: uuid("deleted_by_emp_id"),
   },
   (table) => ({
-    tenantCodeUnique: uniqueIndex("projects_tenant_code_uq").on(table.tenantId, table.code),
+    // 2026-11-12 起兩個序號唯一索引都只對未刪除的列生效（migrations/0095）。
+    tenantCodeUnique: uniqueIndex("projects_tenant_code_uq").on(table.tenantId, table.code).where(sql`${table.deletedAt} is null`),
     // 2026-11-12 專案序號可手動調整：同租戶序號「大小寫不敏感」唯一（migrations/0094 ＝ sql/0084）。
     // 原本的 projects_tenant_code_uq 保留（大小寫敏感，被這個涵蓋，但不拿掉以免動到既有依賴）。
-    tenantCodeCiUnique: uniqueIndex("projects_tenant_code_ci_uq").on(table.tenantId, sql`lower(${table.code})`),
+    tenantCodeCiUnique: uniqueIndex("projects_tenant_code_ci_uq").on(table.tenantId, sql`lower(${table.code})`).where(sql`${table.deletedAt} is null`),
     // 承接公司（companyId）的查詢用。正式庫已由 sql/0046（migrations/0056，IF NOT EXISTS）建好，
     // 這裡只補宣告讓 schema 與實際 DB 一致，不需要新遷移。
     tenantCompanyIdx: index("projects_tenant_company_idx").on(table.tenantId, table.companyId),
