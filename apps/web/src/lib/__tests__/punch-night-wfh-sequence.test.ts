@@ -6,6 +6,8 @@ import {
   precheckForcedPunch,
   precheckPunch,
   punchCardActions,
+  PUNCH_FIX_WAIT_MS,
+  PUNCH_LOCATING_LABEL,
   shouldApplyPolledPunches,
   summarizePunches,
   type PunchCardUi,
@@ -171,6 +173,22 @@ describe("punchCardActions：除了送出中，永遠有可按的打卡鈕", () 
     expect(punchCardActions(working, { ...READY, punching: true })).toEqual([
       { key: "next", label: "打卡中…", force: null, disabled: true, variant: "primary" },
     ]);
+  });
+
+  it("送出中且還在等定位 →「定位中…」disabled（定位結束回到「打卡中…」）", () => {
+    expect(punchCardActions(working, { ...READY, punching: true, locating: true })).toEqual([
+      { key: "next", label: PUNCH_LOCATING_LABEL, force: null, disabled: true, variant: "primary" },
+    ]);
+    expect(PUNCH_LOCATING_LABEL).toBe("定位中…");
+    expect(punchCardActions(working, { ...READY, punching: true, locating: false })[0].label).toBe("打卡中…");
+  });
+
+  it("locating 只在送出中有意義：沒在送出時照常顯示下一步", () => {
+    expect(punchCardActions(working, { ...READY, locating: true })[0]).toMatchObject({ label: "下班打卡", disabled: false });
+  });
+
+  it("按下打卡最多等定位 8 秒（2026-11-15 業主決定，原 3 秒）", () => {
+    expect(PUNCH_FIX_WAIT_MS).toBe(8_000);
   });
 
   it("載入失敗／逾時（以前：唯一的按鈕 disabled，只剩小小的「重試」）→「上班打卡」「下班打卡」兩顆都可按", () => {

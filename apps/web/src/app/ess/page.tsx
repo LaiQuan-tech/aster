@@ -34,6 +34,7 @@ import {
   needsReInConfirm,
   precheckPunch,
   punchCardActions,
+  PUNCH_FIX_WAIT_MS,
   PUNCH_STATE_UNKNOWN_HINT,
   shouldApplyPolledPunches,
   summarizePunches,
@@ -71,7 +72,7 @@ import { DutyTodayCard } from "./_components/DutyTodayCard";
  * 載入順序：`GET /punch/today` 最先且獨立（最多等 10 秒；失敗或逾時 → InlineError＋重試，並顯示「上班打卡」
  * 「下班打卡」兩顆可按的鈕讓員工自己選——2026-10-26 起除了送出中，卡片永遠有可按的打卡鈕，見 punchCardActions）；
  * 公告是加分項，在打卡狀態之後才抓、失敗不影響。GPS 在 mount 時預抓存 ref，
- * 按下時 ≤2 分鐘的定位直接用，否則最多再等 3 秒，沒有就 `source:"web"`——來源不顯示。
+ * 按下時 ≤2 分鐘的定位直接用，否則最多再等 8 秒（等待中按鈕顯示「定位中…」），沒有就 `source:"web"`——來源不顯示。
  *
  * 遲到理由（2026-10-11）：當天第一張上班卡遲到（沒排班的工作日晚於 10:00、有排班晚於班別上班時間）
  * 伺服器回 400 late_reason_required、不寫打卡 → 底部彈出對話框「你今天 HH:MM 上班，超過 10:00
@@ -138,8 +139,7 @@ function geoErrorStatus(err: GeolocationPositionError): GeoStatus {
 
 /** 按下打卡時，ref 裡 ≤2 分鐘的定位直接用，不再等。 */
 const FIX_FRESH_MS = 2 * 60_000;
-/** 沒有新鮮定位時，按下後最多再等這麼久；逾時就以 web 來源送出。 */
-const PUNCH_FIX_WAIT_MS = 3_000;
+/* 沒有新鮮定位時按下後最多再等多久：PUNCH_FIX_WAIT_MS（8 秒，lib/punch-state.ts）。 */
 /**
  * 成功後鎖住按鈕的時間，擋手抖連按。伺服器另有冷卻（預設 1 秒，env PUNCH_COOLDOWN_SECONDS 可調；
  * apps/api/src/services/punch-guard.ts），冷卻內重按回 409 punch_too_soon。
@@ -164,7 +164,7 @@ const PUNCH_POST_TIMEOUT_MS = 20_000;
 /** 抓待簽核補卡單最多等這麼久（跟 `/punch/today` 並行）；逾時就沿用上次的結果，不讓它拖住打卡鈕。 */
 const PENDING_FIX_WAIT_MS = 3_000;
 
-const PREFETCH_OPTS: PositionOptions = { maximumAge: 60_000, timeout: 8_000, enableHighAccuracy: false };
+const PREFETCH_OPTS: PositionOptions = { maximumAge: 60_000, timeout: PUNCH_FIX_WAIT_MS, enableHighAccuracy: false };
 const ON_PUNCH_OPTS: PositionOptions = { maximumAge: FIX_FRESH_MS, timeout: PUNCH_FIX_WAIT_MS, enableHighAccuracy: false };
 
 /**
@@ -361,6 +361,7 @@ function PunchCard({
   loading,
   loadError,
   punching,
+  locating,
   locked,
   punchError,
   notice,
@@ -381,6 +382,8 @@ function PunchCard({
   loading: boolean;
   loadError: string | null;
   punching: boolean;
+  /** 送出中且還在等定位（最多 PUNCH_FIX_WAIT_MS）→ 按鈕顯示「定位中…」。 */
+  locating: boolean;
   locked: boolean;
   punchError: string | null;
   /** 預檢發現狀態變了、沒送出時的提示（不是錯誤，不給重試鈕：要員工看清楚新按鈕再按）。 */
@@ -409,7 +412,7 @@ function PunchCard({
 }) {
   // 按鈕由 punchCardActions 決定（lib/punch-state.ts）：除了送出中，永遠有可按的打卡鈕；上班中第一顆一定是
   // 「下班打卡」；載入失敗／逾時（狀態不明）→「上班打卡」「下班打卡」兩顆都可按。勾選框不影響按鈕。
-  const actions = punchCardActions(summary, { loading, loadFailed: !!loadError, punching, locked });
+  const actions = punchCardActions(summary, { loading, loadFailed: !!loadError, punching, locating, locked });
   // 待核准的上班補卡撐起的「上班中」：statusLabel 已是「上班中・補卡待核准（08:52）」，不再接「· 自 HH:MM」。
   const baseStatus = loading || loadError
     ? " "
@@ -688,6 +691,8 @@ export default function EssHome() {
   const [loading, setLoading, loadingRef] = useStateRef(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [punching, setPunching, punchingRef] = useStateRef(false);
+  /** 打卡送出中、還在等定位（按鈕顯示「定位中…」）。 */
+  const [locating, setLocating] = useState(false);
   const [locked, setLocked, lockedRef] = useStateRef(false);
   const [punchError, setPunchError] = useState<string | null>(null);
   /** 預檢發現狀態變了、沒送出時的提示（下一次按打卡時清掉）。 */
@@ -1050,8 +1055,10 @@ export default function EssHome() {
     setOvertimeNotice(null);
     try {
       const cached = fixRef.current;
+      const needFix = !(cached && Date.now() - cached.at <= FIX_FRESH_MS);
+      if (needFix) setLocating(true);
       const fixPromise: Promise<GeoFix | null> =
-        cached && Date.now() - cached.at <= FIX_FRESH_MS
+        !needFix
           ? Promise.resolve(cached)
           : requestFix(
               ON_PUNCH_OPTS,
@@ -1063,6 +1070,10 @@ export default function EssHome() {
                 geoStatusRef.current = status;
               },
             );
+      // requestFix 絕不 reject；定位一結束（成功、失敗或 8 秒逾時）按鈕就從「定位中…」回到「打卡中…」。
+      if (needFix) void fixPromise.then(() => {
+        if (activeRef.current) setLocating(false);
+      });
       // 打卡前確認最新狀態：跟定位並行抓 /punch/today（最多等 3 秒）。畫面過期（例如主管剛核准補卡、
       // 隔夜的「上班中」）就不送，畫面換成最新狀態＋提示＋短暫鎖鈕；抓不到（null）照畫面上的種類送，不擋打卡
       // （畫面「上班中」而上班卡已超過 16 小時例外：重新載入）。
@@ -1158,7 +1169,10 @@ export default function EssHome() {
         setPunchError(punchErrorMessage(err, "打卡失敗，請再試一次"));
       }
     } finally {
-      if (activeRef.current) setPunching(false);
+      if (activeRef.current) {
+        setLocating(false);
+        setPunching(false);
+      }
     }
   }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch, wfhEnabled, wfh, dinnerPrompt, dinner, loadPunch, lockFor, settleFailedAttempt]);
 
@@ -1259,6 +1273,7 @@ export default function EssHome() {
         loading={loading}
         loadError={loadError}
         punching={punching}
+        locating={locating}
         locked={locked}
         punchError={punchError}
         notice={punchNotice}

@@ -337,6 +337,11 @@ export interface PunchCardUi {
   loadFailed: boolean;
   /** 打卡送出中（唯一允許「沒有可按的打卡鈕」的狀態）。 */
   punching: boolean;
+  /**
+   * 送出中且正在等定位（2026-11-15：按下後最多等 8 秒，見 app/ess/page.tsx PUNCH_FIX_WAIT_MS）→ 按鈕顯示「定位中…」，
+   * 讓員工知道在等 GPS、不是當掉；定位結束後回到「打卡中…」。只在 punching 時有意義。
+   */
+  locating?: boolean;
   /** 成功或預檢中止後的短暫鎖定（2～3 秒，擋連點）。 */
   locked: boolean;
 }
@@ -355,13 +360,21 @@ export interface PunchCardAction {
 
 /** 跨日上班中時給「昨天其實忘了打下班卡」的出口。 */
 export const CARRY_OVER_PUNCH_IN_LABEL = "昨天已下班（忘了打卡）？改打上班卡";
+/**
+ * 按下打卡時沒有新鮮定位（≤2 分鐘）就最多再等這麼久；逾時以 web 來源送出（geo_status＝timeout）。
+ * 2026-11-15 業主決定從 3 秒拉長到 8 秒，減少「定位逾時」；等待中按鈕顯示「定位中…」（PUNCH_LOCATING_LABEL）。
+ * 預抓（app/ess/page.tsx PREFETCH_OPTS）的瀏覽器 timeout 也用這個值。
+ */
+export const PUNCH_FIX_WAIT_MS = 8_000;
+/** 送出中、還在等定位時的按鈕文案。 */
+export const PUNCH_LOCATING_LABEL = "定位中…";
 /** 狀態不明（載入失敗／逾時）時的說明。 */
 export const PUNCH_STATE_UNKNOWN_HINT = "目前讀不到今天的打卡狀態，請依實際情況選擇上班或下班";
 
 /**
  * 打卡卡片要畫哪些按鈕（2026-10-26）。契約：**除了送出中（punching），永遠有一顆可按（或幾秒內會解鎖）的打卡鈕**；
  * 上班中（phase working）時第一顆一定是「下班打卡」。
- *   - punching → 一顆「打卡中…」disabled。
+ *   - punching → 一顆「打卡中…」disabled（還在等定位時是「定位中…」）。
  *   - loadFailed（載入失敗／逾時，狀態不明）→ 「上班打卡」「下班打卡」兩顆都可按（員工自己選；送出前仍會再抓一次
  *     最新狀態比對，抓得到而跟選的不同就不送、改顯示正確的按鈕）。以前這時候唯一的按鈕是 disabled，只剩小小的「重試」。
  *   - loading（首次載入，有逾時上限）→ 一顆「載入中…」disabled。
@@ -372,7 +385,10 @@ export function punchCardActions(
   summary: Pick<PunchSummary, "phase" | "nextLabel" | "workingCarriedOver">,
   ui: PunchCardUi,
 ): PunchCardAction[] {
-  if (ui.punching) return [{ key: "next", label: "打卡中…", force: null, disabled: true, variant: "primary" }];
+  if (ui.punching) {
+    const label = ui.locating ? PUNCH_LOCATING_LABEL : "打卡中…";
+    return [{ key: "next", label, force: null, disabled: true, variant: "primary" }];
+  }
   if (ui.loadFailed) {
     return [
       { key: "in", label: PHASE_COPY.none.nextLabel, force: "in", disabled: ui.locked, variant: "primary" },
