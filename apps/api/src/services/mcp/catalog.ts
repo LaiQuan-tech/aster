@@ -122,7 +122,7 @@ const SPECIFIC: Record<string, string> = {
   "POST /requests/:id/reject": "駁回申請單（body: comment?）",
   "POST /requests/batch-decision": "批次簽核（body: ids[], action, comment?）",
   "PUT /projects/:id/subcontracts":
-    "副委託整批（body: subcontracts[], deleteReason?）：未列出的既有列會被軟刪（需 deleteReason）；既有列沒帶的欄位保留原值、帶 null 清空；amount 必填；改廠商名稱需同時給 vendorId",
+    "副委託整批（body: subcontracts[], deleteReason?）：未列出的既有列會被軟刪（需 deleteReason）；既有列沒帶的欄位保留原值、帶 null 清空；amount 必填。換廠商須同時送新廠商的 vendorId 與它在名冊上的名稱；非登錄廠商送 vendorId: null + vendorName。沒帶 kind 時，事務所列不可送發票欄位、其他列不可送代扣日期（回 400 field_not_applicable）。",
   "GET /punch": "打卡紀錄；query: employeeId, deptId, from, to, type, source",
   "GET /attendance/punch-overview": "打卡當日總覽／週表；query: date 或 from/to, deptId, employeeId",
   "GET /attendance/anomalies": "出勤異常；query: from, to",

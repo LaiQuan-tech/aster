@@ -300,3 +300,189 @@ describe("副委託整批 PUT：更新既有列只寫有帶的欄位", () => {
     })
   })
 })
+
+describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一家（2026-11-16）", () => {
+  const addVendor2 = () =>
+    fake.db.vendors!.push({ id: VENDOR_ID_2, tenant_id: TENANT_ID, name: "測試乙廠商", deleted_at: null })
+
+  it("vendorId 不變、改成別的名稱 → 400 vendor_name_mismatch，0 寫入", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID, vendorName: "測試乙廠商" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "vendor_name_mismatch", id: SUB_FIRM, vendorId: VENDOR_ID })
+    expect(res.body.message).toBe("廠商名稱與登錄廠商不符，請使用名冊上的名稱或改為非登錄廠商（vendorId: null）")
+    expect(fake.writes).toHaveLength(0)
+    expect(rowOf(SUB_FIRM)).toEqual(firmRow())
+  })
+
+  it("換 vendorId 但配舊名 → 400 vendor_name_mismatch", async () => {
+    addVendor2()
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試事務所" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "vendor_name_mismatch", id: SUB_FIRM })
+    expect(fake.writes).toHaveLength(0)
+  })
+
+  it("換 vendorId 配名冊名稱（前後空白不計）→ 200", async () => {
+    addVendor2()
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: " 測試乙廠商  " },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: VENDOR_ID_2, vendor_name: "測試乙廠商" })
+  })
+
+  it("新建列 vendorId＋錯名 → 400；vendorId＋正確名 → 200", async () => {
+    addVendor2()
+    const bad = await put([
+      { id: SUB_FIRM, amount: 100000 },
+      { id: SUB_PLAIN, amount: 30000 },
+      { amount: 5000, vendorId: VENDOR_ID_2, vendorName: "測試事務所" },
+    ])
+    expect(bad.status).toBe(400)
+    expect(bad.body).toMatchObject({ error: "vendor_name_mismatch", id: null, vendorId: VENDOR_ID_2 })
+    expect(fake.writes).toHaveLength(0)
+
+    const ok = await put([
+      { id: SUB_FIRM, amount: 100000 },
+      { id: SUB_PLAIN, amount: 30000 },
+      { amount: 5000, vendorId: VENDOR_ID_2, vendorName: "測試乙廠商" },
+    ])
+    expect(ok.status).toBe(200)
+    const ins = fake.writes.filter((w) => w.table === "project_subcontracts" && w.action === "insert")
+    expect(ins[0].payload).toMatchObject({ vendor_id: VENDOR_ID_2, vendor_name: "測試乙廠商" })
+  })
+
+  it("新建列 vendorId 但沒帶 vendorName → 400 vendor_name_mismatch", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000 },
+      { id: SUB_PLAIN, amount: 30000 },
+      { amount: 5000, vendorId: VENDOR_ID },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "vendor_name_mismatch" })
+    expect(fake.writes).toHaveLength(0)
+  })
+
+  it("vendorId: null＋任意名稱（既有列與新建列）→ 200", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試隨便一家" },
+      { id: SUB_PLAIN, amount: 30000, vendorId: null, vendorName: "測試另一個名字" },
+      { amount: 5000, vendorId: null, vendorName: "測試新的臨時廠商" },
+    ])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: null, vendor_name: "測試隨便一家" })
+    expect(rowOf(SUB_PLAIN)).toMatchObject({ vendor_id: null, vendor_name: "測試另一個名字" })
+  })
+
+  it("vendorId 不在本租戶名冊（或已刪除）→ 400 invalid_vendor", async () => {
+    fake.db.vendors!.push({ id: VENDOR_ID_2, tenant_id: TENANT_ID, name: "測試乙廠商", deleted_at: "2026-11-01T00:00:00.000Z" })
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試乙廠商" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "invalid_vendor", vendorId: VENDOR_ID_2 })
+    expect(fake.writes).toHaveLength(0)
+  })
+
+  it("廠商後來在名冊改名、整列原樣重存（副委託卡完整 payload）→ 200，不比對", async () => {
+    fake.db.vendors![0].name = "測試事務所（新名）"
+    const res = await put([
+      {
+        id: SUB_FIRM, kind: "firm", discipline: "測試專業別", vendorId: VENDOR_ID, vendorName: "測試事務所",
+        contact: "測試聯絡人", item: "測試項目", amount: 110000, billingBasis: "測試計費依據", orderType: "contract",
+        contractId: CONTRACT_ID, sortOrder: 0, withholdingRate: 0.1, withholdingThreshold: 20000,
+        withholdingDate: "2026-11-01", invoiceNo: null, invoiceDate: null, note: "測試備註",
+      },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: VENDOR_ID, vendor_name: "測試事務所", amount: 110000 })
+  })
+
+  it("大寫 uuid 視為同一家：不誤判為換廠商、寫入轉小寫", async () => {
+    fake.db.vendors![0].name = "測試事務所（新名）"
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID.toUpperCase(), vendorName: "測試事務所" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: VENDOR_ID, vendor_name: "測試事務所" })
+  })
+
+  it("大寫 uuid 換廠商配名冊名 → 200；只送大寫 vendorId 不送名稱且未換 → 不擋", async () => {
+    addVendor2()
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID.toUpperCase() },
+      { id: SUB_PLAIN, amount: 30000, vendorId: VENDOR_ID_2.toUpperCase(), vendorName: "測試乙廠商" },
+    ])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: VENDOR_ID })
+    expect(rowOf(SUB_PLAIN)).toMatchObject({ vendor_id: VENDOR_ID_2, vendor_name: "測試乙廠商" })
+  })
+
+  it("整批第二列被擋 → 第一列未更新、未列出的列未軟刪、期款未重算（0 寫入）", async () => {
+    const SUB_EXTRA = "dddddddd-0000-4000-8000-0000000000b3"
+    fake.db.project_subcontracts!.push({ ...plainRow(), id: SUB_EXTRA, vendor_name: "測試丙廠商", sort_order: 2 })
+    fake.db.project_subcontract_payments = [
+      {
+        id: "dddddddd-0000-4000-8000-0000000000e1", tenant_id: TENANT_ID, subcontract_id: SUB_PLAIN, installment_no: 1,
+        percentage: 100, amount: 30000, withheld_amount: 0, paid_on: null, paid_amount: null, deleted_at: null,
+      },
+    ]
+    const res = await request(app)
+      .put(`/projects/${PROJECT_ID}/subcontracts`)
+      .set("Authorization", `Bearer ${HR_TOKEN}`)
+      .send({
+        deleteReason: "測試移除理由",
+        subcontracts: [
+          { id: SUB_PLAIN, amount: 45000 },
+          { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID, vendorName: "測試乙廠商" },
+        ],
+      })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "vendor_name_mismatch", id: SUB_FIRM })
+    expect(fake.writes).toHaveLength(0)
+    expect(rowOf(SUB_PLAIN)).toEqual(plainRow())
+    expect(rowOf(SUB_EXTRA)).toMatchObject({ deleted_at: null })
+    expect(fake.db.project_subcontract_payments[0]).toMatchObject({ amount: 30000 })
+  })
+
+  it("申請單整張表：發包單位改成名冊上的名稱（前端依名稱配到 vendorId）→ 200", async () => {
+    addVendor2()
+    // project-application-sheet-save.ts：vendorName 經 textOrNull（trim）後與 ctx.vendors 的 name 完全相同才配 vendorId。
+    const res = await put([
+      {
+        id: SUB_FIRM, kind: "firm", discipline: "測試專業別", vendorId: VENDOR_ID_2, vendorName: "測試乙廠商",
+        contact: "測試聯絡人", item: "測試項目", amount: 100000, billingBasis: "測試計費依據", orderType: "contract",
+        contractId: CONTRACT_ID, withholdingRate: 0.1, withholdingThreshold: 20000, sortOrder: 0, note: "測試備註",
+      },
+      {
+        id: SUB_PLAIN, kind: "subcontract", discipline: null, vendorId: null, vendorName: "測試名冊外廠商",
+        contact: null, item: null, amount: 30000, billingBasis: null, orderType: null,
+        contractId: null, withholdingRate: 0, withholdingThreshold: 20000, sortOrder: 1, note: "測試備註二",
+      },
+    ])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: VENDOR_ID_2, vendor_name: "測試乙廠商" })
+    expect(rowOf(SUB_PLAIN)).toMatchObject({ vendor_id: null, vendor_name: "測試名冊外廠商" })
+  })
+
+  it("新建列沒帶 kind 送代扣日期 → 400 field_not_applicable（業主接受的現狀）", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000 },
+      { id: SUB_PLAIN, amount: 30000 },
+      { amount: 5000, withholdingDate: "2026-11-20" },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "field_not_applicable", id: null, field: "withholdingDate" })
+    expect(fake.writes).toHaveLength(0)
+  })
+})

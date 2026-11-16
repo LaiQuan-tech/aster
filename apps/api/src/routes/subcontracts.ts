@@ -264,6 +264,19 @@ async function idsExist(table: string, tenantId: string, ids: string[], extra?: 
   return new Set((data ?? []).map((r: { id: string }) => r.id))
 }
 
+/** 本租戶名冊（未刪）裡這批廠商的名稱：id（小寫）→ name。不在名冊的不會出現在 Map 裡。 */
+async function vendorNamesOf(tenantId: string, ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map()
+  const { data, error } = await supabaseAdmin
+    .from("vendors")
+    .select("id, name")
+    .eq("tenant_id", tenantId)
+    .in("id", ids)
+    .is("deleted_at", null)
+  if (error) throw new Error(`vendorNamesOf: ${error.message}`)
+  return new Map((data ?? []).map((r: { id: string; name: string | null }) => [r.id.toLowerCase(), r.name ?? ""]))
+}
+
 /**
  * 這批公司 id 裡屬於本租戶的有哪些、各自是否啟用（停用的不能被新選成期款的付款公司／收據抬頭）。
  * 缺 `is_active` 一律當啟用。
@@ -378,7 +391,10 @@ subcontractsRouter.put(
         res.status(403).json({ error: "forbidden" })
         return
       }
-      const payload = parsed.data.subcontracts
+      // vendorId 大小寫不敏感（2026-11-16）：uuid 一律轉小寫再比對／寫入，大寫 uuid 不會被誤判為「換廠商」或查無此廠商。
+      const payload = parsed.data.subcontracts.map((p) =>
+        typeof p.vendorId === "string" ? { ...p, vendorId: p.vendorId.toLowerCase() } : p,
+      )
       const extrasAvailable = await subExtrasAvailable()
       if (!extrasAvailable && payload.some((p) => p.kind === "firm")) {
         res.status(409).json({ error: "migration_required", feature: "subcontract_firm" })
@@ -391,7 +407,7 @@ subcontractsRouter.put(
       const vendorIds = [...new Set(payload.map((p) => p.vendorId).filter((v): v is string => !!v))]
       const contractIds = [...new Set(payload.map((p) => p.contractId).filter((v): v is string => !!v))]
       const [vendors, contracts] = await Promise.all([
-        idsExist("vendors", tenantId, vendorIds, (q) => q.is("deleted_at", null)),
+        vendorNamesOf(tenantId, vendorIds),
         idsExist("contracts", tenantId, contractIds, (q) => q.eq("project_id", projectId).is("deleted_at", null)),
       ])
       for (const p of payload) {
@@ -411,6 +427,7 @@ subcontractsRouter.put(
         // 只送 vendorName 會變成「畫面顯示新廠商、vendor_id 仍是舊廠商」——應付清單依 vendor_id 分組、
         // 放款單從 vendor_id 帶銀行帳號，錢會匯給舊廠商。反之只送 vendorId 也會「顯示舊名快照、匯給新廠商」。
         const prev = p.id ? existingById.get(p.id) : undefined
+        const prevVendorId = prev?.vendor_id ? prev.vendor_id.toLowerCase() : null
         if (prev) {
           const sameName = (p.vendorName ?? "").trim() === (prev.vendor_name ?? "").trim()
           if (p.vendorName !== undefined && p.vendorId === undefined && !sameName) {
@@ -421,11 +438,32 @@ subcontractsRouter.put(
             })
             return
           }
-          if (p.vendorId !== undefined && p.vendorId !== null && p.vendorName === undefined && p.vendorId !== prev.vendor_id) {
+          if (p.vendorId !== undefined && p.vendorId !== null && p.vendorName === undefined && p.vendorId !== prevVendorId) {
             res.status(400).json({
               error: "vendor_name_required",
               id: p.id,
               message: "修改廠商（vendorId）時請一併提供 vendorName，避免顯示名稱與付款對象不一致",
+            })
+            return
+          }
+        }
+        // 名稱須是名冊上的名稱（2026-11-16）：放款單名稱帶副委託存的 vendor_name、銀行帳號依 vendor_id 從名冊帶，
+        // {vendorId: A, vendorName: 乙} 會「顯示乙、匯給甲」。最終 vendor_id 非 null 且這列廠商有變動
+        // （新建列一律算變動；既有列 vendorId 或 vendorName 與 DB 不同）→ vendorName（trim）必須等於名冊名稱（trim）。
+        // 未變動的既有列不比（廠商後來在名冊改名、整列原樣重存不該被擋）。
+        if (p.vendorId) {
+          const finalName = p.vendorName !== undefined ? p.vendorName : prev ? prev.vendor_name : null
+          const changed =
+            !prev ||
+            p.vendorId !== prevVendorId ||
+            (p.vendorName !== undefined && (p.vendorName ?? "").trim() !== (prev.vendor_name ?? "").trim())
+          const rosterName = (vendors.get(p.vendorId) ?? "").trim()
+          if (changed && (finalName ?? "").trim() !== rosterName) {
+            res.status(400).json({
+              error: "vendor_name_mismatch",
+              id: p.id ?? null,
+              vendorId: p.vendorId,
+              message: "廠商名稱與登錄廠商不符，請使用名冊上的名稱或改為非登錄廠商（vendorId: null）",
             })
             return
           }
