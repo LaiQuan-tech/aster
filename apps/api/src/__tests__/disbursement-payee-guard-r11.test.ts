@@ -19,7 +19,7 @@ vi.mock("../lib/tenant-tz.js", () => ({ getTenantTimezone: async () => "Asia/Tai
 import { disbursementsRouter } from "../routes/disbursements.js"
 import { vendorsRouter } from "../routes/vendors.js"
 import { subcontractsRouter } from "../routes/subcontracts.js"
-import { buildRosterKeyIndex, compareRosterKeySets, exactNameKey, rosterKeyMatches, rosterVendorKeys } from "../lib/payee-name.js"
+import { buildRosterKeyIndex, compareRosterKeySets, exactNameKey, invalidNameMessage, rosterKeyMatches, rosterVendorKeys } from "../lib/payee-name.js"
 import { TW_COUNTIES, TW_TOWNSHIPS } from "../lib/tw-places.js"
 import { resetDisbursementApprovalProbe } from "../services/disbursement-approval.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
@@ -102,8 +102,8 @@ describe("收尾輪 4：F2 反方向（新名稱＝名冊核心／簡稱＋允�
     expect(relation("測試甲乙企業有限公司", "甲乙工程行", "甲乙")).toBe("similar")
     expect(relation("測試甲乙企業有限公司", "甲乙丙", "甲乙")).toBe("none")
   })
-  it("名冊核心不是新名稱（例：名冊長名去後綴後仍含地名段）→ 不相近；全家／全家便利商店仍不相近", () => {
-    expect(relation("大同行台中營業所", "大同")).toBe("none")
+  it("名冊長名前後的地名／營業所／型態字可反覆剝除（最後收尾輪）；全家／全家便利商店仍不相近", () => {
+    expect(relation("大同行台中營業所", "大同")).toBe("similar")
     expect(relation("全家便利商店", "全家")).toBe("none")
     expect(relation("全家", "全家便利商店")).toBe("none")
   })
@@ -111,8 +111,9 @@ describe("收尾輪 4：F2 反方向（新名稱＝名冊核心／簡稱＋允�
 
 describe("收尾輪 5：英文詞邊界", () => {
   it("名冊「ABC」不使「Babcock」「ABCTaiwan」相近；「ABC Design」「ABC-Taiwan」「台灣ABC」仍相近", () => {
-    for (const n of ["Babcock", "ABCTaiwan", "XABC", "ABC1"]) expect(relation("ABC", n), n).toBe("none")
-    for (const n of ["ABC Design", "ABC-Taiwan", "台灣ABC", "(台中)ABC"]) expect(relation("ABC", n), n).toBe("similar")
+    for (const n of ["Babcock", "XABC", "ABC1"]) expect(relation("ABC", n), n).toBe("none")
+    // 最後收尾輪：黏寫的英文附加詞（ABCTaiwan）也算詞邊界
+    for (const n of ["ABC Design", "ABC-Taiwan", "台灣ABC", "(台中)ABC", "ABCTaiwan"]) expect(relation("ABC", n), n).toBe("similar")
   })
   it("較長的英文名稱包含也要詞邊界：名冊「Babcon Ltd」不使「Babconite」相近；「Babcon Taiwan」相近", () => {
     expect(relation("Babcon Ltd", "Babconite")).toBe("none")
@@ -131,6 +132,88 @@ describe("收尾輪 6：F4 行／社／號＋常見詞", () => {
     for (const [roster, name] of [["大同行", "大同行 台中"], ["大同行", "大同行企業有限公司"], ["全聯社", "全聯社台北門市"]] as const) {
       expect(relation(roster, name), `${roster} ← ${name}`).toBe("similar")
     }
+  })
+})
+
+describe("最後收尾輪 1：獨立附加符號不進 exact；私用區字元拒收", () => {
+  it("˙ ゛ ゜ ´ ¨ ¯ ¸ ˘ ˚ ˛ ˜ ˝ 不同的名稱不得為 exact（相近可）", () => {
+    const pairs: Array<[string, string]> = [
+      ["測試˙行", "測試行"], ["王˙明", "王明"], ["カ゛", "カ"], ["さ゜", "さ"], ["Cafe´", "Cafe"],
+      ["測試¨行", "測試行"], ["測試¯行", "測試行"], ["測試¸行", "測試行"], ["測試˘行", "測試行"], ["測試˚行", "測試行"],
+      ["測試˛行", "測試行"], ["測試˜行", "測試行"], ["測試˝行", "測試行"], ["測試´行", "測試¨行"], ["カ゛", "カ゜"],
+    ]
+    for (const [a, b] of pairs) {
+      expect(exactNameKey(a), `${a}／${b}`).not.toBe(exactNameKey(b))
+      for (const [x, y] of [[a, b], [b, a]] as const) {
+        expect(relation(x, y), `${x} ← ${y}`).not.toBe("exact")
+        expect(rosterRelation(x, y), `名冊 ${x} ← ${y}`).not.toBe("exact")
+      }
+    }
+    for (const [a, b] of [["測試行", "測試˙行"], ["王明", "王˙明"], ["カ", "カ゛"], ["さ", "さ゜"], ["Cafe", "Cafe´"]] as const) {
+      expect(relation(a, b), `${a} ← ${b}`).toBe("similar")
+    }
+    // 完全相同仍硬擋
+    expect(relation("測試˙行", "測試˙行")).toBe("exact")
+    expect(relation("Cafe´", " cafe´ ")).toBe("exact")
+  })
+  it("名稱含私用區字元 → invalidNameMessage 拒收；佔位字元不會與附加符號／™ 撞在一起", () => {
+    expect(invalidNameMessage("測試\uE200行")).not.toBeNull()
+    expect(invalidNameMessage("測試\uE122")).not.toBeNull()
+    expect(invalidNameMessage("測試行")).toBeNull()
+    // 舊資料若已含私用區字元：exact key 加跳脫，不與附加符號佔位字元相同
+    expect(exactNameKey("測試\uE200行")).not.toBe(exactNameKey("測試\u00A8行"))
+    expect(exactNameKey("ACME\uE122")).not.toBe(exactNameKey("ACME™"))
+  })
+})
+
+describe("最後收尾輪 2：反方向核心剝除（名冊名稱前後地名／分公司／型態字／產業詞）", () => {
+  it("名冊長名對收款核心 → 相近", () => {
+    const cases: Array<[string, string]> = [
+      ["台中宏碁股份有限公司", "宏碁"], ["宏碁台中股份有限公司", "宏碁"], ["台灣3M股份有限公司", "3M"], ["3M台灣股份有限公司", "3M"],
+      ["3M台灣", "3M"], ["3M台灣股份有限公司", "3M Taiwan"], ["Acer Taiwan Inc.", "Acer"], ["ABC Design Co., Ltd.", "ABC"], ["全聯台中有限公司", "全聯"],
+    ]
+    for (const [roster, name] of cases) {
+      expect(relation(roster, name), `${roster} ← ${name}`).toBe("similar")
+      expect(rosterRelation(roster, name), `名冊 ${roster} ← ${name}`).toBe("similar")
+      expect(rosterRelation(name, roster), `名冊 ${name} ← ${roster}`).toBe("similar")
+    }
+  })
+  it("剝不出來的仍不相近", () => {
+    for (const [roster, name] of [["台中宏碁電子材料", "宏碁"], ["新宏碁股份有限公司", "宏碁"], ["Acerbic Taiwan Inc.", "Acer"], ["全家便利商店", "全家"]] as const) {
+      expect(relation(roster, name), `${roster} ← ${name}`).toBe("none")
+    }
+  })
+})
+
+describe("最後收尾輪 3／4：英文複數、黏寫附加詞", () => {
+  it("複數 s／es → 相近", () => {
+    expect(relation("ABC Design Ltd", "ABC Designs Limited")).toBe("similar")
+    expect(relation("Delta", "Deltas Inc")).toBe("similar")
+    expect(rosterRelation("ABC Design Ltd", "ABC Designs Limited")).toBe("similar")
+  })
+  it("拉丁核心＋黏寫英文附加詞／數字＋廠 → 相近；Babcock、13M、3MX、HPE 不相近", () => {
+    expect(relation("ABC", "ABCTaiwan")).toBe("similar")
+    expect(relation("3M", "3MTaiwan")).toBe("similar")
+    expect(relation("LG", "LGtaiwan")).toBe("similar")
+    expect(relation("3M", "3M2廠")).toBe("similar")
+    expect(relation("ABC", "Babcock")).toBe("none")
+    expect(relation("3M", "13M")).toBe("none")
+    expect(relation("3M", "3MX")).toBe("none")
+    expect(relation("HP", "HPE")).toBe("none")
+  })
+})
+
+describe("最後收尾輪 5：營建工種詞", () => {
+  it("名冊「王明」對工種變體、名冊工種長名對核心 → 相近", () => {
+    for (const n of ["王明水電行", "王明室內裝修", "王明機電", "王明空調工程行", "王明土木包工業", "王明油漆工程行"]) {
+      expect(relation("王明", n), n).toBe("similar")
+      expect(rosterRelation("王明", n), `名冊 ${n}`).toBe("similar")
+    }
+    for (const n of ["王明", "王明工程行"]) expect(relation("王明水電行", n), n).toBe("similar")
+    for (const n of ["大明", "大明裝修"]) expect(relation("大明室內裝修有限公司", n), n).toBe("similar")
+  })
+  it("「材料」不是允許的附加字", () => {
+    expect(relation("王明", "王明材料行")).toBe("none")
   })
 })
 

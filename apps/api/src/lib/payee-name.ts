@@ -22,13 +22,47 @@ const TRADEMARK_RE = /[\u2122\u2120\u2121]/gu
 const TRADEMARK_KEEP: Record<string, string> = { "\u2122": "\uE122", "\u2120": "\uE120", "\u2121": "\uE121" }
 
 /**
+ * 最後收尾輪：獨立附加符號（˙ ¨ ¯ ´ ¸ ˘ ˚ ˛ ˜ ˝ ゛ ゜、希臘／阿拉伯獨立附加符號…）NFKC 會拆成「空白＋組合符號」，
+ * 再被去不可見字元時整個消失（「測試˙行」＝「測試行」）。exact key 在 NFKC 前換成私用區佔位字元保留；相近級別照常去除。
+ * 清單程式化產生：BMP 每個字元，本身不是 \p{M}、NFKC 結果卻含 \p{M}（約 130 個）；佔位字元 U+E200 起依序編號。
+ */
+const SPACING_MARK_KEEP: Map<string, string> = (() => {
+  const map = new Map<string, string>()
+  for (let cp = 0; cp < 0x10000; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue
+    const ch = String.fromCharCode(cp)
+    if (/\p{M}/u.test(ch) || !/\p{M}/u.test(ch.normalize("NFKC"))) continue
+    map.set(ch, String.fromCharCode(0xe200 + map.size))
+  }
+  return map
+})()
+
+/**
+ * 私用區字元（\p{Co}）：輸入一律拒收（invalidNameMessage）；已存在的舊資料在 exact key 前面加跳脫字元 U+F8FF，
+ * 不會與上面的佔位字元（™ → U+E122…、獨立附加符號 → U+E200…）撞在一起；相近級別直接去掉。
+ */
+const PRIVATE_USE_RE = /\p{Co}/gu
+const PRIVATE_USE_CHAR_RE = /^\p{Co}$/u
+const PRIVATE_USE_ESCAPE = "\uF8FF"
+
+/** exact key 的 NFKC 前處理：私用區字元加跳脫、™ ℠ ℡ 與獨立附加符號換成佔位字元。 */
+function protectForExact(s: string): string {
+  let out = ""
+  for (const ch of s) {
+    if (PRIVATE_USE_CHAR_RE.test(ch)) out += PRIVATE_USE_ESCAPE + ch
+    else out += TRADEMARK_KEEP[ch] ?? SPACING_MARK_KEEP.get(ch) ?? ch
+  }
+  return out
+}
+
+/**
  * 前處理（尚未去空白／不可見字元，供詞邊界判斷）：NFKC → 小寫 → 臺→台。
  * annotations＝true（相近級別）：NFKC 前後各去一次附加字（注音、聲調、丶、々、ー、™…）；
  * annotations＝false（exact 級別）：附加字一律保留（收尾輪：「ㄅㄆㄇ工作室」≠「ㄉㄊㄋ工作室」、「佐々木」≠「佐木」）。
  */
 function normalizeRaw(name: string | null | undefined, annotations: boolean): string {
   let s = String(name ?? "")
-  s = annotations ? s.replace(ANNOTATION_STRIP_RE, "") : s.replace(TRADEMARK_RE, (c) => TRADEMARK_KEEP[c] ?? c)
+  s = annotations ? s.replace(PRIVATE_USE_RE, "").replace(ANNOTATION_STRIP_RE, "") : protectForExact(s)
   s = s.normalize("NFKC").toLowerCase().replace(/臺/g, "台")
   return annotations ? s.replace(ANNOTATION_STRIP_RE, "") : s
 }
@@ -62,6 +96,14 @@ export function hasInvisibleNameChars(name: string | null | undefined): boolean 
 }
 
 export const INVISIBLE_NAME_MESSAGE = "名稱含有不可見字元，請重新輸入"
+
+/** 最後收尾輪：名稱含私用區字元（\p{Co}，各字型顯示不一、可冒充佔位字元）→ true。 */
+export function hasPrivateUseChars(name: string | null | undefined): boolean {
+  if (name == null) return false
+  return /\p{Co}/u.test(String(name))
+}
+
+export const PRIVATE_USE_NAME_MESSAGE = "名稱含有無法辨識的特殊字元（私用區字元），請重新輸入"
 
 const SUFFIXES_WITH_PUNCT = [
   "股份有限公司", "有限公司", "(股)", "(株)", "株式会社", "企業社", "工作室", "公司",
@@ -230,6 +272,7 @@ export const CONFUSABLE_SCRIPT_NAME_MESSAGE = "名稱含有西里爾或希臘字
 /** 名稱不合法的訊息（不可見字元優先）；合法回 null。放款單戶名、名冊名稱／帳戶戶名、副委託名稱共用。 */
 export function invalidNameMessage(name: string | null | undefined): string | null {
   if (hasInvisibleNameChars(name)) return INVISIBLE_NAME_MESSAGE
+  if (hasPrivateUseChars(name)) return PRIVATE_USE_NAME_MESSAGE
   if (hasConfusableScripts(name)) return CONFUSABLE_SCRIPT_NAME_MESSAGE
   return null
 }
@@ -308,8 +351,28 @@ function plainHay(key: string): KeyHay {
 function atWordBoundary(hay: KeyHay, start: number, end: number): boolean {
   const k = hay.key
   if (start > 0 && !hay.sep[start] && LATIN_OR_DIGIT_RE.test(k[start]!) && LATIN_OR_DIGIT_RE.test(k[start - 1]!)) return false
-  if (end < k.length && !hay.sep[end] && LATIN_OR_DIGIT_RE.test(k[end - 1]!) && LATIN_OR_DIGIT_RE.test(k[end]!)) return false
+  if (end < k.length && !hay.sep[end] && LATIN_OR_DIGIT_RE.test(k[end - 1]!) && LATIN_OR_DIGIT_RE.test(k[end]!)) return latinTailBoundary(hay, end)
   return true
+}
+
+/**
+ * 最後收尾輪：拉丁核心後面緊接拉丁字母／數字時，下列情況仍算詞邊界——
+ * - 英文複數：接 s／es 後就是結尾、分隔字元或非英數字（「ABC Designs Limited」含「ABC Design」、「Deltas Inc」含「Delta」）；
+ * - 黏寫的英文附加詞（英文產業詞／地名表中 ≥4 字母者：taiwan、design、group、tech…）：「ABCTaiwan」「LGtaiwan」；
+ * - 數字＋廠：「3M2廠」。
+ * 「Babcock」「13M」「3MX」「HPE」仍不算。
+ */
+function latinTailBoundary(hay: KeyHay, end: number): boolean {
+  const k = hay.key
+  if (/\p{Script=Latin}/u.test(k[end - 1]!)) {
+    for (const plural of ["es", "s"]) {
+      if (!k.startsWith(plural, end)) continue
+      const j = end + plural.length
+      if (j >= k.length || hay.sep[j] || !LATIN_OR_DIGIT_RE.test(k[j]!)) return true
+    }
+  }
+  if (GLUE_LATIN_WORDS.some((w) => k.startsWith(w, end))) return true
+  return /^[0-9]+廠/u.test(k.slice(end))
 }
 
 /** needle 在 hay 裡每個符合詞邊界的出現位置（UTF-16 index）。 */
@@ -427,7 +490,12 @@ function stripCoreSuffixes(key: string): string {
 }
 
 /** 收尾輪 F3：產業／組織常見詞（「名冊名稱＋這些字」視為同一家的變體）。 */
-const INDUSTRY_HAN_WORDS = ["國際", "實業", "集團", "科技", "企業", "電腦", "電子", "工業", "貿易", "建設", "營造", "工程", "設計", "顧問", "開發", "控股"]
+const INDUSTRY_HAN_WORDS = [
+  "國際", "實業", "集團", "科技", "企業", "電腦", "電子", "工業", "貿易", "建設", "營造", "工程", "設計", "顧問", "開發", "控股",
+  // 最後收尾輪：營建工種與常見服務業詞（「材料」刻意不加）
+  "水電", "機電", "空調", "冷氣", "消防", "室內裝修", "裝修", "裝潢", "土木", "土木包工業", "包工業", "油漆", "木作", "鐵工", "鋁窗",
+  "環保", "清潔", "資訊", "數位", "通訊", "印刷", "廣告", "系統", "維修", "服務中心",
+]
 const INDUSTRY_LATIN_WORDS = [
   "international", "intl", "group", "technology", "technologies", "tech", "design", "designs", "engineering", "consulting", "consultants",
   "trading", "industrial", "industries", "industry", "holdings", "holding", "electronics", "electronic", "computers", "computer",
@@ -467,6 +535,46 @@ function corePatterns(field: string | null | undefined): string[] {
           break
         }
       }
+    }
+  }
+  // 最後收尾輪：前後兩端的地名／分公司字／公司型態字／中英文產業詞反覆剝除（所有剝法都試），每個過下限的中間結果都收
+  //（「台中宏碁股份有限公司」→「台中宏碁」→「宏碁」、「Acer Taiwan Inc.」→「acertaiwan」→「acer」）。
+  const hays = [buildHay(prepared(field, true), PUNCT_OR_SYMBOL_CHAR_RE), ...bases.filter(Boolean).map(plainHay)]
+  for (const h of hays) for (const p of peelExtras(h)) out.add(p)
+  return [...out]
+}
+
+/** 剝除時的狀態上限（防病態輸入）。 */
+const PEEL_MAX_STATES = 200
+
+/**
+ * hay.key 前後反覆剝掉允許的附加字（EXTRA_TOKENS），回傳每個剝出、且過 meetsPatternFloor 的中間結果（不含原字串）。
+ * 拉丁附加詞要詞邊界：開頭的拉丁詞後面不可緊接英數字（除非原本有分隔）；結尾的拉丁詞前面緊接英數字時，
+ * 只有 ≥4 字母的黏寫英文附加詞（taiwan、design…）可剝。
+ */
+function peelExtras(hay: KeyHay): string[] {
+  const k = hay.key
+  const glued = (i: number) => i > 0 && i < k.length && !hay.sep[i] && LATIN_OR_DIGIT_RE.test(k[i - 1]!) && LATIN_OR_DIGIT_RE.test(k[i]!)
+  const out = new Set<string>()
+  const seen = new Set<string>([`0:${k.length}`])
+  const queue: Array<[number, number]> = [[0, k.length]]
+  while (queue.length > 0 && seen.size < PEEL_MAX_STATES) {
+    const [start, end] = queue.shift()!
+    const s = k.slice(start, end)
+    const push = (a: number, b: number) => {
+      const id = `${a}:${b}`
+      if (b <= a || seen.has(id)) return
+      const rest = k.slice(a, b)
+      if (!meetsPatternFloor(rest)) return
+      seen.add(id)
+      // 剩下的整段都是地名／型態字／產業詞（「台灣」「工程」）→ 不是核心，不收（仍可繼續剝）
+      if (!isOnlyAllowedExtras(rest, PEEL_TOKENS_BY_FIRST)) out.add(rest)
+      queue.push([a, b])
+    }
+    for (const t of PEEL_TOKENS) {
+      if (t.length >= s.length) continue
+      if (s.startsWith(t) && !glued(start + t.length)) push(start + t.length, end)
+      if (s.endsWith(t) && (!glued(end - t.length) || GLUE_LATIN_WORDS.includes(t))) push(start, end - t.length)
     }
   }
   return [...out]
@@ -523,7 +631,7 @@ const PLACE_TAILS = ["市", "縣", "區", "鄉", "鎮"]
 /** 「第二廠」「二廠」「3廠」。 */
 const FACTORY_RE = /^第?[0-9〇零一二三四五六七八九十百]+廠/u
 /** 允許的附加字（依第一個字元分桶、長的先試）。 */
-const EXTRA_TOKENS_BY_FIRST: Map<string, string[]> = (() => {
+const EXTRA_TOKENS: ReadonlySet<string> = (() => {
   const set = new Set<string>([...BRANCH_WORDS, ...COMPANY_TYPE_WORDS, ...INDUSTRY_HAN_WORDS, ...INDUSTRY_LATIN_WORDS])
   for (const p of PLACE_NAMES) {
     set.add(p)
@@ -535,8 +643,31 @@ const EXTRA_TOKENS_BY_FIRST: Map<string, string[]> = (() => {
     const base = [...t].slice(0, -1).join("")
     if ([...base].length >= 2) set.add(base)
   }
+  return set
+})()
+/**
+ * 剝除用（長的先試）：EXTRA_TOKENS 去掉鄉鎮市區的「去區／鄉／鎮／市」2 字簡稱（大同、中山、信義、永和…常是公司名本身，
+ * 不從名冊名稱剝掉；完整的「大同區」「板橋區」照剝）。
+ */
+const TOWNSHIP_BASES: ReadonlySet<string> = new Set(
+  TW_TOWNSHIPS.map((t) => [...t].slice(0, -1).join("")).filter((b) => [...b].length >= 2 && !TW_COUNTIES.includes(b) && !PLACE_NAMES.includes(b)),
+)
+const PEEL_TOKENS = [...EXTRA_TOKENS].filter((t) => !TOWNSHIP_BASES.has(t)).sort((a, b) => b.length - a.length)
+const PEEL_TOKENS_BY_FIRST: Map<string, string[]> = (() => {
   const map = new Map<string, string[]>()
-  for (const t of set) {
+  for (const t of PEEL_TOKENS) {
+    const first = [...t][0]!
+    map.set(first, [...(map.get(first) ?? []), t])
+  }
+  return map
+})()
+/** 最後收尾輪：可黏在拉丁核心後面的英文附加詞（英文產業詞＋英文地名，≥4 字母；tw／roc／co／inc 這類短詞不算）。 */
+const GLUE_LATIN_WORDS = [...new Set([...INDUSTRY_LATIN_WORDS, ...PLACE_NAMES.filter((p) => /^[a-z]+$/u.test(p))])]
+  .filter((w) => w.length >= 4)
+  .sort((a, b) => b.length - a.length)
+const EXTRA_TOKENS_BY_FIRST: Map<string, string[]> = (() => {
+  const map = new Map<string, string[]>()
+  for (const t of EXTRA_TOKENS) {
     const first = [...t][0]!
     const list = map.get(first) ?? []
     list.push(t)
@@ -550,7 +681,7 @@ const EXTRA_TOKENS_BY_FIRST: Map<string, string[]> = (() => {
  * 剩餘部分是否只由允許的附加字組成（空字串也算）：地名（含全台 368 鄉鎮市區）、分公司／營業所等、公司型態字、
  * 產業詞（國際、實業、工程、設計…、第N廠）、括號段。
  */
-function isOnlyAllowedExtras(rest: string): boolean {
+function isOnlyAllowedExtras(rest: string, tokensByFirst: Map<string, string[]> = EXTRA_TOKENS_BY_FIRST): boolean {
   const memo = new Map<number, boolean>()
   const ok = (i: number): boolean => {
     if (i === rest.length) return true
@@ -567,7 +698,7 @@ function isOnlyAllowedExtras(rest: string): boolean {
     }
     if (!result) {
       const cp = rest.codePointAt(i)!
-      for (const t of EXTRA_TOKENS_BY_FIRST.get(String.fromCodePoint(cp)) ?? []) {
+      for (const t of tokensByFirst.get(String.fromCodePoint(cp)) ?? []) {
         if (rest.startsWith(t, i) && ok(i + t.length)) {
           result = true
           break
