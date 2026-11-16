@@ -40,6 +40,7 @@ import {
   disbursementsHaveApproval,
   getDisbursement,
   loadAllocations,
+  assertAllocationVendorsStillMatch,
   loadDisbursement,
   serializeMany,
   type Actor,
@@ -372,6 +373,8 @@ export async function submitDisbursement(
 
   // M5：未驗收的期款不准送簽（HR 可帶 forceAcceptance＋forceReason 放行）。
   const allocations = await loadAllocations(tenantId, [id])
+  // R1b：送簽前重驗分攤副委託的廠商仍是收款廠商。
+  await assertAllocationVendorsStillMatch(tenantId, current, allocations)
   await assertPaymentsAccepted(
     tenantId,
     actor,
@@ -570,6 +573,8 @@ export async function decideDisbursement(params: {
   }
   // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人；HR 代簽不改寫（同假單路徑）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.empId
+  // R1b：核准前重驗分攤副委託的廠商仍是收款廠商（駁回不擋）。
+  if (action === "approve") await assertAllocationVendorsStillMatch(tenantId, current, await loadAllocations(tenantId, [id]))
 
   const actedAt = new Date().toISOString()
   const stepPatch: Record<string, unknown> = {

@@ -22,6 +22,8 @@ describe("humanizeDisbursementError", () => {
     expect(humanizeDisbursementError(apiErr({ error: "allocation_vendor_mismatch" }), "x")).toContain("副委託廠商與收款廠商不同")
     expect(humanizeDisbursementError(apiErr({ error: "payee_name_mismatch" }), "x")).toContain("收款戶名與登錄廠商名稱不同")
     expect(humanizeDisbursementError(apiErr({ error: "payee_bank_mismatch" }), "x")).toContain("收款帳戶與登錄廠商名冊不同")
+    expect(humanizeDisbursementError(apiErr({ error: "allocation_vendor_changed" }), "x")).toContain("分攤的副委託廠商已變更")
+    expect(humanizeDisbursementError(apiErr({ error: "payee_is_registered_vendor" }), "x")).toContain("請改選登錄廠商")
   })
   it("批次付款逐筆：manual_check_required 帶 message 時顯示它", () => {
     expect(describeBatchPayError("manual_check_required", { message: "單號 D-115-003 需人工確認" })).toBe("單號 D-115-003 需人工確認")

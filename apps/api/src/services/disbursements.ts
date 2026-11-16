@@ -1329,6 +1329,46 @@ export function assertAllocationVendors(
   })
 }
 
+/**
+ * R1b（2026-11-16）：送簽／核准／付款（含批次付款）執行前，用「目前」的副委託 vendor_id 重跑廠商一致性。
+ * 開單後副委託換了廠商 → 409 allocation_vendor_changed。作廢與自動作廢不呼叫（不能擋止血）。
+ */
+export async function assertAllocationVendorsStillMatch(
+  tenantId: string,
+  current: Pick<DisbursementRow, "vendor_id">,
+  allocations: ReadonlyArray<Pick<AllocationRow, "subcontract_id" | "subcontract_payment_id">>,
+): Promise<void> {
+  const payIdsNeedingSub = uniq(allocations.filter((a) => !a.subcontract_id && a.subcontract_payment_id).map((a) => a.subcontract_payment_id))
+  const pays = payIdsNeedingSub.length
+    ? await batch<{ id: string; subcontract_id: string }>("project_subcontract_payments", "id, subcontract_id", tenantId, payIdsNeedingSub, "id", false)
+    : []
+  const subOfPay = new Map(pays.map((p) => [p.id, p.subcontract_id]))
+  const subIdOf = (a: Pick<AllocationRow, "subcontract_id" | "subcontract_payment_id">) =>
+    a.subcontract_id ?? (a.subcontract_payment_id ? (subOfPay.get(a.subcontract_payment_id) ?? null) : null)
+  const subIds = uniq(allocations.map(subIdOf))
+  if (subIds.length === 0) return
+  const subs = await batch<{ id: string; vendor_id: string | null }>("project_subcontracts", "id, vendor_id", tenantId, subIds, "id", false)
+  const subById = new Map(subs.map((x) => [x.id, x]))
+  try {
+    assertAllocationVendors(
+      current.vendor_id ?? null,
+      allocations.map((a) => {
+        const subId = subIdOf(a)
+        const sub = subId ? subById.get(subId) : undefined
+        return { subcontractId: subId, subcontractVendorId: sub ? (sub.vendor_id ?? null) : undefined }
+      }),
+    )
+  } catch (err) {
+    if (err instanceof DisbursementError && err.code === "allocation_vendor_mismatch") {
+      throw new DisbursementError(409, "allocation_vendor_changed", {
+        ...(err.details ?? {}),
+        message: "分攤的副委託廠商已變更，請重新確認放款單",
+      })
+    }
+    throw err
+  }
+}
+
 export type PayeeBankField = "payeeBankName" | "payeeBankAccount" | "payeeBankCode"
 export const PAYEE_BANK_FIELDS: readonly PayeeBankField[] = ["payeeBankName", "payeeBankAccount", "payeeBankCode"]
 
@@ -1339,11 +1379,15 @@ function normBankAccount(v: unknown): string {
   return normBankText(v).replace(/[\s\-－‐–—]/g, "")
 }
 
-/** 名冊上這家廠商「可接受」的收款帳戶值：原始欄位，或系統自己複製的快照格式（銀行名（代碼）／帳號 戶名）。 */
-function vendorBankAllowed(v: VendorLite, field: PayeeBankField): string[] {
-  if (field === "payeeBankCode") return [normBankText(v.bank_code)]
-  if (field === "payeeBankName") return [normBankText(v.bank_name), normBankText(vendorBankName(v))]
-  return [normBankAccount(v.bank_account), normBankAccount([v.bank_account, v.account_holder].filter(Boolean).join(" "))]
+/**
+ * 名冊上這家廠商「可接受」的輸入值：只收原始欄位（銀行名、代碼、帳號；帳號去空白與半形／全形連字號）。
+ * 系統快照格式（「銀行名（代碼）」「帳號 戶名」）不再當作輸入接受——2026-11-16 A1：
+ * 整串去空白比對會讓 帳號 12345＋戶名 678甲 與輸入 "12345678 甲" 相等而放行。
+ */
+function vendorBankRawMatches(v: VendorLite, field: PayeeBankField, sent: unknown): boolean {
+  if (field === "payeeBankCode") return normBankText(sent) === normBankText(v.bank_code)
+  if (field === "payeeBankName") return normBankText(sent) === normBankText(v.bank_name)
+  return normBankAccount(sent) === normBankAccount(v.bank_account)
 }
 
 /** 名冊上這家廠商該欄位的預設快照值（沒送時照名冊帶的值）。 */
@@ -1378,16 +1422,41 @@ export function assertPayeeBankMatchesVendor(
   vendor: VendorLite,
   input: Partial<Record<PayeeBankField, string | null | undefined>>,
   fields: Iterable<PayeeBankField>,
+  stored?: Partial<Record<PayeeBankField, string | null>>,
 ): void {
   for (const field of fields) {
     const sent = input[field]
     if (sent === undefined) continue
-    const got = field === "payeeBankAccount" ? normBankAccount(sent) : normBankText(sent)
-    if (!vendorBankAllowed(vendor, field).includes(got)) {
+    if (vendorBankRawMatches(vendor, field, sent)) continue
+    // 快照格式只在「與 DB 上這張單現有快照完全相同（未改動）」且該快照就是名冊快照時放行（舊單整份表單回送）。
+    const storedVal = stored?.[field]
+    const unchangedSnapshot =
+      storedVal != null &&
+      normBankText(sent) === normBankText(storedVal) &&
+      normBankText(storedVal) === normBankText(vendorBankDefault(vendor, field))
+    if (!unchangedSnapshot) {
       throw new DisbursementError(400, "payee_bank_mismatch", {
         field,
         message: "收款帳戶與登錄廠商名冊不同；若帳戶已變更請先到廠商名冊更新（需財務權限）",
       })
+    }
+  }
+}
+
+export async function assertPayeeNotRegisteredVendor(tenantId: string, payeeName: string): Promise<void> {
+  const n = payeeName.trim()
+  if (!n) return
+  for (const col of ["name", "account_holder"] as const) {
+    const { data, error } = await supabaseAdmin
+      .from("vendors")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq(col, n)
+      .is("deleted_at", null)
+      .limit(1)
+    if (error) throw new Error(`assertPayeeNotRegisteredVendor (${col}): ${error.message}`)
+    if ((data ?? []).length > 0) {
+      throw new DisbursementError(400, "payee_is_registered_vendor", { message: "此收款對象是登錄廠商，請改選登錄廠商" })
     }
   }
 }
@@ -1449,7 +1518,11 @@ async function resolveHeader(
   tenantId: string,
   input: Omit<DisbursementInput, "status" | "allocations">,
   stored?: { payingCompanyId?: string | null; receiptIssuerCompanyId?: string | null },
-  opts: { checkPayeeName?: boolean; checkBankFields?: Iterable<PayeeBankField> } = {},
+  opts: {
+    checkPayeeName?: boolean
+    checkBankFields?: Iterable<PayeeBankField>
+    storedBank?: Partial<Record<PayeeBankField, string | null>>
+  } = {},
 ): Promise<ResolvedHeader> {
   let vendor: VendorLite | null = null
   if (input.payeeKind === "vendor") {
@@ -1470,7 +1543,12 @@ async function resolveHeader(
   if (vendor && opts.checkPayeeName !== false) assertPayeeNameMatchesVendor(payeeName, vendor)
   if (vendor) {
     input = dropBlankBankFieldsForVendor(vendor, input)
-    assertPayeeBankMatchesVendor(vendor, input, opts.checkBankFields ?? PAYEE_BANK_FIELDS)
+    assertPayeeBankMatchesVendor(vendor, input, opts.checkBankFields ?? PAYEE_BANK_FIELDS, opts.storedBank)
+  }
+  // R3（2026-11-16）：收款方「其他」但戶名就是某家登錄廠商（名冊名稱或帳戶戶名）→ 400，請改選登錄廠商，
+  // 不然會繞過名冊帳戶與分攤廠商檢查。PATCH 只在戶名或收款方有改時檢查（checkPayeeName），不回溯。
+  if (!vendor && input.payeeKind === "other" && opts.checkPayeeName !== false) {
+    await assertPayeeNotRegisteredVendor(tenantId, payeeName)
   }
 
   const companyIds = uniq([input.payingCompanyId, input.receiptIssuerCompanyId])
@@ -2402,7 +2480,7 @@ export async function updateDisbursement(
         payingCompanyId: current.paying_company_id,
         receiptIssuerCompanyId: current.receipt_issuer_company_id,
       },
-      { checkPayeeName: payeeChanged || payeeNameChanged, checkBankFields: bankFieldsToCheck },
+      { checkPayeeName: payeeChanged || payeeNameChanged, checkBankFields: bankFieldsToCheck, storedBank },
     )
     const allocInputs: AllocationInput[] =
       patch.allocations !== undefined
@@ -2513,6 +2591,8 @@ export async function payDisbursement(
   if (!paidOn) throw new DisbursementError(400, "paid_on_required")
 
   const allocations = await loadAllocations(tenantId, [id])
+  // R1b：付款前重驗分攤副委託的廠商仍是收款廠商（開單後副委託換廠商 → 409）。
+  await assertAllocationVendorsStillMatch(tenantId, current, allocations)
   // M5：付款前再確認一次期款都已驗收（建單之後才被取消驗收的情況）。
   await assertPaymentsAccepted(
     tenantId,

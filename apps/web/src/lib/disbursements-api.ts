@@ -573,6 +573,8 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   allocation_vendor_mismatch: "分攤的副委託廠商與收款廠商不同，請確認收款對象。",
   payee_name_mismatch: "收款戶名與登錄廠商名稱不同；若要付給其他對象請改為非登錄收款方。",
   payee_bank_mismatch: "收款帳戶與登錄廠商名冊不同；若帳戶已變更請先到廠商名冊更新（需財務權限）。",
+  allocation_vendor_changed: "分攤的副委託廠商已變更，請重新確認放款單。",
+  payee_is_registered_vendor: "此收款對象是登錄廠商，請改選登錄廠商。",
   payment_already_paid: "選到的期款已由其他匯款標記為已付。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_company: "選到的公司主體不存在。",

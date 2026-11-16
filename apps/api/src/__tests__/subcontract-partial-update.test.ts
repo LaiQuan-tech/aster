@@ -486,3 +486,61 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
     expect(fake.writes).toHaveLength(0)
   })
 })
+
+describe("R1a：副委託已有放款單分攤時不可換廠商（2026-11-16）", () => {
+  const DISB_ID = "eeeeeeee-0000-4000-8000-000000000001"
+  const PAY_ID = "dddddddd-0000-4000-8000-0000000000e1"
+  const seed = (status: string) => {
+    fake.db.vendors!.push({ id: VENDOR_ID_2, tenant_id: TENANT_ID, name: "測試另一家事務所", deleted_at: null })
+    fake.db.disbursements = [{ id: DISB_ID, tenant_id: TENANT_ID, status }]
+    fake.db.disbursement_allocations = [
+      { id: "ffffffff-0000-4000-8000-000000000001", tenant_id: TENANT_ID, disbursement_id: DISB_ID, subcontract_id: SUB_FIRM, subcontract_payment_id: PAY_ID },
+    ]
+  }
+  const changeVendor = () =>
+    put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+
+  it("草稿／送簽中／已核准／已匯款的放款單分攤到這筆 → 換廠商 409 has_disbursement，DB 不變", async () => {
+    for (const status of ["draft", "pending_approval", "approved", "paid"]) {
+      fake.reset()
+      fake.db.employees = [{ id: HR_EMP_ID, tenant_id: TENANT_ID, user_id: HR_TOKEN, role: "hr_admin", dept_id: null }]
+      fake.db.projects = [{ id: PROJECT_ID, tenant_id: TENANT_ID, dept_id: null, lead_emp_id: null }]
+      fake.db.project_members = []
+      fake.db.vendors = [{ id: VENDOR_ID, tenant_id: TENANT_ID, name: "測試事務所", deleted_at: null }]
+      fake.db.contracts = [{ id: CONTRACT_ID, tenant_id: TENANT_ID, project_id: PROJECT_ID, deleted_at: null }]
+      fake.db.companies = []
+      fake.db.project_subcontract_payments = []
+      fake.db.project_subcontracts = [firmRow(), plainRow()]
+      seed(status)
+      const res = await changeVendor()
+      expect(res.status, status).toBe(409)
+      expect(res.body).toMatchObject({ error: "has_disbursement", subcontractId: SUB_FIRM, message: "此副委託已有放款單，請先作廢相關放款單再更換廠商" })
+      expect(subWrites()).toHaveLength(0)
+      expect(rowOf(SUB_FIRM)).toEqual(firmRow())
+    }
+  })
+
+  it("改成非登錄廠商（vendorId: null）也擋", async () => {
+    seed("draft")
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試臨時廠商" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("has_disbursement")
+  })
+
+  it("放款單已作廢 → 可換廠商；廠商沒變（只改金額）→ 不擋", async () => {
+    seed("void")
+    expect((await changeVendor()).status).toBe(200)
+    fake.db.disbursements = [{ id: DISB_ID, tenant_id: TENANT_ID, status: "draft" }]
+    const same = await put([
+      { id: SUB_FIRM, amount: 110000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(same.status).toBe(200)
+  })
+})

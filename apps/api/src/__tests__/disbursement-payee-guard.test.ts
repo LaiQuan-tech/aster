@@ -8,6 +8,9 @@ vi.mock("../lib/tenant-tz.js", () => ({ getTenantTimezone: async () => "Asia/Tai
 
 import { disbursementsRouter } from "../routes/disbursements.js"
 import { payDisbursement, voidDisbursement } from "../services/disbursements.js"
+import { decideDisbursement, resetDisbursementApprovalProbe, submitDisbursement } from "../services/disbursement-approval.js"
+import { payDisbursementsBatch } from "../services/disbursement-batch-pay.js"
+import { describeTarget, maskAccount } from "../services/mcp/pending-target.js"
 import { dangerOf } from "../services/mcp/danger.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
@@ -322,17 +325,31 @@ describe("不回溯：既有單子的其他操作不被新檢查擋", () => {
     expect(fake.db.disbursements![0]!.note).toBe("補備註")
   })
 
-  it("已核准的舊單：付款照常連動期款；再作廢照常還原期款", async () => {
+  it("已核准的舊單（戶名不一致但分攤廠商一致）：付款照常連動期款；再作廢照常還原期款", async () => {
     fake.db.disbursements = [legacy({ status: "approved", approved_at: "2026-11-01T00:00:00.000Z" })]
-    fake.db.disbursement_allocations = [allocRow(SUB_B, PAY_B)]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
     const actor = { empId: HR, role: "hr_admin" }
     const paid = await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })
     expect(paid?.status).toBe("paid")
-    expect(fake.db.project_subcontract_payments!.find((p) => p.id === PAY_B)!.paid_on).toBe("2026-11-16")
+    expect(fake.db.project_subcontract_payments!.find((p) => p.id === PAY_A)!.paid_on).toBe("2026-11-16")
 
     const voided = await voidDisbursement(TENANT_ID, actor, DISB, "測試作廢")
     expect(voided?.status).toBe("void")
+    expect(fake.db.project_subcontract_payments!.find((p) => p.id === PAY_A)!.paid_on).toBeNull()
+  })
+
+  it("已核准的舊單分攤到他廠商期款（R1b）：付款 409 allocation_vendor_changed、期款不動；作廢照常", async () => {
+    fake.db.disbursements = [legacy({ status: "approved", approved_at: "2026-11-01T00:00:00.000Z" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_B, PAY_B)]
+    const actor = { empId: HR, role: "hr_admin" }
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject({
+      httpStatus: 409,
+      code: "allocation_vendor_changed",
+    })
+    expect(fake.db.disbursements![0]!.status).toBe("approved")
     expect(fake.db.project_subcontract_payments!.find((p) => p.id === PAY_B)!.paid_on).toBeNull()
+    const voided = await voidDisbursement(TENANT_ID, actor, DISB, "測試作廢")
+    expect(voided?.status).toBe("void")
   })
 
   it("已匯款的舊單：改發票號碼 → 200", async () => {
@@ -410,5 +427,198 @@ describe("B1／B2：從應付分組開單（前端完整 payload）", () => {
     fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_A ? { ...v, name: "測試甲工程行（新名）" } : v))
     const res = await as(request(app).post("/disbursements")).send(uiPayload({ payeeName: "測試甲工程行（新名）" }))
     expect(res.status, JSON.stringify(res.body)).toBe(201)
+  })
+})
+
+describe("R1b：開單後副委託換廠商 → 送簽／核准／付款／批次付款前重驗擋下（作廢不擋）", () => {
+  const actor = { empId: HR, role: "hr_admin" }
+  // 開單時甲的期款、收款甲；之後副委託被改成乙。
+  const switchSubAToB = () => {
+    fake.db.project_subcontracts = fake.db.project_subcontracts!.map((r) => (r.id === SUB_A ? { ...r, vendor_id: VENDOR_B, vendor_name: "測試乙工程行" } : r))
+  }
+
+  it("副委託未換廠商 → 付款照常（對照組）", async () => {
+    fake.db.disbursements = [draftRow({ status: "approved", approved_at: "2026-11-01T00:00:00.000Z" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    const paid = await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })
+    expect(paid?.status).toBe("paid")
+  })
+
+  it("付款 → 409 allocation_vendor_changed，單據與期款不動", async () => {
+    fake.db.disbursements = [draftRow({ status: "approved", approved_at: "2026-11-01T00:00:00.000Z" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    switchSubAToB()
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject({
+      httpStatus: 409,
+      code: "allocation_vendor_changed",
+      details: expect.objectContaining({ message: "分攤的副委託廠商已變更，請重新確認放款單" }),
+    })
+    expect(fake.db.disbursements![0]!.status).toBe("approved")
+    expect(fake.db.project_subcontract_payments!.find((p) => p.id === PAY_A)!.paid_on).toBeNull()
+  })
+
+  it("批次付款 → 該筆 409 allocation_vendor_changed", async () => {
+    fake.db.disbursements = [draftRow({ status: "approved", approved_at: "2026-11-01T00:00:00.000Z" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    switchSubAToB()
+    const results = await payDisbursementsBatch(TENANT_ID, actor, { paidOn: "2026-11-16", items: [{ id: DISB }] })
+    expect(results[0]).toMatchObject({ ok: false, status: 409, error: "allocation_vendor_changed" })
+    expect(fake.db.disbursements![0]!.status).toBe("approved")
+  })
+
+  it("收款「其他」、分攤的非登錄副委託後來被設成登錄廠商 → 付款也擋", async () => {
+    fake.db.disbursements = [
+      draftRow({ status: "approved", approved_at: "2026-11-01T00:00:00.000Z", payee_kind: "other", vendor_id: null, payee_name: "測試任意收款人" }),
+    ]
+    fake.db.disbursement_allocations = [allocRow(SUB_FREE, PAY_FREE)]
+    fake.db.project_subcontracts = fake.db.project_subcontracts!.map((r) => (r.id === SUB_FREE ? { ...r, vendor_id: VENDOR_B } : r))
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject({ code: "allocation_vendor_changed" })
+  })
+
+  it("送簽 → 409 allocation_vendor_changed，不建立簽核關卡", async () => {
+    resetDisbursementApprovalProbe()
+    fake.db.disbursement_approval_steps = []
+    fake.db.disbursements = [draftRow()]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    switchSubAToB()
+    await expect(submitDisbursement(TENANT_ID, actor, DISB)).rejects.toMatchObject({ httpStatus: 409, code: "allocation_vendor_changed" })
+    expect(fake.db.disbursement_approval_steps).toHaveLength(0)
+    expect(fake.db.disbursements![0]!.status).toBe("draft")
+  })
+
+  it("核准 → 409 allocation_vendor_changed，關卡維持待簽；駁回不擋", async () => {
+    resetDisbursementApprovalProbe()
+    const step = {
+      id: "99999999-0000-4000-8000-000000000001", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1,
+      approver_emp_id: HR, candidate_emp_ids: [HR], step_kind: "manager", decision: "pending", comment: null, acted_at: null,
+      acted_by_emp_id: null, created_at: "2026-11-01T00:00:00.000Z",
+    }
+    const OWNER = "bbbbbbbb-0000-4000-8000-000000000009"
+    fake.db.employees!.push({ id: OWNER, tenant_id: TENANT_ID, user_id: "owner-user", role: "employee", dept_id: null, name: "測試建單人", status: "active" })
+    const BOSS = "bbbbbbbb-0000-4000-8000-000000000008"
+    fake.db.employees!.push({ id: BOSS, tenant_id: TENANT_ID, user_id: "boss-user", role: "platform_admin", dept_id: null, name: "測試老闆", status: "active" })
+    fake.db.disbursement_approval_steps = [
+      { ...step },
+      { ...step, id: "99999999-0000-4000-8000-000000000002", step_order: 2, approver_emp_id: BOSS, candidate_emp_ids: [BOSS], step_kind: "boss" },
+    ]
+    fake.db.disbursements = [
+      draftRow({ status: "pending_approval", current_step: 1, approval_round: 1, created_by_emp_id: OWNER, submitted_by_emp_id: OWNER, submitted_at: "2026-11-01T00:00:00.000Z" }),
+    ]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    switchSubAToB()
+    const approve = decideDisbursement({ action: "approve", tenantId: TENANT_ID, id: DISB, actor: { ...actor, active: true } })
+    await expect(approve).rejects.toMatchObject({ httpStatus: 409, code: "allocation_vendor_changed" })
+    expect(fake.db.disbursement_approval_steps![0]!.decision).toBe("pending")
+    expect(fake.db.disbursements![0]!.status).toBe("pending_approval")
+    const reject = await decideDisbursement({ action: "reject", tenantId: TENANT_ID, id: DISB, actor: { ...actor, active: true }, comment: "測試駁回" })
+    expect(reject).not.toBeNull()
+    expect(fake.db.disbursement_approval_steps![0]!.decision).toBe("rejected")
+  })
+
+  it("作廢不擋（草稿／已核准）", async () => {
+    fake.db.disbursements = [draftRow({ status: "approved", approved_at: "2026-11-01T00:00:00.000Z" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    switchSubAToB()
+    const voided = await voidDisbursement(TENANT_ID, actor, DISB, "測試作廢")
+    expect(voided?.status).toBe("void")
+  })
+})
+
+describe("A1：銀行欄位不接受「帳號＋戶名」拼接繞過", () => {
+  beforeEach(() => {
+    // 名冊帳號 12345、戶名 678甲：舊版整串去空白比對 "12345678 甲" 會等於 "12345678甲" 而放行。
+    fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_A ? { ...v, bank_account: "12345", account_holder: "678甲" } : v))
+  })
+
+  it("POST 送 \"12345678 甲\"／\"12345 678甲\"（快照格式）→ 400 payee_bank_mismatch", async () => {
+    for (const acct of ["12345678 甲", "12345 678甲"]) {
+      const res = await as(request(app).post("/disbursements")).send(body({ payeeBankAccount: acct }))
+      expect(res.status, acct).toBe(400)
+      expect(res.body).toMatchObject({ error: "payee_bank_mismatch", field: "payeeBankAccount" })
+    }
+  })
+
+  it("POST 銀行名送快照格式「測試銀行（999）」→ 400；原始「測試銀行」、帳號全形連字號 → 201", async () => {
+    const bad = await as(request(app).post("/disbursements")).send(body({ payeeBankName: "測試銀行（999）" }))
+    expect(bad.status).toBe(400)
+    const ok = await as(request(app).post("/disbursements")).send(body({ payeeBankName: "測試銀行", payeeBankAccount: "123－45" }))
+    expect(ok.status, JSON.stringify(ok.body)).toBe(201)
+  })
+
+  it("PATCH 回送與 DB 完全相同的快照（未改動）→ 200；換收款廠商時回送快照仍放行的條件是等於 DB 現值且是名冊快照", async () => {
+    fake.db.disbursements = [draftRow({ payee_bank_account: "12345 678甲", payee_bank_code: "999", payee_bank_name: "測試銀行（999）" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    const same = await as(request(app).patch(`/disbursements/${DISB}`)).send({
+      payeeKind: "vendor", vendorId: VENDOR_A, payeeBankAccount: "12345 678甲", payeeBankName: "測試銀行（999）", payeeBankCode: "999", note: "補備註",
+    })
+    expect(same.status, JSON.stringify(same.body)).toBe(200)
+    const tampered = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeBankAccount: "12345678 甲" })
+    expect(tampered.status).toBe(400)
+    expect(tampered.body.error).toBe("payee_bank_mismatch")
+  })
+})
+
+describe("R3：收款「其他」不可用登錄廠商的名稱／帳戶戶名", () => {
+  const other = (name: string) => body({ payeeKind: "other", vendorId: null, payeeName: name, allocations: [] })
+
+  it("戶名＝名冊名稱（含前後空白）或帳戶戶名 → 400 payee_is_registered_vendor，零寫入", async () => {
+    for (const name of [" 測試甲工程行 ", "測試甲工程行王小明"]) {
+      fake.writes.length = 0
+      const res = await as(request(app).post("/disbursements")).send(other(name))
+      expect(res.status, name).toBe(400)
+      expect(res.body).toMatchObject({ error: "payee_is_registered_vendor", message: "此收款對象是登錄廠商，請改選登錄廠商" })
+      expect(anyWrites()).toHaveLength(0)
+    }
+  })
+
+  it("已刪除的名冊廠商名稱、他租戶廠商名稱、一般名稱 → 201", async () => {
+    fake.db.vendors!.push(
+      { id: "aaaaaaaa-0000-4000-8000-00000000000c", tenant_id: TENANT_ID, name: "測試已刪廠商", deleted_at: "2026-01-01T00:00:00.000Z" },
+      { id: "aaaaaaaa-0000-4000-8000-00000000000d", tenant_id: "99999999-0000-4000-8000-000000000999", name: "測試他租戶廠商", deleted_at: null },
+    )
+    for (const name of ["測試已刪廠商", "測試他租戶廠商", "測試任意收款人"]) {
+      const res = await as(request(app).post("/disbursements")).send(other(name))
+      expect(res.status, name).toBe(201)
+    }
+  })
+
+  it("PATCH：舊「其他」單戶名剛好是廠商名、只改備註 → 200（不回溯）；改戶名成廠商名 → 400", async () => {
+    fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試乙工程行" })]
+    fake.db.disbursement_allocations = []
+    const note = await as(request(app).patch(`/disbursements/${DISB}`)).send({ note: "補備註", payeeKind: "other", payeeName: "測試乙工程行", amount: 1000, allocations: [] })
+    expect(note.status, JSON.stringify(note.body)).toBe(200)
+    fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試任意收款人" })]
+    const bad = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeName: "測試甲工程行" })
+    expect(bad.status).toBe(400)
+    expect(bad.body.error).toBe("payee_is_registered_vendor")
+  })
+})
+
+describe("A2：MCP 確認頁 PATCH /disbursements/:id 顯示 AI 要改成的受款人與遮罩帳號", () => {
+  const get = async () => ({ status: 200, json: { disbursement: { id: DISB, disbursementNo: "D-115-001", amount: 1000, payeeName: "測試甲工程行", status: "draft" } } })
+
+  it("帶受款人與帳號 → 摘要列出 AI 要改成的受款人與末 4 碼", async () => {
+    const r = await describeTarget(get, "PATCH", `/disbursements/${DISB}`, { payeeName: "測試乙工程行", payeeBankAccount: "0000-2222-9876" })
+    expect(r.ok).toBe(true)
+    const summary = (r as { summary: string }).summary
+    expect(summary).toContain("AI 要改成的受款人「測試乙工程行」")
+    expect(summary).toContain("AI 要改成的收款帳號 ****9876")
+    expect(summary).not.toContain("000022229876")
+  })
+
+  it("快照格式「帳號 戶名」只露帳號末 4 碼、不露戶名", async () => {
+    expect(maskAccount("0000111 測試甲工程行王小明")).toBe("****0111")
+    expect(maskAccount("０００－１２３４ 測試戶名")).toBe("****1234")
+    const r = await describeTarget(get, "PATCH", `/disbursements/${DISB}`, { payeeBankAccount: "0000111 測試甲工程行王小明" })
+    const summary = (r as { summary: string }).summary
+    expect(summary).toContain("****0111")
+    expect(summary).not.toContain("王小明")
+    const post = await describeTarget(get, "POST", "/disbursements", { payeeName: "x", amount: 1, payeeBankAccount: "0000111 測試甲工程行王小明" })
+    expect((post as { summary: string }).summary).not.toContain("王小明")
+  })
+
+  it("只改備註 → 摘要不多列", async () => {
+    const r = await describeTarget(get, "PATCH", `/disbursements/${DISB}`, { note: "x" })
+    expect((r as { summary: string }).summary).not.toContain("AI 要改成")
   })
 })

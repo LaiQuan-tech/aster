@@ -74,7 +74,9 @@ export type TargetResult =
 
 /** 銀行帳號最多露末 4 碼。 */
 export function maskAccount(value: unknown): string {
-  const digits = String(value ?? "").replace(/\s/g, "")
+  // 快照格式「帳號 戶名」：只取開頭的帳號部分（數字、空白、連字號；全形先轉半形）再遮罩，絕不露戶名（2026-11-16 A2）。
+  const lead = String(value ?? "").normalize("NFKC").match(/^[\s\d\-‐–—]*/)?.[0] ?? ""
+  const digits = lead.replace(/\D/g, "")
   if (!digits) return "?"
   return digits.length <= 4 ? "****" : `****${digits.slice(-4)}`
 }
@@ -151,9 +153,21 @@ export async function describeTarget(get: UserGet, method: string, path: string,
       const r = await read(`/disbursements/${id}`)
       if (!r.ok) return r
       const d = ((r.json as Row)?.disbursement ?? r.json) as Row
+      // PATCH 比照 POST（2026-11-16 A2）：把 AI 這次要改成的受款人／收款廠商／收款帳號（遮罩）一併列出。
+      const changes: string[] = []
+      if (method.toUpperCase() === "PATCH" && !seg[2]) {
+        const name = b.payeeName ?? b.payee_name
+        if (name !== undefined) changes.push(`AI 要改成的受款人${aiText(name)}`)
+        const kind = b.payeeKind ?? b.payee_kind
+        if (kind !== undefined) changes.push(`AI 要改成的收款方類型${aiText(kind)}`)
+        const vendorId = b.vendorId ?? b.vendor_id
+        if (vendorId !== undefined) changes.push(vendorId ? "AI 要更換收款廠商" : "AI 要移除收款廠商")
+        const account = b.payeeBankAccount ?? b.payee_bank_account
+        if (account !== undefined) changes.push(typeof account === "string" && account.trim() ? `AI 要改成的收款帳號 ${maskAccount(account)}` : "AI 要清空收款帳號（將照名冊帶入）")
+      }
       return {
         ok: true,
-        summary: `放款單 ${str(d.disbursementNo ?? d.disbursement_no ?? d.id)}・金額 ${money(d.amount)}・受款人 ${str(d.payeeName ?? d.payee_name)}・狀態 ${str(d.status)}`,
+        summary: `放款單 ${str(d.disbursementNo ?? d.disbursement_no ?? d.id)}・金額 ${money(d.amount)}・受款人 ${str(d.payeeName ?? d.payee_name)}・狀態 ${str(d.status)}${changes.length ? `・${changes.join("・")}` : ""}`,
       }
     }
     case "payroll-periods": {

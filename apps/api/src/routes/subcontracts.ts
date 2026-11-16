@@ -410,6 +410,8 @@ subcontractsRouter.put(
         vendorNamesOf(tenantId, vendorIds),
         idsExist("contracts", tenantId, contractIds, (q) => q.eq("project_id", projectId).is("deleted_at", null)),
       ])
+      // 既有列換了廠商（vendor_id 變動）的 id：寫入前檢查是否已有未作廢放款單分攤（R1a，2026-11-16）。
+      const vendorChangedIds: string[] = []
       for (const p of payload) {
         if (p.id && !existingById.has(p.id)) {
           res.status(404).json({ error: "not_found", id: p.id })
@@ -428,6 +430,7 @@ subcontractsRouter.put(
         // 放款單從 vendor_id 帶銀行帳號，錢會匯給舊廠商。反之只送 vendorId 也會「顯示舊名快照、匯給新廠商」。
         const prev = p.id ? existingById.get(p.id) : undefined
         const prevVendorId = prev?.vendor_id ? prev.vendor_id.toLowerCase() : null
+        if (prev && p.vendorId !== undefined && (p.vendorId ?? null) !== prevVendorId) vendorChangedIds.push(prev.id)
         if (prev) {
           const sameName = (p.vendorName ?? "").trim() === (prev.vendor_name ?? "").trim()
           if (p.vendorName !== undefined && p.vendorId === undefined && !sameName) {
@@ -492,6 +495,29 @@ subcontractsRouter.put(
             })
             return
           }
+        }
+      }
+
+      // 換廠商（R1a，2026-11-16）：這筆副委託（含其期款）已在未作廢放款單（草稿／送簽／核准／已匯款）的分攤上 →
+      // 409。放款單的收款廠商與帳戶是開單時的快照，副委託換廠商後會「期款記在新廠商、錢匯給舊廠商」。
+      if (vendorChangedIds.length > 0) {
+        const { data: changedAllocRows, error: changedAllocErr } = await supabaseAdmin
+          .from("disbursement_allocations")
+          .select("id, subcontract_id, disbursement_id")
+          .eq("tenant_id", tenantId)
+          .in("subcontract_id", vendorChangedIds)
+        if (changedAllocErr) throw new Error(`PUT /projects/${projectId}/subcontracts (vendor change allocations): ${changedAllocErr.message}`)
+        const blocking = await countableAllocations(
+          tenantId,
+          (changedAllocRows ?? []) as Array<{ id: string; subcontract_id: string; disbursement_id: string }>,
+        )
+        if (blocking.length > 0) {
+          res.status(409).json({
+            error: "has_disbursement",
+            subcontractId: blocking[0]!.subcontract_id,
+            message: "此副委託已有放款單，請先作廢相關放款單再更換廠商",
+          })
+          return
         }
       }
 

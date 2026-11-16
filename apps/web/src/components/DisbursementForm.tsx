@@ -88,6 +88,27 @@ export function allocRowFromPayable(p: Payable): AllocRowDraft {
   };
 }
 
+const normBank = (v: string | null | undefined) => (v ?? "").trim();
+const normAcct = (v: string | null | undefined) => normBank(v).replace(/[\s\-－‐–—]/g, "");
+
+/**
+ * 單上的銀行快照是否與名冊不同（B3，2026-11-16）：接受名冊原始值，或系統快照格式（「銀行名（代碼）」「帳號 戶名」）。
+ * 只用來提示，後端 payee_bank_mismatch 為準。
+ */
+export function bankSnapshotDiffersFromVendor(
+  snap: { payeeBankName: string; payeeBankAccount: string; payeeBankCode: string },
+  v: Pick<Vendor, "bankName" | "bankCode" | "bankAccount" | "accountHolder">,
+): boolean {
+  const vName = normBank(v.bankName);
+  const vCode = normBank(v.bankCode);
+  const snapName = vName ? (vCode ? `${vName}（${vCode}）` : vName) : vCode;
+  const snapAcct = [v.bankAccount, v.accountHolder].filter(Boolean).join(" ");
+  const nameOk = [vName, snapName].includes(normBank(snap.payeeBankName));
+  const codeOk = normBank(snap.payeeBankCode) === vCode;
+  const acctOk = [normAcct(v.bankAccount), normAcct(snapAcct)].includes(normAcct(snap.payeeBankAccount));
+  return !(nameOk && codeOk && acctOk);
+}
+
 function emptyAllocRow(projectId = ""): AllocRowDraft {
   return { key: newRowKey(), projectId, amount: "0", withheldAmount: "0", note: "", fromPayable: false };
 }
@@ -266,6 +287,17 @@ export default function DisbursementForm({
   const payeeNameChoices = selectedVendor
     ? Array.from(new Set([selectedVendor.name, selectedVendor.accountHolder ?? ""].map((x) => x.trim()).filter(Boolean)))
     : [];
+  // B3：編輯舊草稿時，單上的銀行快照與名冊不同 → 提示並提供「重新帶入名冊帳戶」。
+  const bankDiffersFromRoster = !!initial?.id && !!selectedVendor && bankSnapshotDiffersFromVendor(state, selectedVendor);
+  function reloadBankFromRoster() {
+    if (!selectedVendor) return;
+    setState((s) => ({
+      ...s,
+      payeeBankName: selectedVendor.bankName ?? "",
+      payeeBankAccount: selectedVendor.bankAccount ?? "",
+      payeeBankCode: selectedVendor.bankCode ?? "",
+    }));
+  }
   const allowsZeroAlloc = state.payeeKind === "other" && state.allocations.length === 0;
   const centsEqual = (a: number, b: number) => Math.round(a * 100) === Math.round(b * 100);
   // 後端 checkAllocationTotals 分開驗證毛額與代扣兩個合計，兩個都要對，光是毛額
@@ -465,6 +497,12 @@ export default function DisbursementForm({
           <label className={labelCls}>收款帳號</label>
           <input className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`} value={state.payeeBankAccount} onChange={(e) => set("payeeBankAccount", e.target.value)} readOnly={state.payeeKind === "vendor"} />
         </div>
+        {bankDiffersFromRoster && (
+          <div className="col-span-full rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800" role="alert">
+            <p>這張單上的收款帳戶與廠商名冊目前的帳戶不同（可能是開單後名冊有更新）。</p>
+            <Button type="button" variant="secondary" className="mt-2" onClick={reloadBankFromRoster}>重新帶入名冊帳戶</Button>
+          </div>
+        )}
 
         <div>
           <label className={labelCls}>付款公司 *</label>
