@@ -23,9 +23,8 @@ import {
   type PaymentRow,
 } from "../services/project-application-store.js"
 import { loadPaymentAcceptance, paymentsHaveAcceptance } from "../services/disbursements.js"
-import { invalidSubcontractVendorNameBody, loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf } from "../services/roster-name-keys.js"
+import { invalidSubcontractVendorNameBody, loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf, similarVendorBody, type RosterVendor } from "../services/roster-name-keys.js"
 import { invalidNameMessage } from "../lib/payee-name.js"
-import { subcontractsWithUnpaidInstallments } from "../services/vendor-unpaid.js"
 import { firstNewlyPickedInactive } from "../services/company-lifecycle.js"
 import { writeAuditLog, writeAuditLogStrict } from "../services/audit.js"
 import { columnsExist } from "../lib/schema-compat.js"
@@ -142,8 +141,10 @@ const subcontractItem = z.object({
   invoiceDate: realDate.nullish(),
   sortOrder: z.number().int().min(0).max(9999).optional(),
   note: z.string().trim().max(2000).nullish(),
-  /** 第六輪 F1：既有列從登錄廠商 A 改綁另一家登錄廠商 B、且有未付期款時必填（寫嚴格稽核）。 */
+  /** 第八輪：既有列原本綁名冊廠商、這次 vendorId 有變（改綁或解除綁定）時必填（不論有無未付期款；寫嚴格稽核）。 */
   rebindReason: z.string().trim().max(500).optional(),
+  /** 第八輪：非登錄名稱與名冊廠商相近（vendor_name_similar）但確為不同公司時的說明（寫嚴格稽核）。 */
+  confirmDistinctReason: z.string().trim().max(500).optional(),
 })
 
 const putSubcontractsBody = z.object({
@@ -527,17 +528,31 @@ subcontractsRouter.put(
         const renamed = p.vendorName !== undefined && (p.vendorName ?? "").trim() !== (prev.vendor_name ?? "").trim()
         return renamed || prevVendorId !== null
       })
+      const similarConfirms: Array<{ row: (typeof payload)[number]; name: string; matches: RosterVendor[]; reason: string }> = []
       if (unboundCandidates.length > 0) {
         const index = await loadRosterNameKeyIndex(tenantId, `PUT /projects/${projectId}/subcontracts`)
         const finalNameOf = (p: (typeof unboundCandidates)[number]) => {
           const prev = p.id ? existingById.get(p.id) : undefined
           return p.vendorName !== undefined ? p.vendorName : (prev?.vendor_name ?? null)
         }
-        const hit = unboundCandidates.find((p) => rosterMatchesOf(index, finalNameOf(p)).length > 0)
-        if (hit) {
-          const name = finalNameOf(hit)
-          res.status(409).json(mustBindVendorBody(name, rosterMatchesOf(index, name), { id: hit.id ?? null, index: payload.indexOf(hit) }))
+        // 第八輪：只有「幾乎完全相同」（exactNameKey）才硬擋 must_bind_vendor；相近（similarNameKeys）→ 409 vendor_name_similar，
+        // 該列帶 confirmDistinctReason（確為不同公司的說明）才放行，寫入前嚴格稽核。
+        const exactHit = unboundCandidates.find((p) => rosterMatchesOf(index, finalNameOf(p)).exact.length > 0)
+        if (exactHit) {
+          const name = finalNameOf(exactHit)
+          res.status(409).json(mustBindVendorBody(name, rosterMatchesOf(index, name).exact, { id: exactHit.id ?? null, index: payload.indexOf(exactHit) }))
           return
+        }
+        for (const p of unboundCandidates) {
+          const name = finalNameOf(p)
+          const similar = rosterMatchesOf(index, name).similar
+          if (similar.length === 0) continue
+          const reason = (p.confirmDistinctReason ?? "").trim()
+          if (!reason) {
+            res.status(409).json(similarVendorBody(name, similar, { id: p.id ?? null, index: payload.indexOf(p) }))
+            return
+          }
+          similarConfirms.push({ row: p, name: (name ?? "").trim(), matches: similar, reason })
         }
       }
 
@@ -637,23 +652,18 @@ subcontractsRouter.put(
         }
       }
 
-      // 第六輪 F1（2026-11-17）：既有列 vendor_id 從登錄廠商 A 改綁另一家登錄廠商 B（非 null→非 null 且不同；第七輪起也含→null），
-      // 而該副委託仍有未付期款（vendor-unpaid 同定義）→ 須帶該列 rebindReason，否則 400 rebind_reason_required；
-      // 有帶就在寫入前以嚴格稽核記下舊廠商、新廠商、原因（稽核寫不進去就不改）。
-      // 第七輪 H1：既有列從登錄廠商解除綁定（prevVendorId 非 null → 送 vendorId: null）同樣算改綁——
-      // 期款改由非登錄名稱收款（之後可用「其他」收款付到任意帳戶），一樣要原因與嚴格稽核。
+      // 第六輪 F1／第七輪 H1／第八輪：既有列原本綁名冊廠商（prevVendorId 非 null），這次 vendorId 有變（改綁另一家或解除綁定成 null）
+      // → 不論有無未付期款，一律須帶該列 rebindReason，否則 400 rebind_reason_required；有帶就在寫入前以嚴格稽核記下
+      // 舊廠商、新廠商、原因（稽核寫不進去就不改）。第七輪只在有未付期款時要求，可被「期款金額改 0 → 解除綁定 → 改回」三步繞過。
       const rebinds = payload.filter((p) => {
         const prev = p.id ? existingById.get(p.id) : undefined
         const prevVendorId = prev?.vendor_id ? prev.vendor_id.toLowerCase() : null
         if (!prev || !prevVendorId || p.vendorId === undefined) return false
-        return p.vendorId === null || p.vendorId !== prevVendorId
+        return p.vendorId === null || p.vendorId.toLowerCase() !== prevVendorId
       })
       if (rebinds.length > 0) {
-        const label = `PUT /projects/${projectId}/subcontracts (rebind)`
-        const unpaidSubs = await subcontractsWithUnpaidInstallments(tenantId, rebinds.map((p) => p.id!), label)
-        const needing = rebinds.filter((p) => unpaidSubs.has(p.id!))
-        const oldNames = await vendorNamesOf(tenantId, [...new Set(needing.map((p) => existingById.get(p.id!)!.vendor_id!.toLowerCase()))])
-        const missing = needing.find((p) => !(p.rebindReason ?? "").trim())
+        const oldNames = await vendorNamesOf(tenantId, [...new Set(rebinds.map((p) => existingById.get(p.id!)!.vendor_id!.toLowerCase()))])
+        const missing = rebinds.find((p) => !(p.rebindReason ?? "").trim())
         if (missing) {
           const prev = existingById.get(missing.id!)!
           const oldVendorName = oldNames.get(prev.vendor_id!.toLowerCase()) ?? prev.vendor_name ?? ""
@@ -667,12 +677,12 @@ subcontractsRouter.put(
             newVendorName,
             unbind,
             message: unbind
-              ? `副委託「${prev.vendor_name ?? ""}」仍有未付期款，解除與名冊廠商「${oldVendorName}」的綁定（改為非登錄廠商）請填寫原因`
-              : `副委託「${prev.vendor_name ?? ""}」仍有未付期款，從「${oldVendorName}」改綁「${newVendorName}」請填寫改綁原因`,
+              ? `副委託「${prev.vendor_name ?? ""}」解除與名冊廠商「${oldVendorName}」的綁定（改為非登錄廠商）請填寫原因`
+              : `副委託「${prev.vendor_name ?? ""}」從「${oldVendorName}」改綁「${newVendorName}」請填寫改綁原因`,
           })
           return
         }
-        for (const p of needing) {
+        for (const p of rebinds) {
           const prev = existingById.get(p.id!)!
           await writeAuditLogStrict({
             tenantId,
@@ -684,10 +694,33 @@ subcontractsRouter.put(
             actorEmpId: scope.self.id,
             context:
               p.vendorId === null
-                ? "PUT /projects/:id/subcontracts 副委託解除名冊廠商綁定（有未付期款）"
-                : "PUT /projects/:id/subcontracts 副委託改綁另一家名冊廠商（有未付期款）",
+                ? "PUT /projects/:id/subcontracts 副委託解除名冊廠商綁定"
+                : "PUT /projects/:id/subcontracts 副委託改綁另一家名冊廠商",
           })
         }
+      }
+
+      // 第八輪：非登錄名稱與名冊廠商相近、使用者說明確為不同公司 → 寫入前嚴格稽核（相似對象＋原因）。
+      for (const c of similarConfirms) {
+        const prev = c.row.id ? existingById.get(c.row.id) : undefined
+        await writeAuditLogStrict({
+          tenantId,
+          tableName: "project_subcontracts",
+          recordId: c.row.id ?? null,
+          action: c.row.id ? "UPDATE" : "INSERT",
+          oldRow: prev ? { vendor_id: prev.vendor_id, vendor_name: prev.vendor_name } : null,
+          newRow: {
+            project_id: projectId,
+            vendor_id: null,
+            vendor_name: c.name,
+            confirmDistinctVendor: true,
+            similarVendorIds: c.matches.map((m) => m.id),
+            similarVendorNames: c.matches.map((m) => m.name),
+            confirmDistinctReason: c.reason,
+          },
+          actorEmpId: scope.self.id,
+          context: "PUT /projects/:id/subcontracts 非登錄副委託與名冊廠商名稱相近（確認為不同公司）",
+        })
       }
 
       const nowIso = new Date().toISOString()

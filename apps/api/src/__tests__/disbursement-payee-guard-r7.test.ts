@@ -152,7 +152,9 @@ const vendorEOnlyInArchived = () => {
   fake.db.project_subcontract_payments!.push(payRow(PE, SE))
 }
 const subsBody = async (project: string, change: (x: Row) => Row) => {
-  const subs = (await as(request(app).get(`/projects/${project}/subcontracts`))).body.subcontracts as Row[]
+  const got = await as(request(app).get(`/projects/${project}/subcontracts`))
+  if (!got.body.subcontracts) throw new Error(`GET subcontracts ${got.status} ${JSON.stringify(got.body)}`)
+  const subs = got.body.subcontracts as Row[]
   return { subcontracts: subs.map((x) => change({ id: x.id, kind: x.kind, vendorId: x.vendorId ?? null, vendorName: x.vendorName, amount: x.amount })) }
 }
 const putSubs = (project: string, body: Row) => as(request(app).put(`/projects/${project}/subcontracts`)).send(body)
@@ -231,20 +233,27 @@ describe("第七輪 H1：既有列解除名冊綁定（A → null）也要原因
     expect(payables.filter((p) => p.subcontractId === SA1).every((p) => p.vendorId === VA)).toBe(true)
     expect((await create(other("測試甲工程行"))).body.error).toBe("payee_is_registered_vendor")
   })
-  it("期款都已付 → 解除綁定不用原因；新建列 vendorId null 不算", async () => {
+  it("第八輪：期款都已付 → 解除綁定也要原因；帶原因 → 200", async () => {
     fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.subcontract_id === SA1 ? { ...p, paid_on: "2026-11-01" } : p))
     const res = await putSubs(P1, await subsBody(P1, (x) => (x.id === SA1 ? { ...x, vendorId: null, vendorName: "測試另一下包" } : x)))
-    expect(res.status, r(res)).toBe(200)
+    expect(res.status, r(res)).toBe(400)
+    expect(res.body.error).toBe("rebind_reason_required")
+    const ok = await putSubs(P1, await subsBody(P1, (x) => (x.id === SA1 ? { ...x, vendorId: null, vendorName: "測試另一下包", rebindReason: "測試：已結清改非登錄" } : x)))
+    expect(ok.status, r(ok)).toBe(200)
   })
 })
 
 describe("第七輪：名冊撞名比全部 key（名稱、簡稱、帳戶戶名）", () => {
   const post = (b: Row) => as(request(app).post("/vendors")).send(b)
-  it("新建：簡稱／帳戶戶名／名稱撞他家任一 key → 409（訊息帶撞到的廠商名）、0 寫入", async () => {
+  it("新建：簡稱／帳戶戶名／名稱與他家任一 key 完全相同 → 409 duplicate（訊息帶撞到的廠商名）、0 寫入；相近 → 409 similar", async () => {
+    fake.writes.length = 0
+    const sim = await post({ name: "甲工程有限公司" })
+    expect(sim.status).toBe(409)
+    expect(sim.body).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測試甲工程行" })
+    expect(fake.writes.filter((w) => w.table === "vendors")).toHaveLength(0)
     for (const b of [
       { name: "測試全新甲", shortName: "甲工程" },
       { name: "測試全新乙", accountHolder: "測試甲王小明" },
-      { name: "甲工程有限公司" },
       { name: "測試全新丙", shortName: "測試甲工程行" },
     ]) {
       fake.writes.length = 0
@@ -259,11 +268,14 @@ describe("第七輪：名冊撞名比全部 key（名稱、簡稱、帳戶戶名
     expect((await post({ name: "測試全新戊", shortName: "甲工" })).status).toBe(201)
   })
   it("修改：乙改簡稱／帳戶戶名撞甲 → 409、不寫；乙改備註不比；乙改成不撞的簡稱 → 200", async () => {
-    for (const b of [{ shortName: "甲工程" }, { accountHolder: "測試甲王小明" }, { name: "測試甲工程(台北)" }]) {
+    for (const b of [{ shortName: "甲工程" }, { accountHolder: "測試甲王小明" }]) {
       const res = await as(request(app).patch(`/vendors/${VB}`)).send(b)
       expect(res.status, JSON.stringify(b)).toBe(409)
       expect(res.body.error).toBe("vendor_name_duplicate")
     }
+    const sim = await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試甲工程(台北)" })
+    expect(sim.status).toBe(409)
+    expect(sim.body.error).toBe("vendor_name_similar")
     expect(fake.db.vendors!.find((v) => v.id === VB)).toMatchObject({ short_name: null, account_holder: null, name: "測試乙工程行" })
     expect((await as(request(app).patch(`/vendors/${VB}`)).send({ shortName: "乙工程" })).status).toBe(200)
   })
@@ -287,11 +299,11 @@ describe("第七輪 M1：名稱變體", () => {
     expect(payeeNameKey("行")).toBe("行")
     expect(payeeNameKey("測試行號")).toBe("測試")
   })
-  it("「其他」收款用變體 → 400 payee_is_registered_vendor；不相干名稱 → 201", async () => {
+  it("第八輪：「其他」收款用變體 → 409 payee_name_similar（需說明）；不相干名稱 → 201", async () => {
     for (const name of ["測試甲工程行台北分公司", "測試甲工程行(台中)", "測試甲工程行-台中", "測試甲工程行/王小明", "測試甲工程有限公司", "ABC Design Limited", "ABC Design Co Ltd"]) {
       const c = await create(other(name))
-      expect(c.status, name).toBe(400)
-      expect(c.body.error, name).toBe("payee_is_registered_vendor")
+      expect(c.status, name).toBe(409)
+      expect(c.body.error, name).toBe("payee_name_similar")
     }
     expect((await create(other("測試毫不相干收款人"))).status).toBe(201)
   })
@@ -382,9 +394,10 @@ describe("第七輪 M2：零分攤登錄廠商單，開單後才新增期款 →
 })
 
 describe("第七輪 MCP：副委託改綁／解除綁定升最高風險", () => {
-  it("帶 rebindReason 或既有列 vendorId: null → high；新建列 vendorId null、一般修改 → medium", () => {
+  it("帶 rebindReason 或 confirmDistinctReason → high；第八輪：既有列 vendorId: null（沒帶原因）、新建列、一般修改 → medium", () => {
     expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ id: "s1", vendorId: VB, vendorName: "x", amount: 1, rebindReason: "r" }] })?.tier).toBe("high")
-    expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ id: "s1", vendorId: null, vendorName: "x", amount: 1 }] })?.tier).toBe("high")
+    expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ vendorId: null, vendorName: "x", amount: 1, confirmDistinctReason: "r" }] })?.tier).toBe("high")
+    expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ id: "s1", vendorId: null, vendorName: "x", amount: 1 }] })?.tier).toBe("medium")
     expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ vendorId: null, vendorName: "x", amount: 1 }] })?.tier).toBe("medium")
     expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ id: "s1", amount: 1 }] })?.tier).toBe("medium")
   })

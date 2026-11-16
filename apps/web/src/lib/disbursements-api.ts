@@ -109,6 +109,18 @@ export interface Disbursement {
   attachments?: Attachment[]
   /** 第六輪：登錄廠商零分攤單曾確認「非期款支出」（只在單筆 GET 帶；核准頁標示用）。 */
   nonInstallmentConfirmed?: boolean
+  /** 第八輪：「其他」收款名稱與名冊廠商相近（單筆 GET 與待簽清單帶；核准頁醒目標示）。 */
+  payeeSimilarWarning?: PayeeSimilarWarning
+}
+
+/** 第八輪：收款名稱與名冊廠商相近的標示。reason 為 null＝開單後名冊才新增相近廠商、沒有說明紀錄。 */
+export interface PayeeSimilarWarning {
+  matchedVendorName: string
+  matchedVendorNames: string[]
+  reason: string | null
+  confirmedByName: string | null
+  /** 「收款名稱與名冊廠商『Y』相近，已由 XXX 說明：…」 */
+  message: string
 }
 
 /** 一關簽核（disbursement_approval_steps）。 */
@@ -171,6 +183,8 @@ export interface DisbursementInput {
   forceAcceptance?: boolean
   /** 登錄廠商零分攤、廠商仍有未付期款時確認「不是付期款」（後端寫稽核，2026-11-17）。 */
   confirmNonInstallment?: boolean
+  /** 第八輪：「其他」收款名稱與名冊廠商相近（409 payee_name_similar）但確為不同公司的說明（寫嚴格稽核、核准頁標示）。 */
+  confirmDistinctReason?: string
 }
 
 /** PATCH：draft 全欄可改（allocations 整批覆蓋，列數變少可能 409
@@ -581,7 +595,8 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   payee_bank_mismatch: "收款帳戶與登錄廠商名冊不同；若帳戶已變更請先到廠商名冊更新（需財務權限）。",
   allocation_vendor_changed: "分攤的副委託廠商已變更，請重新確認放款單。",
   vendor_bank_missing: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶。",
-  payee_is_registered_vendor: "收款對象與名冊廠商視為同一家，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
+  payee_is_registered_vendor: "收款對象與名冊廠商名稱相同，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
+  payee_name_similar: "收款名稱與名冊廠商相近；若是同一家請改選登錄廠商，若確為不同公司請填寫說明。",
   payee_bank_changed: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出；已核准的單請先撤回簽核再編輯。",
   invalid_payee_name: "名稱含有不可見字元或西里爾／希臘字母，請重新輸入。",
   vendor_has_unpaid_installments: "此廠商仍有未付期款，若要付期款請改用分攤；確定為非期款支出請勾選確認。",
@@ -624,6 +639,8 @@ export function humanizeDisbursementError(err: unknown, fallback: string): strin
   if (typeof server === "string" && server.trim() && (body?.autoVoided === true || msg.includes("manual_check_required"))) return server
   // 第六輪：撞名冊廠商、名稱不合法 → 後端訊息帶廠商名稱／具體原因，直接顯示。
   if (typeof server === "string" && server.trim() && (msg.includes("payee_is_registered_vendor") || msg.includes("invalid_payee_name"))) return server
+  // 第八輪：相近名稱、使用者取消說明 → 顯示撞到的名冊名稱。
+  if (typeof server === "string" && server.trim() && msg.includes("payee_name_similar")) return `${server}（未填說明，沒有儲存）`
   for (const [code, text] of Object.entries(DISBURSEMENT_ERRORS)) {
     if (msg.includes(code)) return text
   }

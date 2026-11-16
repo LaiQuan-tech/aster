@@ -199,7 +199,7 @@ describe("副委託整批 PUT：更新既有列只寫有帶的欄位", () => {
   it("同時送 vendorId＋vendorName → 兩欄一起改", async () => {
     fake.db.vendors!.push({ id: VENDOR_ID_2, tenant_id: TENANT_ID, name: "測試另一家事務所", deleted_at: null })
     const res = await put([
-      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所" },
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
     ])
     expect(res.status).toBe(200)
@@ -208,7 +208,7 @@ describe("副委託整批 PUT：更新既有列只寫有帶的欄位", () => {
 
   it("送 vendorId: null＋新 vendorName → 清掉 vendor_id、改名（非登錄廠商）", async () => {
     const res = await put([
-      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試臨時廠商" },
+      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試臨時廠商", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
     ])
     expect(res.status).toBe(200)
@@ -320,7 +320,7 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
   it("換 vendorId 但配舊名 → 400 vendor_name_mismatch", async () => {
     addVendor2()
     const res = await put([
-      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試事務所" },
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試事務所", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
     ])
     expect(res.status).toBe(400)
@@ -331,7 +331,7 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
   it("換 vendorId 配名冊名稱（前後空白不計）→ 200", async () => {
     addVendor2()
     const res = await put([
-      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: " 測試乙廠商  " },
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: " 測試乙廠商  ", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
     ])
     expect(res.status).toBe(200)
@@ -372,7 +372,7 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
 
   it("vendorId: null＋任意名稱（既有列與新建列）→ 200", async () => {
     const res = await put([
-      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試隨便一家" },
+      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試隨便一家", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000, vendorId: null, vendorName: "測試另一個名字" },
       { amount: 5000, vendorId: null, vendorName: "測試新的臨時廠商" },
     ])
@@ -384,7 +384,7 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
   it("vendorId 不在本租戶名冊（或已刪除）→ 400 invalid_vendor", async () => {
     fake.db.vendors!.push({ id: VENDOR_ID_2, tenant_id: TENANT_ID, name: "測試乙廠商", deleted_at: "2026-11-01T00:00:00.000Z" })
     const res = await put([
-      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試乙廠商" },
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試乙廠商", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
     ])
     expect(res.status).toBe(400)
@@ -463,6 +463,7 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
         id: SUB_FIRM, kind: "firm", discipline: "測試專業別", vendorId: VENDOR_ID_2, vendorName: "測試乙廠商",
         contact: "測試聯絡人", item: "測試項目", amount: 100000, billingBasis: "測試計費依據", orderType: "contract",
         contractId: CONTRACT_ID, withholdingRate: 0.1, withholdingThreshold: 20000, sortOrder: 0, note: "測試備註",
+        rebindReason: "測試：改由乙施作",
       },
       {
         id: SUB_PLAIN, kind: "subcontract", discipline: null, vendorId: null, vendorName: "測試名冊外廠商",
@@ -499,7 +500,7 @@ describe("R1a：副委託已有放款單分攤時不可換廠商（2026-11-16）
   }
   const changeVendor = () =>
     put([
-      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所" },
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
     ])
 
@@ -526,7 +527,7 @@ describe("R1a：副委託已有放款單分攤時不可換廠商（2026-11-16）
   it("改成非登錄廠商（vendorId: null）也擋", async () => {
     seed("draft")
     const res = await put([
-      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試臨時廠商" },
+      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試臨時廠商", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
     ])
     expect(res.status).toBe(409)
@@ -538,7 +539,7 @@ describe("R1a：副委託已有放款單分攤時不可換廠商（2026-11-16）
     expect((await changeVendor()).status).toBe(200)
     fake.db.disbursements = [{ id: DISB_ID, tenant_id: TENANT_ID, status: "draft" }]
     const same = await put([
-      { id: SUB_FIRM, amount: 110000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所" },
+      { id: SUB_FIRM, amount: 110000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
     ])
     expect(same.status).toBe(200)
@@ -567,8 +568,20 @@ describe("第五輪 #4（2026-11-17）：非登錄副委託不可與名冊廠商
   })
   const mustBind = { error: "must_bind_vendor" }
 
-  it("新建非登錄列名稱＝名冊廠商名稱（含後綴／標點變體）→ 409 must_bind_vendor、0 寫入", async () => {
-    for (const vendorName of ["測試事務所", "測試事務所.", "(股)測試事務所", "測試廠商", "測試-廠商"]) {
+  it("新建非登錄列名稱＝名冊廠商名稱（含標點變體）→ 409 must_bind_vendor、0 寫入；差後綴 → 409 vendor_name_similar", async () => {
+    for (const vendorName of ["(股)測試事務所", "測試廠商"]) {
+      fake.writes.length = 0
+      const res = await put([
+        { id: SUB_FIRM, amount: 100000 },
+        { id: SUB_PLAIN, amount: 30000 },
+        { amount: 5000, vendorId: null, vendorName },
+      ])
+      expect(res.status, vendorName).toBe(409)
+      expect(res.body, vendorName).toMatchObject({ error: "vendor_name_similar", id: null, index: 2, vendorName })
+      expect(res.body.message).toContain("若是不同公司請填寫說明")
+      expect(fake.writes).toHaveLength(0)
+    }
+    for (const vendorName of ["測試事務所", "測試事務所.", "測試-事務所", "測試 事務所"]) {
       fake.writes.length = 0
       const res = await put([
         { id: SUB_FIRM, amount: 100000 },
@@ -578,7 +591,7 @@ describe("第五輪 #4（2026-11-17）：非登錄副委託不可與名冊廠商
       expect(res.status, vendorName).toBe(409)
       expect(res.body, vendorName).toMatchObject({ ...mustBind, id: null, index: 2, vendorName })
       expect(typeof res.body.matchedVendorName).toBe("string")
-      expect(res.body.message).toBe(`「${vendorName}」與名冊廠商「${res.body.matchedVendorName}」視為同一家，請在下拉選擇該廠商`)
+      expect(res.body.message).toBe(`「${vendorName}」與名冊廠商「${res.body.matchedVendorName}」名稱相同，請在下拉選擇該廠商`)
       expect(fake.writes).toHaveLength(0)
     }
     // 沒送 vendorId 的新建列一樣算非登錄
@@ -590,7 +603,7 @@ describe("第五輪 #4（2026-11-17）：非登錄副委託不可與名冊廠商
     const rename = await put([{ id: SUB_FIRM, amount: 100000 }, { id: SUB_PLAIN, amount: 30000, vendorId: null, vendorName: "測試事務所" }])
     expect(rename.status).toBe(409)
     expect(rename.body).toMatchObject({ ...mustBind, id: SUB_PLAIN })
-    const unbind = await put([{ id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試事務所" }, { id: SUB_PLAIN, amount: 30000 }])
+    const unbind = await put([{ id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試事務所", rebindReason: "測試原因" }, { id: SUB_PLAIN, amount: 30000 }])
     expect(unbind.status).toBe(409)
     expect(unbind.body).toMatchObject({ ...mustBind, id: SUB_FIRM })
     expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: VENDOR_ID })

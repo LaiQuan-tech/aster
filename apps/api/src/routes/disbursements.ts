@@ -104,6 +104,8 @@ const createBody = z.object({
   forceAcceptance: z.boolean().optional(),
   /** 登錄廠商零分攤、廠商仍有未付期款時確認「不是付期款」（第五輪，寫稽核）。 */
   confirmNonInstallment: z.boolean().optional(),
+  /** 第八輪：「其他」收款名稱與名冊廠商相近（payee_name_similar）但確為不同公司的說明（寫嚴格稽核、核准頁標示）。 */
+  confirmDistinctReason: z.string().trim().max(500).nullish(),
 })
 
 const patchBody = createBody.omit({ status: true }).partial()

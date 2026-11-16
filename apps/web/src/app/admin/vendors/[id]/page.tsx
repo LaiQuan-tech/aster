@@ -20,7 +20,7 @@ import { Button, Card, Empty, ErrorText, Pill, inputCls, labelCls, useToast } fr
 import { RosterDetailHeader, RosterSaveBar, RosterSection, useRosterRoles } from "@/components/roster-detail";
 import { useUnsavedChangesGuard } from "@/components/useUnsavedChangesGuard";
 import { humanizeAffiliateError } from "@/lib/affiliate";
-import { humanizeVendorDeleteError, humanizeVendorIdentityError, isChangeReasonRequired } from "@/lib/vendor-name-binding";
+import { humanizeVendorDeleteError, humanizeVendorIdentityError, isChangeReasonRequired, similarNameConflict, similarNamePrompt } from "@/lib/vendor-name-binding";
 import {
   listVendors, createVendor, updateVendor, deleteVendor, getVendorCardUrl, scanVendorCard,
   type Vendor, type VendorInput, type VendorRosterKind,
@@ -174,23 +174,43 @@ export default function VendorDetailPage() {
     setSaveError(null);
     try {
       const body: VendorInput = { ...parsed.input, ...(cardPath ? { cardStoragePath: cardPath, source: "card_ocr" as const } : {}) };
-      if (isNew) {
-        const r = await createVendor(body);
-        toast.show("已新增廠商", "success");
-        leave(rosterDetailHref("vendors", r.vendor.id));
-        return;
-      }
-      try {
-        await updateVendor(id, body);
-      } catch (err) {
-        // 改收款帳戶而廠商仍有未付期款（沒有開單）：要填變更原因（寫稽核），填了再送一次。
-        if (!(err instanceof Error) || !isChangeReasonRequired(err.message)) throw err;
-        const reason = window.prompt("此廠商仍有未付期款，更改收款帳戶請填寫變更原因（會留稽核紀錄）：")?.trim();
-        if (!reason) {
-          setSaveError("未填寫變更原因，收款帳戶沒有更改。");
-          return;
+      // 互動重送：名稱與名冊廠商相近（第八輪 vendor_name_similar）→ 問「確為不同公司」說明帶 confirmDistinctReason；
+      // 改收款帳戶而廠商仍有未付期款（沒有開單）→ 問變更原因帶 changeReason（寫稽核）。名稱相同（vendor_name_duplicate）仍硬擋。
+      const extra: { changeReason?: string; confirmDistinctReason?: string } = {};
+      let createdId: string | null = null;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          if (isNew) createdId = (await createVendor({ ...body, ...extra })).vendor.id;
+          else await updateVendor(id, { ...body, ...extra });
+          break;
+        } catch (err) {
+          if (attempt >= 2) throw err;
+          const similar = similarNameConflict(err);
+          if (similar && !extra.confirmDistinctReason) {
+            const reason = window.prompt(similarNamePrompt(similar))?.trim();
+            if (!reason) {
+              setSaveError(`${similar.message}（未填說明，沒有儲存）`);
+              return;
+            }
+            extra.confirmDistinctReason = reason;
+            continue;
+          }
+          if (!isNew && !extra.changeReason && err instanceof Error && isChangeReasonRequired(err.message)) {
+            const reason = window.prompt("此廠商仍有未付期款，更改收款帳戶請填寫變更原因（會留稽核紀錄）：")?.trim();
+            if (!reason) {
+              setSaveError("未填寫變更原因，收款帳戶沒有更改。");
+              return;
+            }
+            extra.changeReason = reason;
+            continue;
+          }
+          throw err;
         }
-        await updateVendor(id, { ...body, changeReason: reason });
+      }
+      if (isNew && createdId) {
+        toast.show("已新增廠商", "success");
+        leave(rosterDetailHref("vendors", createdId));
+        return;
       }
       toast.show("已儲存", "success");
       setScanMsg(null);

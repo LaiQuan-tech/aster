@@ -101,13 +101,16 @@ export type DuplicateProjectError =
  * 複製副委託的廠商綁定提示（第六輪）：
  * - ambiguous：非登錄列撞多家名冊廠商，未自動綁定；
  * - deleted_vendor：來源綁的廠商已刪除，保留非登錄（不自動綁同名新廠商）；
- * - autobound：非登錄列只撞一家名冊廠商，已自動綁定（boundVendorName）。
+ * - autobound：非登錄列名稱與一家名冊廠商幾乎完全相同（第八輪 exactNameKey），已自動綁定（boundVendorName）；
+ * - similar：非登錄列名稱與名冊廠商相近（第八輪），未自動綁定，請使用者確認是否同一家。
  */
 export type SubcontractVendorWarning = {
   vendorName: string
   candidates: number
-  kind?: "ambiguous" | "deleted_vendor" | "autobound"
+  kind?: "ambiguous" | "deleted_vendor" | "autobound" | "similar"
   boundVendorName?: string
+  /** 第八輪 similar：名稱相近的名冊廠商（未自動綁定）。 */
+  similarVendorNames?: string[]
 }
 
 export type DuplicateProjectResult =
@@ -412,12 +415,20 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
           return v
         }
         if (v.vendor_id || !nameIndex) return v
-        const matches = rosterMatchesOf(nameIndex, v.vendor_name)
-        if (matches.length === 1) {
-          subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: 1, kind: "autobound", boundVendorName: matches[0]!.name })
-          return { vendor_id: matches[0]!.id, vendor_name: matches[0]!.name }
+        // 第八輪：只有名稱「幾乎完全相同」（exactNameKey）且恰好一家才自動綁定；相近（similar）只回警告、不綁
+        //（可能是不同公司，例如「大同工程行」與「大同工程有限公司」）。
+        const { exact, similar } = rosterMatchesOf(nameIndex, v.vendor_name)
+        if (exact.length === 1) {
+          subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: 1, kind: "autobound", boundVendorName: exact[0]!.name })
+          return { vendor_id: exact[0]!.id, vendor_name: exact[0]!.name }
         }
-        if (matches.length > 1) subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: matches.length, kind: "ambiguous" })
+        if (exact.length > 1) {
+          subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: exact.length, kind: "ambiguous" })
+          return v
+        }
+        if (similar.length > 0) {
+          subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: similar.length, kind: "similar", similarVendorNames: similar.map((m) => m.name) })
+        }
         return v
       }
       const { error: insErr } = await supabaseAdmin.from("project_subcontracts").insert(

@@ -19,7 +19,7 @@ import {
 } from "@/lib/projects-api";
 import {
   listProjectsExt,
-  createProjectExt,
+  createProjectExtWithConfirm,
   listClients,
   listCompanies,
   createClient,
@@ -147,7 +147,7 @@ export default function AdminProjectsPage() {
     setSaving(true);
     setError(null);
     try {
-      await createAndOpenProject(body, createProjectExt, (href) => router.push(href));
+      await createAndOpenProject(body, (b) => createProjectExtWithConfirm(b, (m) => window.prompt(m)), (href) => router.push(href));
     } catch (err) {
       const msg = err instanceof Error ? err.message : "建立失敗";
       setError(

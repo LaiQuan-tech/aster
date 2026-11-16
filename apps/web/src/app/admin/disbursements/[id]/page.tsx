@@ -1,5 +1,6 @@
 "use client";
 
+import { withSimilarNameConfirm } from "@/lib/vendor-name-binding";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatMoney } from "@/lib/money";
 import Link from "next/link";
@@ -253,7 +254,11 @@ export default function DisbursementDetailPage() {
               invoiceNo: body.invoiceNo,
             }
           : body;
-      const res = await patchDisbursement(disbursement.id, patch);
+      // 第八輪：「其他」收款改名後與名冊廠商相近（409 payee_name_similar）→ 問說明、帶 confirmDistinctReason 重送。
+      const res = await withSimilarNameConfirm(
+        (_conflict, reason) => patchDisbursement(disbursement.id, reason ? { ...patch, confirmDistinctReason: reason } : patch),
+        (m) => window.prompt(m),
+      );
       setDisbursement(res.disbursement);
       setEditing(false);
       setAcceptanceBlocked(false);
@@ -482,6 +487,12 @@ export default function DisbursementDetailPage() {
                 </div>
                 <div><p className="text-xs text-gray-500">發票</p><p className="font-medium text-gray-800">{d.hasInvoice ? `已開立${d.invoiceNo ? "・" + d.invoiceNo : ""}` : "未開立"}</p></div>
               </div>
+              {/* 第八輪：收款名稱與名冊廠商相近（已說明或開單後才相近）→ 醒目標示，請核准人確認收款對象。 */}
+              {d.payeeSimilarWarning && (
+                <p role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
+                  ⚠ {d.payeeSimilarWarning.message}
+                </p>
+              )}
               {d.note && <p className="mt-3 text-sm text-gray-600">備註：{d.note}</p>}
               {d.status === "void" && d.voidReason && (
                 <p className="mt-3 rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-500">作廢原因：{d.voidReason}</p>

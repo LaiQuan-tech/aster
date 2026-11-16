@@ -827,6 +827,12 @@ export default function ApprovalsPage() {
                       <dt className="text-gray-400">建單</dt>
                       <dd>{d.createdByName ?? "—"}</dd>
                     </dl>
+                    {/* 第八輪：收款名稱與名冊廠商相近（已說明或開單後才相近）→ 醒目標示，請核准人確認收款對象。 */}
+                    {d.payeeSimilarWarning && (
+                      <p role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
+                        ⚠ {d.payeeSimilarWarning.message}
+                      </p>
+                    )}
 
                     <div className="mt-3 flex gap-2">
                       <Button variant="primary" className="flex-1" loading={busy} onClick={() => void onApproveDisbursement(d)}>

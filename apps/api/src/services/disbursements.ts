@@ -1,5 +1,5 @@
 import { selectAllPages } from "../lib/select-all-pages.js"
-import { invalidNameMessage, payeeNameKeys, rosterVendorKeys } from "../lib/payee-name.js"
+import { buildRosterKeyIndex, exactNameKey, invalidNameMessage, rosterKeyMatches } from "../lib/payee-name.js"
 import { vendorHasUnpaidInstallments } from "./vendor-unpaid.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isProjectDeletedError, isRetryableConflictError, isRowDeletedError } from "../middleware/project-deleted.js"
@@ -283,6 +283,8 @@ export type DisbursementInput = {
   forceAcceptance?: boolean
   /** 第五輪：登錄廠商零分攤、但廠商仍有未付期款時，確認這筆不是付期款（寫稽核）。 */
   confirmNonInstallment?: boolean
+  /** 第八輪：「其他」收款名稱與名冊廠商相近（payee_name_similar）但確為不同公司的說明（寫嚴格稽核）。 */
+  confirmDistinctReason?: string | null
 }
 
 export type DisbursementPatch = Partial<Omit<DisbursementInput, "status">>
@@ -580,6 +582,8 @@ export type SerializedDisbursement = {
    * 只有單筆 GET 帶；列表不帶。
    */
   nonInstallmentConfirmed?: boolean
+  /** 第八輪：「其他」收款名稱與名冊廠商相近的標示（由稽核查出）；只有單筆 GET 與待簽清單帶。 */
+  payeeSimilarWarning?: PayeeSimilarWarning
   /** 簽核軌跡（只有 GET /disbursements/:id 帶；services/disbursement-approval.ts 填）。 */
   approvalSteps?: SerializedApprovalStep[]
 }
@@ -798,6 +802,10 @@ export async function getDisbursement(tenantId: string, id: string): Promise<Ser
   const out: SerializedDisbursement = { ...serialized[0], attachments }
   if (row.payee_kind === "vendor" && out.allocations.length === 0) {
     out.nonInstallmentConfirmed = (await nonInstallmentConfirmedIds(tenantId, [id])).has(id)
+  }
+  if (row.payee_kind === "other") {
+    const warning = (await payeeSimilarWarnings(tenantId, [row])).get(id)
+    if (warning) out.payeeSimilarWarning = warning
   }
   return out
 }
@@ -1505,16 +1513,10 @@ export function assertPayeeBankMatchesVendor(
 
 export { payeeNameKey } from "../lib/payee-name.js"
 
-/**
- * R3：收款「其他」但戶名（key 比對）與同租戶未刪名冊廠商視為同一家（名稱／簡稱 key≥3／帳戶戶名，
- * lib/payee-name.ts rosterVendorKeys，副委託 must_bind_vendor 同一套）→ payee_is_registered_vendor。
- * 第六輪（2026-11-17）：拿掉 #4「非登錄副委託同名放行」與截止時間——prod 已確認非登錄副委託撞名冊 0 筆，
- * 同名一律擋，請改選登錄廠商（副委託請先綁名冊廠商）。建單／改單回 400；送審／核准／付款守門回 409（F4）。
- */
-export async function assertPayeeNotRegisteredVendor(tenantId: string, payeeName: string, status: 400 | 409 = 400): Promise<void> {
-  const keys = payeeNameKeys(payeeName)
-  if (keys.length === 0) return
-  const vendors = await selectAllPages<{ id: string; name: string | null; short_name?: string | null; account_holder: string | null }>(
+type RosterLite = { id: string; name: string | null; short_name?: string | null; account_holder: string | null }
+
+async function loadRosterForPayee(tenantId: string, label: string): Promise<RosterLite[]> {
+  return selectAllPages<RosterLite>(
     (from, to) =>
       supabaseAdmin
         .from("vendors")
@@ -1523,28 +1525,184 @@ export async function assertPayeeNotRegisteredVendor(tenantId: string, payeeName
         .is("deleted_at", null)
         .order("id")
         .range(from, to),
-    "assertPayeeNotRegisteredVendor",
+    label,
   )
-  const hit = vendors.find((v) => rosterVendorKeys(v).some((k) => keys.includes(k)))
-  if (!hit) return
-  const matchedVendorName = hit.name ?? ""
-  throw new DisbursementError(status, "payee_is_registered_vendor", {
+}
+
+/** 第八輪：「其他」收款名稱與名冊廠商相近（已說明為不同公司）的命中資訊。 */
+export type PayeeSimilarHit = { matchedVendorId: string; matchedVendorName: string; similarVendorIds: string[]; similarVendorNames: string[] }
+
+/**
+ * R3：收款「其他」但戶名與同租戶未刪名冊廠商比對（名稱／簡稱 key≥3／帳戶戶名，lib/payee-name.ts rosterVendorKeys，
+ * 副委託 must_bind_vendor 同一套）。第八輪（2026-11-17）拆兩級：
+ * - exact（exactNameKey：只差空白／全形／標點／大小寫／臺台）→ payee_is_registered_vendor 硬擋
+ *  （建單／改單 400；送審／核准／付款守門 409，F4）；
+ * - similar（去公司後綴、分公司、括號段…）→ 建單／改單須帶 confirmDistinctReason，否則 409 payee_name_similar；
+ *   帶了回傳命中資訊，呼叫端寫嚴格稽核（核准頁從稽核查出標示）。gate（送審／核准／付款）時 similar 不擋（建單時已確認過）。
+ */
+export async function assertPayeeNotRegisteredVendor(
+  tenantId: string,
+  payeeName: string,
+  opts: { status?: 400 | 409; gate?: boolean; confirmDistinctReason?: string | null } = {},
+): Promise<PayeeSimilarHit | null> {
+  if (!exactNameKey(payeeName)) return null
+  const vendors = (await loadRosterForPayee(tenantId, "assertPayeeNotRegisteredVendor")).filter((v) => (v.name ?? "").trim() !== "")
+  const { exact, similar } = rosterKeyMatches(buildRosterKeyIndex(vendors), payeeName)
+  if (exact.length > 0) {
+    const hit = exact[0]!
+    const matchedVendorName = hit.name ?? ""
+    throw new DisbursementError(opts.status ?? 400, "payee_is_registered_vendor", {
+      matchedVendorName,
+      matchedVendorId: hit.id,
+      message: `收款對象與名冊廠商「${matchedVendorName}」名稱相同，請改選登錄廠商「${matchedVendorName}」`,
+    })
+  }
+  if (similar.length === 0 || opts.gate) return null
+  const matchedVendorName = similar[0]!.name ?? ""
+  const reason = (opts.confirmDistinctReason ?? "").trim()
+  if (!reason) {
+    throw new DisbursementError(409, "payee_name_similar", {
+      matchedVendorName,
+      matchedVendorId: similar[0]!.id,
+      matchedVendorNames: similar.map((v) => v.name ?? ""),
+      message: `收款名稱與名冊廠商「${matchedVendorName}」相近；若是同一家請改選登錄廠商，若確為不同公司請填寫說明`,
+    })
+  }
+  return {
+    matchedVendorId: similar[0]!.id,
     matchedVendorName,
-    matchedVendorId: hit.id,
-    message: `收款對象與名冊廠商「${matchedVendorName}」視為同一家，請改選登錄廠商「${matchedVendorName}」；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商`,
+    similarVendorIds: similar.map((v) => v.id),
+    similarVendorNames: similar.map((v) => v.name ?? ""),
+  }
+}
+
+/** 第八輪：「其他」收款名稱相近、已說明為不同公司 → 寫入前嚴格稽核（核准頁標示從這裡查）。 */
+async function auditPayeeSimilarConfirm(
+  tenantId: string,
+  actor: Actor,
+  recordId: string | null,
+  payeeName: string,
+  hit: PayeeSimilarHit,
+  reason: string,
+  context: string,
+): Promise<void> {
+  await writeAuditLogStrict({
+    tenantId,
+    tableName: "disbursements",
+    recordId,
+    action: recordId ? "UPDATE" : "INSERT",
+    oldRow: null,
+    newRow: { payee_kind: "other", payee_name: payeeName, ...payeeSimilarAuditFields(hit, reason) },
+    actorEmpId: actor.empId,
+    context: `${context} 「其他」收款名稱與名冊廠商相近（確認為不同公司）`,
   })
+}
+
+function payeeSimilarAuditFields(hit: PayeeSimilarHit, reason: string) {
+  return {
+    confirmDistinctPayee: true,
+    similarVendorIds: hit.similarVendorIds,
+    similarVendorNames: hit.similarVendorNames,
+    confirmDistinctReason: reason,
+  }
+}
+
+/** 核准頁／詳情頁的「收款名稱與名冊廠商相近」標示（第八輪）。 */
+export type PayeeSimilarWarning = {
+  matchedVendorName: string
+  matchedVendorNames: string[]
+  /** 已說明的原因；null＝開單後名冊才新增相近廠商、沒有說明紀錄。 */
+  reason: string | null
+  confirmedByName: string | null
+  message: string
+}
+
+/**
+ * 第八輪：「其他」收款單的相近名稱標示（無 DDL，從稽核查）：
+ * 稽核 new_row.confirmDistinctPayee＝true 且 payee_name 等於單上現值的最新一筆 → 「已由 XXX 說明：…」；
+ * 沒有說明紀錄但現在名冊有相近廠商（開單後才新增）→ 「相近（未說明）」。查失敗不擋顯示，回空 Map 並記 log。
+ */
+export async function payeeSimilarWarnings(
+  tenantId: string,
+  rows: ReadonlyArray<{ id: string; payee_kind: string | null; payee_name: string | null }>,
+): Promise<Map<string, PayeeSimilarWarning>> {
+  const out = new Map<string, PayeeSimilarWarning>()
+  const others = rows.filter((r) => r.payee_kind === "other" && exactNameKey(r.payee_name))
+  if (others.length === 0) return out
+  try {
+    const confirmed = new Map<string, { names: string[]; reason: string; actor: string | null }>()
+    const ids = others.map((r) => r.id)
+    const nameOf = new Map(others.map((r) => [r.id, (r.payee_name ?? "").trim()]))
+    for (let i = 0; i < ids.length; i += 100) {
+      const { data, error } = await supabaseAdmin
+        .from("audit_logs")
+        .select("record_id, new_row, actor_emp_id, created_at")
+        .eq("tenant_id", tenantId)
+        .eq("table_name", "disbursements")
+        .in("record_id", ids.slice(i, i + 100))
+        .contains("new_row", { confirmDistinctPayee: true })
+        .order("created_at", { ascending: false })
+      if (error) throw new Error(error.message)
+      for (const r of (data ?? []) as Array<{ record_id: string | null; new_row: Record<string, unknown> | null; actor_emp_id: string | null }>) {
+        if (!r.record_id || confirmed.has(r.record_id)) continue
+        const nr = r.new_row ?? {}
+        if (String(nr.payee_name ?? "").trim() !== nameOf.get(r.record_id)) continue
+        const names = Array.isArray(nr.similarVendorNames) ? nr.similarVendorNames.map((n) => String(n)) : []
+        confirmed.set(r.record_id, { names, reason: String(nr.confirmDistinctReason ?? ""), actor: r.actor_emp_id })
+      }
+    }
+    const actorIds = [...new Set([...confirmed.values()].map((c) => c.actor).filter((v): v is string => !!v))]
+    const actorNames = new Map<string, string>()
+    if (actorIds.length > 0) {
+      const { data, error } = await supabaseAdmin.from("employees").select("id, name").eq("tenant_id", tenantId).in("id", actorIds)
+      if (error) throw new Error(error.message)
+      for (const e of (data ?? []) as Array<{ id: string; name: string | null }>) actorNames.set(e.id, e.name ?? "")
+    }
+    const roster = (await loadRosterForPayee(tenantId, "payeeSimilarWarnings")).filter((v) => (v.name ?? "").trim() !== "")
+    const index = buildRosterKeyIndex(roster)
+    for (const r of others) {
+      const c = confirmed.get(r.id)
+      if (c) {
+        const by = (c.actor && actorNames.get(c.actor)) || "（未知）"
+        const main = c.names[0] ?? ""
+        out.set(r.id, {
+          matchedVendorName: main,
+          matchedVendorNames: c.names,
+          reason: c.reason,
+          confirmedByName: c.actor ? (actorNames.get(c.actor) ?? null) : null,
+          message: `收款名稱與名冊廠商「${main}」相近，已由 ${by} 說明：${c.reason}`,
+        })
+        continue
+      }
+      const similar = rosterKeyMatches(index, r.payee_name).similar
+      if (similar.length > 0) {
+        const main = similar[0]!.name ?? ""
+        out.set(r.id, {
+          matchedVendorName: main,
+          matchedVendorNames: similar.map((v) => v.name ?? ""),
+          reason: null,
+          confirmedByName: null,
+          message: `收款名稱與名冊廠商「${main}」相近（開單時名冊尚無此廠商，未經說明），請確認收款對象`,
+        })
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "payeeSimilarWarnings: lookup failed")
+    return new Map()
+  }
+  return out
 }
 
 /**
  * F4（第六輪）：送審、核准、付款（含批次）前，「其他」收款單重驗戶名不是名冊廠商——開單後名冊才新增同名廠商時擋（409）。
- * 駁回、作廢不呼叫。
+ * 第八輪：只有 exact 擋；相近（similar）不擋（建單／改單時已說明，核准頁標示）。駁回、作廢不呼叫。
  */
 export async function assertOtherPayeeStillNotRegisteredVendor(
   tenantId: string,
   current: Pick<DisbursementRow, "payee_kind" | "payee_name">,
 ): Promise<void> {
   if (current.payee_kind !== "other") return
-  await assertPayeeNotRegisteredVendor(tenantId, current.payee_name ?? "", 409)
+  await assertPayeeNotRegisteredVendor(tenantId, current.payee_name ?? "", { status: 409, gate: true })
 }
 
 /**
@@ -2373,7 +2531,11 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
   const header = await resolveHeader(tenantId, input)
   const allocations = await resolveAllocations(tenantId, input.allocations)
   // R3：收款「其他」但戶名（正規化後）與名冊廠商視為同一家 → 400（第六輪起非登錄副委託同名也不放行）。
-  if (header.payee_kind === "other") await assertPayeeNotRegisteredVendor(tenantId, header.payee_name)
+  const confirmDistinctReason = (input.confirmDistinctReason ?? "").trim()
+  const payeeSimilar =
+    header.payee_kind === "other"
+      ? await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, { confirmDistinctReason })
+      : null
   assertAllocationVendors(header.vendor_id, allocations)
   assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
   assertVendorPurpose(header, allocations)
@@ -2394,6 +2556,8 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
   }
   // 第 5 項：確認非期款支出的稽核嚴格、且在建單之前寫（寫不進去就不建）。
   if (nonInstallmentConfirmed) await auditNonInstallmentConfirm(tenantId, actor, null, header, "POST /disbursements")
+  // 第八輪：相近名稱的說明——嚴格、建單前寫（寫不進去就不建）；建單後的 INSERT 稽核也帶同樣欄位（核准頁從那裡依單號查）。
+  if (payeeSimilar) await auditPayeeSimilarConfirm(tenantId, actor, null, header.payee_name, payeeSimilar, confirmDistinctReason, "POST /disbursements")
 
   const today = await tenantToday(tenantId)
   const year = Number(today.slice(0, 4))
@@ -2433,6 +2597,7 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
         ...(forcedPayReason ? { forcedPaid: true, forceReason: forcedPayReason } : {}),
         // 第六輪：核准頁「已確認為非期款支出」標示從這裡查（建單前的嚴格稽核還沒有單號 id）。
         ...(nonInstallmentConfirmed ? { confirmNonInstallment: true } : {}),
+        ...(payeeSimilar ? payeeSimilarAuditFields(payeeSimilar, confirmDistinctReason) : {}),
       },
       actorEmpId: actor.empId,
       context: "POST /disbursements",
@@ -2568,7 +2733,7 @@ function manualCheckError(disbursementNo: string, message: string): Disbursement
 
 const PAID_EDITABLE = new Set<keyof DisbursementPatch>(["note", "receiptRef", "purpose", "hasInvoice", "invoiceNo"])
 /** 不是單據欄位、只是這次呼叫的旗標，比對「有沒有被改動」時要跳過。 */
-const CONTROL_KEYS = new Set<keyof DisbursementPatch>(["forceReason", "forceAcceptance", "confirmNonInstallment"])
+const CONTROL_KEYS = new Set<keyof DisbursementPatch>(["forceReason", "forceAcceptance", "confirmNonInstallment", "confirmDistinctReason"])
 
 function headerToInput(d: DisbursementRow): Omit<DisbursementInput, "status" | "allocations"> {
   return {
@@ -2733,8 +2898,17 @@ export async function updateDisbursement(
       refKeys(storedAllocs.map((a) => ({ sub: a.subcontract_id, pay: a.subcontract_payment_id }))) !==
         refKeys(allocations.map((a) => ({ sub: a.subcontractId, pay: a.subcontractPaymentId })))
     // R3：PATCH 只在收款方、戶名或分攤有改時檢查（不回溯）。
+    const confirmDistinctReason = (patch.confirmDistinctReason ?? "").trim()
+    let payeeSimilar: PayeeSimilarHit | null = null
     if (header.payee_kind === "other" && (payeeChanged || payeeNameChanged || allocationsChanged)) {
-      await assertPayeeNotRegisteredVendor(tenantId, header.payee_name)
+      try {
+        payeeSimilar = await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, { confirmDistinctReason })
+      } catch (err) {
+        // 戶名沒變、只改分攤：這個名稱先前已說明過（稽核有紀錄）就不重問。
+        if (!(err instanceof DisbursementError) || err.code !== "payee_name_similar" || payeeChanged || payeeNameChanged) throw err
+        const prior = (await payeeSimilarWarnings(tenantId, [current])).get(id)
+        if (!prior || prior.reason === null) throw err
+      }
     }
     if (payeeChanged) {
       assertAllocationVendors(header.vendor_id, allocations)
@@ -2772,6 +2946,7 @@ export async function updateDisbursement(
     // 先「佔住」這張草稿：條件寫入 updated_at＋編輯人（仍是 draft、沒被別人改過才成立，否則 409），
     // 之後分攤與單頭才寫——送簽／別人的修改搶在中間時不會改到已送簽的單（M2）。
     if (nonInstallmentConfirmed) await auditNonInstallmentConfirm(tenantId, actor, id, header, "PATCH /disbursements/:id")
+    if (payeeSimilar) await auditPayeeSimilarConfirm(tenantId, actor, id, header.payee_name, payeeSimilar, confirmDistinctReason, "PATCH /disbursements/:id")
     const claimedAt = await guardedUpdate({ updated_at: nowIso, ...editorsPatch() }, "draft claim", current.updated_at ?? null)
     // 分攤先寫：唯一預期中的失敗（409 allocation_not_removable）發生在還沒動到單頭之前。
     if (patch.allocations !== undefined) await replaceAllocations(tenantId, id, allocations)

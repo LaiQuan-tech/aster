@@ -528,20 +528,41 @@ describe("POST /projects primary contract", () => {
       expect(stored[0]).toMatchObject({ vendor_id: VENDOR_ID, vendor_name: "合格廠商" })
     })
 
-    it("第五輪 #4：{vendorId: null／沒帶, 名稱 key＝名冊廠商名稱} → 409 must_bind_vendor，未呼叫 RPC", async () => {
+    it("第五輪 #4／第八輪：{vendorId: null／沒帶, 名稱＝名冊廠商名稱} → 409 must_bind_vendor；相近 → 409 vendor_name_similar；都未呼叫 RPC", async () => {
       for (const [i, row] of [
         { vendorId: null, vendorName: "合格廠商", amount: 10_000 },
-        { vendorName: "合格廠商股份有限公司", amount: 10_000 },
-        { vendorName: "(股)合格-廠商.", amount: 10_000 },
+        { vendorName: "合格-廠商.", amount: 10_000 },
       ].entries()) {
         h.operations.length = 0
         const response = await post([{ vendorId: null, vendorName: "測試名冊外廠商", amount: 5_000 }, row], `VN-BIND-${i}`)
         expect(response.status, JSON.stringify(row)).toBe(409)
         expect(response.body).toMatchObject({ error: "must_bind_vendor", matchedVendorName: "合格廠商", index: 1 })
-        expect(response.body.message).toBe(`「${row.vendorName}」與名冊廠商「合格廠商」視為同一家，請在下拉選擇該廠商`)
+        expect(response.body.message).toBe(`「${row.vendorName}」與名冊廠商「合格廠商」名稱相同，請在下拉選擇該廠商`)
         expect(rpcCalls()).toEqual([])
         expect(h.db.project_subcontracts).toEqual([])
       }
+      for (const [i, row] of [
+        { vendorName: "合格廠商股份有限公司", amount: 10_000 },
+        { vendorName: "(股)合格-廠商.", amount: 10_000 },
+      ].entries()) {
+        h.operations.length = 0
+        const response = await post([{ vendorId: null, vendorName: "測試名冊外廠商", amount: 5_000 }, row], `VN-SIM-${i}`)
+        expect(response.status, JSON.stringify(row)).toBe(409)
+        expect(response.body).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "合格廠商", index: 1 })
+        expect(response.body.message).toContain("若是不同公司請填寫說明")
+        expect(rpcCalls()).toEqual([])
+        expect(h.db.project_subcontracts).toEqual([])
+      }
+    })
+
+    it("第八輪：相近名稱帶 confirmDistinctReason → 201（維持非登錄）", async () => {
+      const response = await post(
+        [{ vendorId: null, vendorName: "合格廠商股份有限公司", amount: 10_000, confirmDistinctReason: "測試：不同統編的另一家" }],
+        "VN-SIM-OK",
+      )
+      expect(response.status, JSON.stringify(response.body)).toBe(201)
+      const stored = await loadSubcontracts(h.tenantId, response.body.id)
+      expect(stored[0]).toMatchObject({ vendor_id: null, vendor_name: "合格廠商股份有限公司" })
     })
 
     it("第七輪：副委託名稱全西里爾／含希臘字母／不可見字元 → 400 invalid_subcontract_vendor_name，未呼叫 RPC", async () => {

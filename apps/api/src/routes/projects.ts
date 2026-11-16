@@ -4,7 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { invalidSubcontractVendorNameBody, loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf } from "../services/roster-name-keys.js"
+import { invalidSubcontractVendorNameBody, loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf, similarVendorBody } from "../services/roster-name-keys.js"
 import { invalidNameMessage } from "../lib/payee-name.js"
 import {
   nextProjectCode,
@@ -33,7 +33,7 @@ import {
 } from "../services/project-scope.js"
 import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
 import { estimateProjectBonus, type ProjectBonusEstimate } from "../services/bonus-estimate.js"
-import { writeAuditLog } from "../services/audit.js"
+import { writeAuditLog, writeAuditLogStrict } from "../services/audit.js"
 import {
   planProjectDelete,
   softDeleteProject,
@@ -218,6 +218,8 @@ const initialSubcontractSchema = z.object({
   withholdingThreshold: z.number().int().min(0).max(1e9).nullish(),
   sortOrder: z.number().int().min(0).max(9999).optional(),
   note: z.string().trim().max(2000).nullish(),
+  /** 第八輪：非登錄名稱與名冊廠商相近（vendor_name_similar）但確為不同公司時的說明（寫嚴格稽核；不寫進副委託）。 */
+  confirmDistinctReason: z.string().trim().max(500).optional(),
 })
 
 const createSchema = z.object({
@@ -1153,13 +1155,27 @@ projectsRouter.post(
       // 第五輪 #4（2026-11-17，同副委託整批 PUT）：非登錄副委託（vendorId 空）名稱 key 撞名冊廠商（第六輪：名稱／簡稱／帳戶戶名，同放款端）→ 409 must_bind_vendor。
       // create_project_application_atomic 不比對，只靠這裡在呼叫 RPC 前擋。
       const unboundInitial = initialSubcontracts.filter((item) => !item.vendorId && (item.vendorName ?? "").trim() !== "")
+      const similarInitialConfirms: Array<{ index: number; name: string; matches: Array<{ id: string; name: string }>; reason: string }> = []
       if (unboundInitial.length > 0) {
         const index = await loadRosterNameKeyIndex(tenantId, "POST /projects")
-        const hitIndex = initialSubcontracts.findIndex((item) => !item.vendorId && rosterMatchesOf(index, item.vendorName).length > 0)
+        // 第八輪：幾乎完全相同（exactNameKey）→ 硬擋 must_bind_vendor；相近 → 409 vendor_name_similar，
+        // 該列帶 confirmDistinctReason 才放行，並在建案前嚴格稽核。
+        const hitIndex = initialSubcontracts.findIndex((item) => !item.vendorId && rosterMatchesOf(index, item.vendorName).exact.length > 0)
         if (hitIndex >= 0) {
           const hitName = initialSubcontracts[hitIndex]!.vendorName
-          res.status(409).json(mustBindVendorBody(hitName, rosterMatchesOf(index, hitName), { id: null, index: hitIndex }))
+          res.status(409).json(mustBindVendorBody(hitName, rosterMatchesOf(index, hitName).exact, { id: null, index: hitIndex }))
           return
+        }
+        for (const [i, item] of initialSubcontracts.entries()) {
+          if (item.vendorId) continue
+          const similar = rosterMatchesOf(index, item.vendorName).similar
+          if (similar.length === 0) continue
+          const reason = (item.confirmDistinctReason ?? "").trim()
+          if (!reason) {
+            res.status(409).json(similarVendorBody(item.vendorName, similar, { id: null, index: i }))
+            return
+          }
+          similarInitialConfirms.push({ index: i, name: (item.vendorName ?? "").trim(), matches: similar, reason })
         }
       }
 
@@ -1243,6 +1259,29 @@ projectsRouter.post(
         company_id: companyId,
         // migration 0075 之前的建案函式不認得這個鍵，會直接忽略（不會失敗）。
         share_pct_by_role: sharePctByRole,
+      }
+
+      // 第八輪：非登錄副委託與名冊廠商名稱相近、已說明確為不同公司 → 建案前嚴格稽核（寫不進去就不建）。
+      for (const c of similarInitialConfirms) {
+        await writeAuditLogStrict({
+          tenantId,
+          tableName: "project_subcontracts",
+          recordId: null,
+          action: "INSERT",
+          oldRow: null,
+          newRow: {
+            project_name: b.name,
+            index: c.index,
+            vendor_id: null,
+            vendor_name: c.name,
+            confirmDistinctVendor: true,
+            similarVendorIds: c.matches.map((m) => m.id),
+            similarVendorNames: c.matches.map((m) => m.name),
+            confirmDistinctReason: c.reason,
+          },
+          actorEmpId: self.id,
+          context: "POST /projects 非登錄副委託與名冊廠商名稱相近（確認為不同公司）",
+        })
       }
 
       const createWithCode = (code: string) => createProjectApplicationAtomic(

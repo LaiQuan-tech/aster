@@ -151,24 +151,27 @@ describe("第六輪 F2：名稱正規化補強（payeeNameKey）", () => {
 })
 
 describe("第六輪第 1 項：「其他」收款同名一律擋（不再看副委託建立時間）", () => {
-  it("非登錄副委託同名、名冊後綴變體 → 400 payee_is_registered_vendor（帶 matchedVendorName）、零寫入", async () => {
+  it("非登錄副委託名稱與名冊相近（差後綴）→ 409 payee_name_similar（帶 matchedVendorName）、零寫入（第八輪）", async () => {
     fake.db.vendors!.push(V(VN, "測試非登錄下包有限公司"))
     fake.db.project_subcontracts = fake.db.project_subcontracts!.map((s) => (s.id === SF ? { ...s, created_at: "2025-01-01T00:00:00.000Z" } : s))
     const b = await uiBodyFromGroup(null)
     b.payeeName = "測試非登錄下包"; b.payeeBankName = "某銀行"; b.payeeBankAccount = "123"
     fake.writes.length = 0
     const c = await create(b)
-    expect(c.status).toBe(400)
-    expect(c.body).toMatchObject({ error: "payee_is_registered_vendor", matchedVendorName: "測試非登錄下包有限公司" })
-    expect(c.body.message).toContain("請改選登錄廠商")
+    expect(c.status).toBe(409)
+    expect(c.body).toMatchObject({ error: "payee_name_similar", matchedVendorName: "測試非登錄下包有限公司" })
+    expect(c.body.message).toContain("若確為不同公司請填寫說明")
     expect(nonCreateWrites()).toHaveLength(0)
   })
-  it("名冊變體：株式会社前綴、企業社後綴、㈱、臺／台 → 都擋；混用西里爾字母 → 400 invalid_payee_name", async () => {
+  it("名冊變體：臺／台 → 400；株式会社前綴、企業社後綴、㈱、工作室 → 409 需說明；混用西里爾字母 → 400 invalid_payee_name", async () => {
     fake.db.vendors!.push(V(VN, "臺北測試行"))
-    for (const name of ["株式会社測試甲工程行", "測試甲工程行企業社", "㈱測試甲工程行", "測試甲工程行工作室", "台北測試行"]) {
+    const t = await create(other("台北測試行"))
+    expect(t.status).toBe(400)
+    expect(t.body.error).toBe("payee_is_registered_vendor")
+    for (const name of ["株式会社測試甲工程行", "測試甲工程行企業社", "㈱測試甲工程行", "測試甲工程行工作室"]) {
       const c = await create(other(name))
-      expect(c.status, name).toBe(400)
-      expect(c.body.error, name).toBe("payee_is_registered_vendor")
+      expect(c.status, name).toBe(409)
+      expect(c.body.error, name).toBe("payee_name_similar")
     }
     // "ABC Dеsign Ltd"：е 是西里爾字母（U+0435）。
     const mixed = await create(other("ABC Dеsign Ltd"))
@@ -180,9 +183,18 @@ describe("第六輪第 1 項：「其他」收款同名一律擋（不再看副�
 })
 
 describe("第六輪第 3 項 F1：名冊重名", () => {
-  it("新建同名廠商（後綴／臺台／株式会社變體）→ 409 vendor_name_duplicate、0 寫入", async () => {
+  it("新建同名廠商（空白／臺台）→ 409 vendor_name_duplicate、0 寫入；後綴／株式会社變體 → 409 vendor_name_similar，帶說明 → 201", async () => {
     fake.db.vendors!.push(V(VN, "臺北測試行"))
-    for (const name of ["測試甲工程行股份有限公司", " 測試甲工程行 ", "株式会社測試甲工程行", "測試甲工程行企業社", "台北測試行"]) {
+    for (const name of ["測試甲工程行股份有限公司", "株式会社測試甲工程行", "測試甲工程行企業社"]) {
+      fake.writes.length = 0
+      const res = await as(request(app).post("/vendors")).send({ name })
+      expect(res.status, name).toBe(409)
+      expect(res.body, name).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測試甲工程行" })
+      expect(fake.writes.filter((w) => w.table === "vendors")).toHaveLength(0)
+    }
+    const ok = await as(request(app).post("/vendors")).send({ name: "測試甲工程行企業社", confirmDistinctReason: "測試：不同統編的另一家" })
+    expect(ok.status, r(ok)).toBe(201)
+    for (const name of [" 測試甲工程行 ", "測試甲工程行。", "台北測試行"]) {
       fake.writes.length = 0
       const res = await as(request(app).post("/vendors")).send({ name })
       expect(res.status, name).toBe(409)
@@ -193,9 +205,12 @@ describe("第六輪第 3 項 F1：名冊重名", () => {
     expect((await as(request(app).post("/vendors")).send({ name: "測試全新廠商" })).status).toBe(201)
   })
   it("乙改名成甲 → 409；甲改成同 key（加後綴）→ 200；乙改成新名 → 200", async () => {
-    const bad = await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試甲工程行(股)" })
+    const bad = await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試 甲工程行" })
     expect(bad.status).toBe(409)
     expect(bad.body).toMatchObject({ error: "vendor_name_duplicate", matchedVendorName: "測試甲工程行", message: "名冊已有同名廠商「測試甲工程行」" })
+    const similar = await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試甲工程行(股)" })
+    expect(similar.status).toBe(409)
+    expect(similar.body).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測試甲工程行" })
     expect(fake.db.vendors!.find((v) => v.id === VB)!.name).toBe("測試乙工程行")
     expect((await as(request(app).patch(`/vendors/${VA}`)).send({ name: "測試甲工程行有限公司" })).status).toBe(200)
     expect((await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試乙工程行新名" })).status).toBe(200)
@@ -242,11 +257,14 @@ describe("第六輪第 4 項 F1：副委託改綁另一家登錄廠商", () => {
     expect(res.status).toBe(500)
     expect(fake.db.project_subcontracts!.find((s) => s.id === SA1)!.vendor_id).toBe(VA)
   })
-  it("期款都已付（有付款日）或金額 0 → 不用原因；非登錄→登錄、登錄→同一家 不算改綁", async () => {
+  it("第八輪：期款都已付（有付款日）也要原因；非登錄→登錄、登錄→同一家 不算改綁", async () => {
     fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.id === PC ? { ...p, paid_on: "2026-11-01" } : p))
     const body = await subsBody(P2, (x) => (x.id === SC ? { ...x, vendorId: VE, vendorName: "ABC Design Ltd" } : x))
     const res = await as(request(app).put(`/projects/${P2}/subcontracts`)).send(body)
-    expect(res.status, r(res)).toBe(200)
+    expect(res.status, r(res)).toBe(400)
+    expect(res.body.error).toBe("rebind_reason_required")
+    const withReason = { subcontracts: (body.subcontracts as Row[]).map((x) => (x.id === SC ? { ...x, rebindReason: "測試：改由 ABC 施作" } : x)) }
+    expect((await as(request(app).put(`/projects/${P2}/subcontracts`)).send(withReason)).status).toBe(200)
     // 非登錄（SF）綁到丙：不是 A→B 改綁
     const bind = await subsBody(P1, (x) => (x.id === SF ? { ...x, vendorId: VC, vendorName: "測試丙無帳戶行" } : x))
     expect((await as(request(app).put(`/projects/${P1}/subcontracts`)).send(bind)).status).toBe(200)
@@ -286,14 +304,15 @@ describe("第六輪 F3：零分攤登錄廠商單改金額／用途也重驗", (
 })
 
 describe("第六輪 F4：「其他」單開出後名冊新增同名廠商 → 送審／核准／付款（含批次）擋 409", () => {
-  const addSameNameVendor = () => fake.db.vendors!.push(V(VN, "測試新來廠商股份有限公司"))
+  // 第八輪：只有「幾乎完全相同」才在送審／核准／付款擋（相近的已在開單時說明）。
+  const addSameNameVendor = () => fake.db.vendors!.push(V(VN, "測試新來廠商"))
   it("送審 409 payee_is_registered_vendor", async () => {
     const c = await create(other("測試新來廠商"))
     expect(c.status, r(c)).toBe(201)
     addSameNameVendor()
     const s = await as(request(app).post(`/disbursements/${c.body.disbursement.id}/submit`)).send({})
     expect(s.status).toBe(409)
-    expect(s.body).toMatchObject({ error: "payee_is_registered_vendor", matchedVendorName: "測試新來廠商股份有限公司" })
+    expect(s.body).toMatchObject({ error: "payee_is_registered_vendor", matchedVendorName: "測試新來廠商" })
   })
   it("核准 409（送審後名冊才新增）", async () => {
     const c = await create(other("測試新來廠商"))

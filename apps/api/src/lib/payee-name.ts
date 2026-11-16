@@ -1,5 +1,5 @@
 /**
- * 收款戶名／廠商名稱的比對 key 與不可見字元檢查（2026-11-17 第五輪，R3）。
+ * 收款戶名／廠商名稱的比對 key 與不可見字元檢查（2026-11-17 第五輪，R3；第八輪拆成 exact 硬擋／similar 需說明兩級）。
  * 放款單（services/disbursements.ts）、廠商名冊（routes/vendors.ts）、副委託整批 PUT（routes/subcontracts.ts）共用。
  */
 
@@ -45,6 +45,19 @@ const BRANCH = "分公司"
 /** 分公司名稱前面的公司型態字（切在它後面，前面的再交給後綴規則去）。 */
 const BRANCH_BOUNDARIES = ["公司", "行", "社", "號", ")"]
 
+const HAN_RE = /\p{Script=Han}/gu
+const OTHER_ALNUM_RE = /[\p{L}\p{N}]/gu
+/**
+ * 第八輪（2026-11-17）相似比對下限：去後綴或去段之後，剩下的（不計標點符號）至少要有 2 個中文字或 3 個拉丁字母／數字，
+ * 否則不採用那次去除（保留去除前的 key）。避免「e-Life」「e-Home」去段後都剩「e」、「7-ELEVEN」「7-11」都剩「7」而互撞。
+ */
+function meetsFloor(key: string): boolean {
+  const han = (key.match(HAN_RE) ?? []).length
+  if (han >= 2) return true
+  const other = (key.match(OTHER_ALNUM_RE) ?? []).length - han
+  return other >= 3
+}
+
 /**
  * 第七輪 M1：結尾「…分公司」（分公司前最多 6 字為分公司名）。
  * 那 6 字內有公司型態字（公司／行／社／號／")"）→ 切在最後一個之後（「測試甲有限公司台北分公司」→「測試甲有限公司」）；
@@ -73,7 +86,7 @@ function stripSuffixes(input: string, suffixes: readonly string[], dropTrailingP
   for (let changed = true; changed; ) {
     changed = false
     const branch = segments ? stripBranch(key) : null
-    if (branch !== null && branch !== key && branch.length > 0) {
+    if (branch !== null && branch !== key && branch.length > 0 && meetsFloor(branch)) {
       key = branch
       changed = true
       continue
@@ -81,7 +94,7 @@ function stripSuffixes(input: string, suffixes: readonly string[], dropTrailingP
     if (dropTrailingPunct && segments) {
       for (const re of [TRAILING_PAREN_RE, TRAILING_SEP_SEGMENT_RE]) {
         const m = key.match(re)
-        if (m && m.index !== undefined && m.index > 0) {
+        if (m && m.index !== undefined && m.index > 0 && meetsFloor(key.slice(0, m.index))) {
           key = key.slice(0, m.index)
           changed = true
           break
@@ -90,11 +103,11 @@ function stripSuffixes(input: string, suffixes: readonly string[], dropTrailingP
       if (changed) continue
     }
     for (const suf of suffixes) {
-      if (key.endsWith(suf) && key.length > suf.length) {
+      if (key.endsWith(suf) && key.length > suf.length && meetsFloor(key.slice(0, -suf.length))) {
         key = key.slice(0, -suf.length)
         if (/^(?:ltd|limited)\.?$/u.test(suf) || suf === "colimited" || suf === "coltd") {
           const co = key.match(CO_BEFORE_LTD_RE)
-          if (co && co.index !== undefined && co.index > 0) key = key.slice(0, co.index)
+          if (co && co.index !== undefined && co.index > 0 && meetsFloor(key.slice(0, co.index))) key = key.slice(0, co.index)
         }
         changed = true
         break
@@ -114,7 +127,7 @@ function stripPrefixes(input: string): string {
   for (let changed = true; changed; ) {
     changed = false
     for (const pre of PREFIXES) {
-      if (key.startsWith(pre) && key.length > pre.length) {
+      if (key.startsWith(pre) && key.length > pre.length && meetsFloor(key.slice(pre.length))) {
         key = key.slice(pre.length)
         changed = true
         break
@@ -153,6 +166,8 @@ export function payeeNameKey(name: string | null | undefined): string {
 /**
  * 第七輪：比對用的所有 key——payeeNameKey（去分公司／括號段／-xxx／/xxx）＋不去這些段的 key（標點直接拿掉）。
  * 兩種都比：「測試甲-台中」≈「測試甲」，同時「測試甲-工程行」≈「測試甲工程行」（不能因為多去一段反而漏擋）。
+ * 第八輪：每次去後綴／去段都有下限（剩不到 2 個中文字或 3 個拉丁字母／數字就不去），且這組 key 只用於「相似」（需說明），
+ * 硬擋只看 exactNameKey。
  */
 export function payeeNameKeys(name: string | null | undefined): string[] {
   if (!(name ?? "").trim()) return []
@@ -179,40 +194,100 @@ export function invalidNameMessage(name: string | null | undefined): string | nu
   return null
 }
 
+/**
+ * 第八輪（2026-11-17）「幾乎完全相同」比對 key（硬擋用）：NFKC → 小寫 → 去掉所有空白、格式／不可見字元、標點與符號 → 臺→台。
+ * 不去任何公司後綴、不去分公司／括號／-xxx 段。「測試甲 工程行」「ＴＥＳＴ甲工程行」「測試甲工程行。」「臺北甲」＝「台北甲」皆相同；
+ * 「測試甲工程行」與「測試甲工程有限公司」不同（那是 similarNameKeys 的事）。空名稱回 ""。
+ */
+export function exactNameKey(name: string | null | undefined): string {
+  return String(name ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/臺/g, "台")
+    .replace(STRIP_RE, "")
+    .replace(PUNCT_OR_SYMBOL_RE, "")
+}
+
+/**
+ * 第八輪「相似」比對 key（需確認＋原因＋嚴格稽核，不硬擋）：payeeNameKeys（去公司後綴、分公司、括號段、-xxx 段，
+ * 有 2 中文字／3 拉丁字元下限）再加上 exactNameKey。空名稱回 []。
+ */
+export function similarNameKeys(name: string | null | undefined): string[] {
+  const exact = exactNameKey(name)
+  if (!exact) return []
+  return [...new Set([exact, ...payeeNameKeys(name)])]
+}
+
 /** 名冊廠商（比對用的欄位）。 */
 export type RosterKeyVendor = { id: string; name: string | null; short_name?: string | null; account_holder?: string | null }
 
+/** 一家名冊廠商的兩級比對 key：exact（硬擋）與 similar（需說明）。similar 包含 exact。 */
+export type RosterKeySets = { exact: string[]; similar: string[] }
+
 /**
- * 一家名冊廠商「視為同一家」的比對 key 集合（第六輪統一：放款「其他」收款冒用檢查、副委託 must_bind_vendor 共用）：
- * 名稱 key；簡稱 key（≥3 字）；帳戶戶名 key（等於名稱 key，或 ≥3 字）。第七輪起每個欄位都取 payeeNameKeys 的所有變體。
+ * 一家名冊廠商「視為同名」的比對 key（放款「其他」收款、副委託 must_bind_vendor、名冊重名、複製專案共用）：
+ * 名稱 key；簡稱 key（≥3 字）；帳戶戶名 key（等於名稱 key，或 ≥3 字）。
+ * 第八輪拆兩級：exact＝各欄位的 exactNameKey；similar＝各欄位的 similarNameKeys（含 exact）。
  */
-export function rosterVendorKeys(v: RosterKeyVendor): string[] {
-  const out = new Set<string>()
-  const nameKeys = payeeNameKeys(v.name)
-  for (const k of nameKeys) out.add(k)
-  for (const k of payeeNameKeys(v.short_name)) if (keyLength(k) >= 3) out.add(k)
-  for (const k of payeeNameKeys(v.account_holder)) if (nameKeys.includes(k) || keyLength(k) >= 3) out.add(k)
-  return [...out]
+export function rosterVendorKeys(v: Omit<RosterKeyVendor, "id"> & { id?: string }): RosterKeySets {
+  const exact = new Set<string>()
+  const similar = new Set<string>()
+  const nameExact = exactNameKey(v.name)
+  const nameSimilar = similarNameKeys(v.name)
+  if (nameExact) exact.add(nameExact)
+  for (const k of nameSimilar) similar.add(k)
+  const shortExact = exactNameKey(v.short_name)
+  if (shortExact && keyLength(shortExact) >= 3) exact.add(shortExact)
+  for (const k of similarNameKeys(v.short_name)) if (keyLength(k) >= 3) similar.add(k)
+  const holderExact = exactNameKey(v.account_holder)
+  if (holderExact && (holderExact === nameExact || keyLength(holderExact) >= 3)) exact.add(holderExact)
+  for (const k of similarNameKeys(v.account_holder)) if (nameSimilar.includes(k) || keyLength(k) >= 3) similar.add(k)
+  for (const k of exact) similar.add(k)
+  return { exact: [...exact], similar: [...similar] }
 }
 
-/** 名冊 → key 索引（key → 撞到的廠商，同一家只列一次）。 */
-export function buildRosterKeyIndex<T extends RosterKeyVendor>(vendors: readonly T[]): Map<string, T[]> {
-  const index = new Map<string, T[]>()
+/** 名冊 → 兩級 key 索引（key → 撞到的廠商，同一家只列一次）。 */
+export type RosterKeyIndex<T> = { exact: Map<string, T[]>; similar: Map<string, T[]> }
+
+export function buildRosterKeyIndex<T extends RosterKeyVendor>(vendors: readonly T[]): RosterKeyIndex<T> {
+  const index: RosterKeyIndex<T> = { exact: new Map(), similar: new Map() }
+  const add = (map: Map<string, T[]>, key: string, v: T) => {
+    const list = map.get(key) ?? []
+    if (!list.includes(v)) list.push(v)
+    map.set(key, list)
+  }
   for (const v of vendors) {
-    for (const key of rosterVendorKeys(v)) {
-      const list = index.get(key) ?? []
-      if (!list.includes(v)) list.push(v)
-      index.set(key, list)
-    }
+    const keys = rosterVendorKeys(v)
+    for (const key of keys.exact) add(index.exact, key, v)
+    for (const key of keys.similar) add(index.similar, key, v)
   }
   return index
 }
 
-/** 這個名稱撞到的名冊廠商（沒撞到＝空陣列）。 */
-export function rosterKeyMatches<T>(index: Map<string, T[]>, name: string | null | undefined): T[] {
-  const out: T[] = []
-  for (const key of payeeNameKeys(name)) for (const v of index.get(key) ?? []) if (!out.includes(v)) out.push(v)
-  return out
+/** 名稱撞到的名冊廠商：exact＝幾乎完全相同（硬擋）；similar＝相似但不是 exact（需說明），已排除 exact 裡的廠商。 */
+export type RosterKeyMatch<T> = { exact: T[]; similar: T[] }
+
+export function rosterKeyMatches<T>(index: RosterKeyIndex<T>, name: string | null | undefined): RosterKeyMatch<T> {
+  const exact: T[] = []
+  const similar: T[] = []
+  const ek = exactNameKey(name)
+  if (ek) for (const v of index.exact.get(ek) ?? []) if (!exact.includes(v)) exact.push(v)
+  for (const key of similarNameKeys(name)) {
+    for (const v of index.similar.get(key) ?? []) if (!exact.includes(v) && !similar.includes(v)) similar.push(v)
+  }
+  return { exact, similar }
+}
+
+/**
+ * 兩組 key 集合比對（名冊新增／修改用）：exact 有交集 → "exact"；similar 有交集 → "similar"；否則 null。
+ * mine 只放「這次新增的 key」（自己舊資料沒有的），避免既有撞名卡住無辜方。
+ */
+export function compareRosterKeySets(mine: RosterKeySets, other: RosterKeySets): "exact" | "similar" | null {
+  const otherExact = new Set(other.exact)
+  if (mine.exact.some((k) => otherExact.has(k))) return "exact"
+  const otherSimilar = new Set(other.similar)
+  if (mine.similar.some((k) => otherSimilar.has(k))) return "similar"
+  return null
 }
 
 /** key 的字數（以 code point 計）。 */

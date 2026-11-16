@@ -45,6 +45,7 @@ import {
   assertOtherPayeeStillNotRegisteredVendor,
   assertZeroAllocVendorStillConfirmed,
   nonInstallmentConfirmedIds,
+  payeeSimilarWarnings,
   loadDisbursement,
   serializeMany,
   type Actor,
@@ -978,6 +979,9 @@ export async function listPendingDisbursementApprovals(
     const confirmed = await nonInstallmentConfirmedIds(tenantId, zeroAllocVendorIds)
     for (const id of zeroAllocVendorIds) byId.set(id, { ...byId.get(id)!, nonInstallmentConfirmed: confirmed.has(id) })
   }
+  // 第八輪：「其他」收款名稱與名冊廠商相近 → 核准畫面醒目標示（已由誰說明／開單後才相近未說明）。
+  const similarWarnings = await payeeSimilarWarnings(tenantId, picked.map((p) => p.row))
+  for (const [id, warning] of similarWarnings) if (byId.has(id)) byId.set(id, { ...byId.get(id)!, payeeSimilarWarning: warning })
   const names = await employeeNames(
     tenantId,
     picked.flatMap((p) => [p.row.created_by_emp_id, p.row.submitted_by_emp_id ?? null, ...stepCandidates(p.step)]),

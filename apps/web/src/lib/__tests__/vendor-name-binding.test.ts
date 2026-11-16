@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { engineerForTypedName, humanizeVendorDeleteError, humanizeVendorIdentityError, isChangeReasonRequired, vendorIdForTypedName } from "../vendor-name-binding";
-import { duplicateSubcontractWarningText, humanizeProjectExtError, humanizeSubcontractError, putProjectSubcontractsWithRebind } from "../projects-ext-api";
+import { engineerForTypedName, humanizeVendorDeleteError, humanizeVendorIdentityError, isChangeReasonRequired, similarNameConflict, vendorIdForTypedName, withSimilarNameConfirm } from "../vendor-name-binding";
+import { createProjectExtWithConfirm, duplicateSubcontractWarningText, humanizeProjectExtError, humanizeSubcontractError, putProjectSubcontractsWithRebind } from "../projects-ext-api";
+import { humanizeDisbursementError } from "../disbursements-api";
 import * as apiClient from "../api-client";
 
 /**
@@ -93,13 +94,13 @@ describe("第五輪（2026-11-17）中文訊息", () => {
     expect(humanizeVendorIdentityError("[409] vendor_name_duplicate")).toBe("名冊已有同名廠商");
     expect(humanizeVendorDeleteError("[409] vendor_in_use")).toBe("此廠商仍有未付期款或未匯款的放款單，不能刪除");
     expect(humanizeVendorDeleteError("[500] boom")).toBe("[500] boom");
-    expect(humanizeSubcontractError(new Error("[409] must_bind_vendor"), "x")).toBe("此名稱與名冊廠商視為同一家，請在下拉選擇名冊廠商。");
+    expect(humanizeSubcontractError(new Error("[409] must_bind_vendor"), "x")).toBe("此名稱與名冊廠商名稱相同，請在下拉選擇該廠商。");
     // 第六輪：後端帶副委託名稱與撞到的名冊廠商名稱 → 具名訊息（副委託卡、申請單、新建專案表單共用）
     const named = Object.assign(new Error("[409] must_bind_vendor"), { body: { error: "must_bind_vendor", vendorName: "測試甲", matchedVendorName: "測試甲工程行有限公司" } });
-    expect(humanizeSubcontractError(named, "x")).toBe("「測試甲」與名冊廠商「測試甲工程行有限公司」視為同一家，請在下拉選擇該廠商。");
-    expect(humanizeProjectExtError(named, "x")).toBe("「測試甲」與名冊廠商「測試甲工程行有限公司」視為同一家，請在下拉選擇該廠商。");
+    expect(humanizeSubcontractError(named, "x")).toBe("「測試甲」與名冊廠商「測試甲工程行有限公司」名稱相同，請在下拉選擇該廠商。");
+    expect(humanizeProjectExtError(named, "x")).toBe("「測試甲」與名冊廠商「測試甲工程行有限公司」名稱相同，請在下拉選擇該廠商。");
     // 新建專案表單（POST /projects initialSubcontracts）
-    expect(humanizeProjectExtError(new Error("[409] must_bind_vendor"), "x")).toContain("請在下拉選擇名冊廠商");
+    expect(humanizeProjectExtError(new Error("[409] must_bind_vendor"), "x")).toContain("請在下拉選擇該廠商");
   });
   it("複製專案：副委託撞多家同名名冊廠商的警告", () => {
     expect(duplicateSubcontractWarningText({})).toBeNull();
@@ -143,5 +144,60 @@ describe("第六輪：副委託改綁要原因（rebind_reason_required）", () 
       { vendorName: "測試甲", candidates: 1, kind: "autobound", boundVendorName: "測試甲工程行", message: "副委託「測試甲」已自動綁定名冊廠商「測試甲工程行」" },
       { vendorName: "測試丙", candidates: 0, kind: "deleted_vendor", message: "副委託「測試丙」原綁定的名冊廠商已刪除" },
     ] })).toBe("副委託「測試甲」已自動綁定名冊廠商「測試甲工程行」\n副委託「測試丙」原綁定的名冊廠商已刪除");
+  });
+});
+
+describe("第八輪：名稱相近 → 填說明重送（vendor_name_similar／payee_name_similar）", () => {
+  const similarErr = (code: string, extra: Record<string, unknown> = {}) =>
+    Object.assign(new Error(`[409] ${code}`), {
+      serverMessage: "「測試甲」與名冊廠商「測試甲工程行」名稱相近；若是同一家請在下拉選擇該廠商，若是不同公司請填寫說明",
+      body: { error: code, matchedVendorName: "測試甲工程行", message: "「測試甲」與名冊廠商「測試甲工程行」名稱相近；若是同一家請在下拉選擇該廠商，若是不同公司請填寫說明", ...extra },
+    });
+  const rows = [
+    { id: "s1", kind: "subcontract", discipline: null, vendorId: "v1", vendorName: "測試乙", contact: null, item: null, amount: 1, billingBasis: null, orderType: null, withholdingRate: 0, withholdingThreshold: 20000, note: null },
+    { kind: "subcontract", discipline: null, vendorId: null, vendorName: "測試甲", contact: null, item: null, amount: 1, billingBasis: null, orderType: null, withholdingRate: 0, withholdingThreshold: 20000, note: null },
+  ] as never[];
+  it("similarNameConflict 認得兩種碼；硬擋碼不認", () => {
+    expect(similarNameConflict(similarErr("vendor_name_similar", { index: 1 }))).toMatchObject({ code: "vendor_name_similar", matchedVendorName: "測試甲工程行", index: 1 });
+    expect(similarNameConflict(similarErr("payee_name_similar"))).toMatchObject({ code: "payee_name_similar", index: null });
+    for (const code of ["must_bind_vendor", "vendor_name_duplicate", "payee_is_registered_vendor"]) expect(similarNameConflict(similarErr(code))).toBeNull();
+  });
+  it("副委託整批 PUT：問說明（顯示撞到的名冊名稱）後帶在該列 confirmDistinctReason 重送；取消就丟原錯誤", async () => {
+    const err = similarErr("vendor_name_similar", { id: null, index: 1 });
+    const spy = vi.spyOn(apiClient, "apiFetch").mockRejectedValueOnce(err).mockResolvedValueOnce({ subcontracts: [] } as never);
+    const ask = vi.fn(() => "測試：統編不同");
+    await putProjectSubcontractsWithRebind("p1", { subcontracts: rows }, ask);
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("測試甲工程行"));
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("若確為不同公司，請說明"));
+    const sent = JSON.parse((spy.mock.calls[1]![1] as { body: string }).body);
+    expect(sent.subcontracts[1].confirmDistinctReason).toBe("測試：統編不同");
+    expect(sent.subcontracts[0].confirmDistinctReason).toBeUndefined();
+    spy.mockReset().mockRejectedValueOnce(err);
+    await expect(putProjectSubcontractsWithRebind("p1", { subcontracts: rows }, () => null)).rejects.toBe(err);
+    expect(humanizeSubcontractError(err, "x")).toContain("名稱相近");
+    spy.mockRestore();
+  });
+  it("建案 initialSubcontracts：帶在該列 confirmDistinctReason 重送", async () => {
+    const err = similarErr("vendor_name_similar", { id: null, index: 0 });
+    const spy = vi.spyOn(apiClient, "apiFetch").mockRejectedValueOnce(err).mockResolvedValueOnce({ id: "p1", code: null } as never);
+    await createProjectExtWithConfirm({ name: "測試案", initialSubcontracts: [{ vendorId: null, vendorName: "測試甲", amount: 1 }] } as never, () => "測試說明");
+    const sent = JSON.parse((spy.mock.calls[1]![1] as { body: string }).body);
+    expect(sent.initialSubcontracts[0].confirmDistinctReason).toBe("測試說明");
+    expect(humanizeProjectExtError(err, "x")).toContain("名稱相近");
+    spy.mockRestore();
+  });
+  it("withSimilarNameConfirm（放款單、名冊）：第二次帶 reason；硬擋錯誤不問、直接丟", async () => {
+    const send = vi.fn().mockRejectedValueOnce(similarErr("payee_name_similar")).mockResolvedValueOnce("ok");
+    const ask = vi.fn(() => "測試另一家");
+    await expect(withSimilarNameConfirm(send, ask)).resolves.toBe("ok");
+    expect(send.mock.calls[1]![1]).toBe("測試另一家");
+    const hard = Object.assign(new Error("[400] payee_is_registered_vendor"), { body: { error: "payee_is_registered_vendor" } });
+    const ask2 = vi.fn(() => "x");
+    await expect(withSimilarNameConfirm(() => Promise.reject(hard), ask2)).rejects.toBe(hard);
+    expect(ask2).not.toHaveBeenCalled();
+  });
+  it("取消說明時的錯誤文字帶撞到的名冊名稱", () => {
+    expect(humanizeDisbursementError(similarErr("payee_name_similar"), "x")).toContain("測試甲工程行");
+    expect(humanizeVendorIdentityError("[409] vendor_name_similar", "名冊已有名稱相近的廠商「測試甲工程行」")).toContain("測試甲工程行");
   });
 });

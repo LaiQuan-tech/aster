@@ -65,6 +65,7 @@ export function humanizeVendorDeleteError(message: string): string {
 export function humanizeVendorIdentityError(message: string, serverMessage?: string): string {
   const server = serverMessage?.trim();
   if (message.includes("vendor_name_duplicate")) return server || VENDOR_NAME_DUPLICATE_TEXT;
+  if (message.includes("vendor_name_similar")) return `${server || "名冊已有名稱相近的廠商"}（未填說明，沒有儲存）`;
   if (message.includes("invalid_vendor_name") && server) return server;
   if (message.includes("vendor_identity_change")) return VENDOR_IDENTITY_CHANGE_TEXT;
   if (message.includes("vendor_has_open_disbursements")) return VENDOR_HAS_OPEN_DISBURSEMENTS_TEXT;
@@ -76,4 +77,64 @@ export function humanizeVendorIdentityError(message: string, serverMessage?: str
 /** 這個錯誤是「改帳戶要填原因」：前端據此請使用者輸入原因後帶 changeReason 重送。 */
 export function isChangeReasonRequired(message: string): boolean {
   return message.includes("change_reason_required");
+}
+
+/**
+ * 第八輪（2026-11-17）：名稱與名冊廠商「相近」但不是完全相同 → 後端 409 vendor_name_similar（名冊、副委託、建案）
+ * 或 payee_name_similar（放款「其他」收款）。不硬擋：同一家請改選名冊廠商；確為不同公司就填說明、帶 confirmDistinctReason 重送
+ * （後端寫嚴格稽核，核准頁醒目標示）。完全相同（must_bind_vendor／vendor_name_duplicate／payee_is_registered_vendor）仍是硬擋，不走這裡。
+ */
+export type SimilarNameConflict = {
+  code: "vendor_name_similar" | "payee_name_similar";
+  /** 撞到的名冊廠商名稱。 */
+  matchedVendorName: string;
+  /** 副委託列在 payload 的位置（副委託整批 PUT／建案 initialSubcontracts）；其他端點沒有。 */
+  index: number | null;
+  message: string;
+};
+
+export function similarNameConflict(err: unknown): SimilarNameConflict | null {
+  const body = (err as { body?: { error?: unknown; matchedVendorName?: unknown; index?: unknown; message?: unknown } } | null)?.body;
+  if (body?.error !== "vendor_name_similar" && body?.error !== "payee_name_similar") return null;
+  const matchedVendorName = typeof body.matchedVendorName === "string" ? body.matchedVendorName : "";
+  const message =
+    typeof body.message === "string" && body.message.trim() ? body.message : `名稱與名冊廠商「${matchedVendorName}」相近`;
+  return { code: body.error, matchedVendorName, index: typeof body.index === "number" ? body.index : null, message };
+}
+
+/** 問使用者「確為不同公司」說明時的提示文字。 */
+export function similarNamePrompt(conflict: SimilarNameConflict): string {
+  return `${conflict.message}\n\n若確為不同公司，請說明（例如統編、地址不同；會留存稽核紀錄並在核准頁顯示）。\n若是同一家，請按取消，改在下拉選擇名冊廠商「${conflict.matchedVendorName}」。`;
+}
+
+/**
+ * 送出 → 遇到相近名稱就用 ask 問說明，帶 confirmDistinctReason 重送（最多 3 次，每次可能是不同列）。
+ * 使用者取消或空白 → 把原錯誤丟出去（呼叫端照常顯示錯誤）。
+ * `send(conflict, reason)`：第一次呼叫 conflict／reason 都是 null；之後帶這次撞到的資訊與說明。
+ */
+export async function withSimilarNameConfirm<T>(
+  send: (conflict: SimilarNameConflict | null, reason: string | null) => Promise<T>,
+  ask: (message: string) => string | null,
+): Promise<T> {
+  let conflict: SimilarNameConflict | null = null;
+  let reason: string | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await send(conflict, reason);
+    } catch (err) {
+      const next = similarNameConflict(err);
+      if (!next) throw err;
+      const answer = ask(similarNamePrompt(next))?.trim();
+      if (!answer) throw err;
+      conflict = next;
+      reason = answer;
+    }
+  }
+  return send(conflict, reason);
+}
+
+/** 相近名稱錯誤的顯示文字（使用者取消說明時）：後端訊息帶撞到的名冊名稱。 */
+export function similarNameErrorText(err: unknown): string | null {
+  const c = similarNameConflict(err);
+  return c ? `${c.message}（未填說明，沒有儲存）` : null;
 }

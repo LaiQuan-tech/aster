@@ -111,11 +111,12 @@ export function vendorOptionLabel(v: Pick<Vendor, "name" | "shortName">): string
 export function listVendors(q?: string) {
   return apiFetch<{ vendors: Vendor[] }>(`/vendors${q ? `?q=${encodeURIComponent(q)}` : ""}`)
 }
-export function createVendor(body: VendorInput) {
+/** `confirmDistinctReason`：名稱與名冊廠商相近（409 vendor_name_similar）但確為不同公司的說明（第八輪，寫嚴格稽核）。 */
+export function createVendor(body: VendorInput & { confirmDistinctReason?: string }) {
   return apiFetch<{ vendor: Vendor }>("/vendors", { method: "POST", body: JSON.stringify(body) })
 }
 /** `changeReason`：只有未付期款時改收款帳戶必填（後端寫稽核，2026-11-16 R2）。 */
-export function updateVendor(id: string, body: Partial<VendorInput> & { changeReason?: string }) {
+export function updateVendor(id: string, body: Partial<VendorInput> & { changeReason?: string; confirmDistinctReason?: string }) {
   return apiFetch<{ vendor: Vendor }>(`/vendors/${id}`, { method: "PATCH", body: JSON.stringify(body) })
 }
 export function deleteVendor(id: string) {

@@ -1,5 +1,6 @@
 "use client";
 
+import { withSimilarNameConfirm } from "@/lib/vendor-name-binding";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { formatMoney } from "@/lib/money";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -218,7 +219,11 @@ function BillingDisbursementsPage() {
     setSaving(true);
     setSaveError(null);
     try {
-      await createDisbursement(body);
+      // 第八輪：「其他」收款名稱與名冊廠商相近（409 payee_name_similar）→ 問「確為不同公司」說明、帶 confirmDistinctReason 重送。
+      await withSimilarNameConfirm(
+        (_conflict, reason) => createDisbursement(reason ? { ...body, confirmDistinctReason: reason } : body),
+        (m) => window.prompt(m),
+      );
       setFormOpen(false);
       setFormInitial(undefined);
       setAcceptanceBlocked(false);

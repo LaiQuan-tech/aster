@@ -10,6 +10,7 @@
  * 這裡的型別用 `extends`／重用既有 Project／Installment／DocType 等型別，
  * 函式打同一組既有端點（如 `GET /projects/:id`）但回傳更完整的形狀。
  */
+import { similarNameConflict, similarNameErrorText, similarNamePrompt } from "./vendor-name-binding"
 import { apiFetch, apiDownload } from "./api-client"
 import type { ProjectRegisterCells } from "./project-register"
 import type {
@@ -298,6 +299,8 @@ export type InitialSubcontractInput = {
   withholdingThreshold?: number | null
   sortOrder?: number
   note?: string | null
+  /** 第八輪：非登錄名稱與名冊廠商相近（vendor_name_similar）但確為不同公司的說明。 */
+  confirmDistinctReason?: string
 }
 
 export interface MainContractInput {
@@ -335,6 +338,27 @@ export function createProjectExt(body: CreateProjectExtBody) {
     method: "POST",
     body: JSON.stringify(body),
   })
+}
+
+/**
+ * 第八輪：建案遇 409 vendor_name_similar（協力廠商名稱與名冊廠商相近）→ 用 ask 問「確為不同公司」的說明，
+ * 帶在該列 confirmDistinctReason 重送；取消／空白就把原錯誤丟出去。must_bind_vendor（名稱相同）仍是硬擋。
+ */
+export async function createProjectExtWithConfirm(body: CreateProjectExtBody, ask: (message: string) => string | null) {
+  let rows = body.initialSubcontracts
+  for (let attempt = 0; attempt <= (rows?.length ?? 0); attempt++) {
+    try {
+      return await createProjectExt(rows ? { ...body, initialSubcontracts: rows } : body)
+    } catch (err) {
+      const conflict = similarNameConflict(err)
+      if (!conflict || conflict.index === null || !rows || !rows[conflict.index]) throw err
+      const reason = ask(similarNamePrompt(conflict))?.trim()
+      if (!reason) throw err
+      const at = conflict.index
+      rows = rows.map((r, i) => (i === at ? { ...r, confirmDistinctReason: reason } : r))
+    }
+  }
+  return createProjectExt(rows ? { ...body, initialSubcontracts: rows } : body)
 }
 
 /** `GET /projects` 列表列——後端 serializeProject(finance:false) + 平面 clientName。 */
@@ -598,8 +622,10 @@ export interface Subcontract {
   invoiceNo?: string | null
   invoiceDate?: string | null
   sortOrder?: number
-  /** 第六輪：既有列改綁另一家名冊廠商且有未付期款時的改綁原因（只在 PUT 帶）。 */
+  /** 第八輪：既有列原本綁名冊廠商、這次改綁或解除綁定時的原因（一律要；只在 PUT 帶）。 */
   rebindReason?: string
+  /** 第八輪：非登錄名稱與名冊廠商相近（vendor_name_similar）但確為不同公司的說明（只在 PUT 帶）。 */
+  confirmDistinctReason?: string
   note: string | null
   createdAt?: string
   updatedAt?: string
@@ -659,8 +685,10 @@ export function putSubcontractPayments(
 }
 
 /**
- * 第六輪：副委託整批 PUT 遇 400 rebind_reason_required（既有列從名冊廠商 A 改綁 B、第七輪起也含解除綁定成非登錄，且有未付期款）→
- * 用 ask 問改綁原因、帶在該列 rebindReason 重送；使用者取消（空白）就把原錯誤丟出去。
+ * 副委託整批 PUT 的互動重送：
+ * - 400 rebind_reason_required（第八輪：既有列原本綁名冊廠商、改綁或解除綁定，一律要原因）→ 問改綁原因、帶在該列 rebindReason；
+ * - 409 vendor_name_similar（第八輪：非登錄名稱與名冊廠商相近）→ 問「確為不同公司」的說明、帶在該列 confirmDistinctReason。
+ * 使用者取消（空白）就把原錯誤丟出去。must_bind_vendor（名稱相同）仍是硬擋，不問。
  */
 export async function putProjectSubcontractsWithRebind(
   projectId: string,
@@ -668,10 +696,19 @@ export async function putProjectSubcontractsWithRebind(
   ask: (message: string) => string | null,
 ) {
   let rows = body.subcontracts
-  for (let attempt = 0; attempt <= rows.length; attempt++) {
+  for (let attempt = 0; attempt <= rows.length * 2; attempt++) {
     try {
       return await putProjectSubcontracts(projectId, { ...body, subcontracts: rows })
     } catch (err) {
+      const conflict = similarNameConflict(err)
+      if (conflict) {
+        if (conflict.index === null || !rows[conflict.index]) throw err
+        const reason = ask(similarNamePrompt(conflict))?.trim()
+        if (!reason) throw err
+        const at = conflict.index
+        rows = rows.map((r, i) => (i === at ? { ...r, confirmDistinctReason: reason } : r))
+        continue
+      }
       const errBody = (err as { body?: { error?: unknown; id?: unknown; message?: unknown } } | null)?.body
       if (errBody?.error !== "rebind_reason_required" || typeof errBody.id !== "string") throw err
       const prompt = typeof errBody.message === "string" && errBody.message.trim() ? errBody.message : SUBCONTRACT_ERRORS.rebind_reason_required
@@ -684,14 +721,14 @@ export async function putProjectSubcontractsWithRebind(
   return putProjectSubcontracts(projectId, { ...body, subcontracts: rows })
 }
 
-/** 409 must_bind_vendor：後端帶了副委託名稱與撞到的名冊廠商名稱 → 「『X』與名冊廠商『Y』視為同一家，請在下拉選擇該廠商」。 */
+/** 409 must_bind_vendor（名稱與名冊廠商相同）：後端帶了副委託名稱與撞到的名冊廠商名稱 → 「『X』與名冊廠商『Y』名稱相同，請在下拉選擇該廠商」。 */
 export function mustBindVendorText(err: unknown): string | null {
   const body = (err as { body?: { error?: unknown; vendorName?: unknown; matchedVendorName?: unknown } } | null)?.body
   if (body?.error !== "must_bind_vendor") return null
   const x = typeof body.vendorName === "string" ? body.vendorName.trim() : ""
   const y = typeof body.matchedVendorName === "string" ? body.matchedVendorName.trim() : ""
   if (!x || !y) return null
-  return `「${x}」與名冊廠商「${y}」視為同一家，請在下拉選擇該廠商。`
+  return `「${x}」與名冊廠商「${y}」名稱相同，請在下拉選擇該廠商。`
 }
 
 /** 400 invalid_subcontract_vendor_name（第七輪）：副委託名稱含不可見字元或西里爾／希臘字母；後端訊息帶名稱與原因，優先顯示。 */
@@ -702,9 +739,10 @@ export function invalidSubcontractVendorNameText(err: unknown): string {
 }
 
 export const SUBCONTRACT_ERRORS: Record<string, string> = {
-  must_bind_vendor: "此名稱與名冊廠商視為同一家，請在下拉選擇名冊廠商。",
+  must_bind_vendor: "此名稱與名冊廠商名稱相同，請在下拉選擇該廠商。",
+  vendor_name_similar: "此名稱與名冊廠商相近；若是同一家請在下拉選擇該廠商，若是不同公司請填寫說明。",
   invalid_subcontract_vendor_name: "副委託廠商名稱含有不可見字元或西里爾／希臘字母，請改用中文或英文字母重新輸入。",
-  rebind_reason_required: "副委託改綁另一家名冊廠商（或解除名冊綁定）且仍有未付期款，請填寫原因。",
+  rebind_reason_required: "副委託改綁另一家名冊廠商（或解除名冊綁定），請填寫原因。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_contract: "選到的合約不屬於本專案或已作廢。",
   invalid_company: "選到的公司主體不存在。",
@@ -731,6 +769,8 @@ export function humanizeSubcontractError(err: unknown, fallback: string): string
   if (msg.includes("not_found") && typeof server === "string" && server.trim()) return server
   const bind = mustBindVendorText(err)
   if (bind) return bind
+  const similar = similarNameErrorText(err)
+  if (similar) return similar
   if (msg.includes("rebind_reason_required") && typeof server === "string" && server.trim()) return server
   if (msg.includes("invalid_subcontract_vendor_name")) return invalidSubcontractVendorNameText(err)
   for (const [code, text] of Object.entries(SUBCONTRACT_ERRORS)) {
@@ -1076,7 +1116,8 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   // 母案是選填（業主 2026-09-30 會議），後端不再回 parent_required；有帶母案才驗 invalid_parent。
   if (msg.includes("invalid_parent")) return "母案不合法：必須是同租戶的主案、不能是自己；主案本身也不能再掛母案。"
   if (msg.includes("has_child_projects")) return "這個主案底下還有追加／變更／代墊案，不能改成其他案型。請先把那些案的母案移走或清空。"
-  if (msg.includes("must_bind_vendor")) return mustBindVendorText(err) ?? "協力廠商名稱與名冊廠商視為同一家，請在下拉選擇名冊廠商。"
+  if (msg.includes("must_bind_vendor")) return mustBindVendorText(err) ?? "協力廠商名稱與名冊廠商名稱相同，請在下拉選擇該廠商。"
+  if (msg.includes("vendor_name_similar")) return similarNameErrorText(err) ?? "協力廠商名稱與名冊廠商相近；若是同一家請在下拉選擇該廠商，若是不同公司請填寫說明。"
   if (msg.includes("invalid_subcontract_vendor_name")) return invalidSubcontractVendorNameText(err)
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
   if (msg.includes("invalid_company")) return "選到的承接公司不存在或不屬於本租戶，請重新選擇。"
@@ -1342,13 +1383,14 @@ export interface DuplicateProjectResponse {
   archived: { id: string; code: string | null } | null
   /**
    * 複製副委託的廠商綁定提示（2026-11-17）：ambiguous＝撞多家同名未綁定；deleted_vendor＝原綁廠商已刪、改未綁定；
-   * autobound＝自動綁定唯一同名名冊廠商（請確認）。舊後端沒有 kind（＝ambiguous）。
+   * autobound＝自動綁定唯一同名名冊廠商（請確認）；similar＝與名冊廠商名稱相近、未自動綁定（第八輪）。舊後端沒有 kind（＝ambiguous）。
    */
   subcontractWarnings?: Array<{
     vendorName: string
     candidates: number
-    kind?: "ambiguous" | "deleted_vendor" | "autobound"
+    kind?: "ambiguous" | "deleted_vendor" | "autobound" | "similar"
     boundVendorName?: string
+    similarVendorNames?: string[]
     message: string
   }>
 }

@@ -35,21 +35,38 @@ const hasAnyKey = (keys: string[]) => (body: unknown) =>
 const confirmsNonInstallment = (body: unknown): boolean =>
   !!body && typeof body === "object" && !Array.isArray(body) && (body as Record<string, unknown>).confirmNonInstallment === true
 
-/**
- * 第七輪：副委託整批 PUT 任一列帶 rebindReason（改綁名冊廠商）或任一列「有 id 且 vendorId 為 null」（可能解除名冊綁定）
- * ＝改變期款的收款對象，最高風險。
- */
-const rebindsSubcontractVendor = (body: unknown): boolean => {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return false
-  const rows = (body as Record<string, unknown>).subcontracts
-  if (!Array.isArray(rows)) return false
-  return rows.some((r) => {
-    if (!r || typeof r !== "object") return false
-    const row = r as Record<string, unknown>
-    if (Object.prototype.hasOwnProperty.call(row, "rebindReason") && row.rebindReason !== undefined) return true
-    return Object.prototype.hasOwnProperty.call(row, "vendorId") && row.vendorId === null && typeof row.id === "string" && row.id !== ""
-  })
+/** body 帶非空字串 confirmDistinctReason（第八輪：名稱與名冊廠商相近、確認為不同公司）。 */
+const hasDistinctReason = (row: unknown): boolean =>
+  !!row &&
+  typeof row === "object" &&
+  !Array.isArray(row) &&
+  typeof (row as Record<string, unknown>).confirmDistinctReason === "string" &&
+  ((row as Record<string, unknown>).confirmDistinctReason as string).trim() !== ""
+
+/** 列帶非空字串 rebindReason（改綁／解除綁定名冊廠商）。 */
+const hasRebindReason = (row: unknown): boolean =>
+  !!row &&
+  typeof row === "object" &&
+  !Array.isArray(row) &&
+  typeof (row as Record<string, unknown>).rebindReason === "string" &&
+  ((row as Record<string, unknown>).rebindReason as string).trim() !== ""
+
+const rowsOf = (body: unknown, key: string): unknown[] => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return []
+  const rows = (body as Record<string, unknown>)[key]
+  return Array.isArray(rows) ? rows : []
 }
+
+/**
+ * 第八輪：副委託整批 PUT 任一列帶 rebindReason（改綁／解除綁定名冊廠商——後端一律要求原因）或 confirmDistinctReason
+ * （非登錄名稱與名冊廠商相近、確認為不同公司）＝改變或確認期款的收款對象，最高風險。
+ * 非登錄列照常送 vendorId: null 不升級（第七輪那條會讓一般存檔也變最高風險）。
+ */
+const rebindsSubcontractVendor = (body: unknown): boolean =>
+  rowsOf(body, "subcontracts").some((r) => hasRebindReason(r) || hasDistinctReason(r))
+
+/** 第八輪：建案 initialSubcontracts 任一列帶 confirmDistinctReason。 */
+const confirmsDistinctInitialSubcontract = (body: unknown): boolean => rowsOf(body, "initialSubcontracts").some(hasDistinctReason)
 
 /** body 任何一層含銀行相關鍵（bankCode／bank_name／bankAccount／accountHolder／account_holder／任何 bank* 鍵）。 */
 function hasBankKey(body: unknown): boolean {
@@ -187,12 +204,16 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   // ＝自己指定匯款帳戶，與改廠商收款帳號同級：最高風險（後台本人確認）。規則依序比對、第一條符合的生效；
   // 不帶銀行欄位時：建立仍走 SAFE_WRITES 白名單免確認、修改維持中風險。
   // 第六輪：帶 confirmNonInstallment: true（確認登錄廠商零分攤為非期款支出，廠商仍有未付期款）＝可能重複付款，最高風險。
+  // 第八輪：「其他」收款名稱與名冊廠商相近、帶 confirmDistinctReason 確認為不同公司＝可能匯給冒名者，最高風險。
+  { method: "POST", path: "/disbursements", tier: "high", label: "建立放款單（收款名稱與名冊廠商相近）", when: hasDistinctReason },
+  { method: "PATCH", path: "/disbursements/:id", tier: "high", label: "修改放款單（收款名稱與名冊廠商相近）", when: hasDistinctReason },
   { method: "POST", path: "/disbursements", tier: "high", label: "建立放款單（確認非期款支出）", when: confirmsNonInstallment },
   { method: "PATCH", path: "/disbursements/:id", tier: "high", label: "修改放款單（確認非期款支出）", when: confirmsNonInstallment },
   { method: "POST", path: "/disbursements", tier: "high", label: "建立放款單（含收款銀行帳戶）", when: hasBankKey },
   { method: "PATCH", path: "/disbursements/:id", tier: "high", label: "修改放款單收款銀行帳戶", when: hasBankKey },
   { method: "PATCH", path: "/disbursements/:id", label: "修改放款單" },
-  { method: "PUT", path: "/projects/:id/subcontracts", tier: "high", label: "修改複委託（改綁／解除綁定名冊廠商）", when: rebindsSubcontractVendor },
+  { method: "PUT", path: "/projects/:id/subcontracts", tier: "high", label: "修改複委託（改綁／解除綁定名冊廠商，或確認名稱相近為不同公司）", when: rebindsSubcontractVendor },
+  { method: "POST", path: "/projects", tier: "high", label: "建立專案（副委託名稱與名冊廠商相近）", when: confirmsDistinctInitialSubcontract },
   { method: "PUT", path: "/projects/:id/subcontracts", label: "修改複委託" },
   { method: "POST", path: "/projects/:id/subcontracts/:sid/payments/:installmentNo/accept", label: "複委託付款驗收" },
   { method: "POST", path: "/attendance-sheets/:id/approve", label: "核定出勤月表（鎖定）" },
@@ -205,6 +226,8 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "PUT", path: "/employees/:empId/profile", tier: "high", label: "修改員工銀行帳號", when: hasBankKey },
   { method: "PUT", path: "/employees/:empId/profile", label: "修改員工個人資料" },
   { method: "POST", path: "/profile-change-requests/:id/approve", tier: "high", label: "核准員工改資料（可能含銀行帳號）" },
+  { method: "POST", path: "/vendors", tier: "high", label: "新增廠商（名稱與名冊廠商相近）", when: hasDistinctReason },
+  { method: "PATCH", path: "/vendors/:id", tier: "high", label: "修改廠商（名稱與名冊廠商相近）", when: hasDistinctReason },
   { method: "POST", path: "/vendors", tier: "high", label: "新增廠商（含收款帳號）", when: hasBankKey },
   { method: "POST", path: "/vendors", label: "新增廠商" },
   { method: "PATCH", path: "/vendors/:id", tier: "high", label: "修改廠商收款帳號", when: hasBankKey },

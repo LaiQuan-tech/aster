@@ -6,7 +6,7 @@ import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLogStrict } from "../services/audit.js"
 import { vendorHasOpenDisbursements, vendorHasUnpaidInstallments } from "../services/vendor-unpaid.js"
-import { invalidNameMessage, payeeNameKeys, rosterVendorKeys } from "../lib/payee-name.js"
+import { compareRosterKeySets, invalidNameMessage, rosterVendorKeys, type RosterKeySets } from "../lib/payee-name.js"
 import { selectAllPages } from "../lib/select-all-pages.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
@@ -268,14 +268,30 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
       res.status(403).json(AFFILIATE_HR_ONLY)
       return
     }
-    const dupName = await duplicateVendorName(
-      tenantId,
-      { name: parsed.data.name, short_name: parsed.data.shortName ?? null, account_holder: parsed.data.accountHolder ?? null },
-      null,
-    )
-    if (dupName !== null) {
-      res.status(409).json(vendorNameDuplicateBody(dupName))
+    const identity: RosterIdentity = { name: parsed.data.name, short_name: parsed.data.shortName ?? null, account_holder: parsed.data.accountHolder ?? null }
+    const dup = await duplicateVendorName(tenantId, identity, null, null)
+    if (dup?.kind === "exact") {
+      res.status(409).json(vendorNameDuplicateBody(dup.vendors[0]?.name ?? ""))
       return
+    }
+    // 第八輪：名稱相近 → 須帶 confirmDistinctReason；帶了就先寫嚴格稽核（寫不進去就不建），id 先產好讓稽核對得到這筆。
+    const newId = crypto.randomUUID()
+    if (dup?.kind === "similar") {
+      const reason = confirmDistinctReasonOf(req)
+      if (!reason) {
+        res.status(409).json(vendorNameSimilarBody(dup))
+        return
+      }
+      await writeAuditLogStrict({
+        tenantId,
+        tableName: "vendors",
+        recordId: newId,
+        action: "INSERT",
+        oldRow: null,
+        newRow: { ...identity, confirmDistinctVendor: true, similarVendorIds: dup.vendors.map((v) => v.id), similarVendorNames: dup.vendors.map((v) => v.name), confirmDistinctReason: reason },
+        actorEmpId: self?.id ?? null,
+        context: "POST /vendors 名稱與名冊廠商相近（確認為不同公司）",
+      })
     }
     const present = rosterFieldsPresent(parsed.data)
     const { data, error } = await withVendorCols((cols, roster) =>
@@ -283,7 +299,7 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
         ? migrationBlocked()
         : supabaseAdmin
             .from("vendors")
-            .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data, roster) })
+            .insert({ id: newId, tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data, roster) })
             .select(cols)
             .single(),
     )
@@ -315,14 +331,22 @@ function invalidVendorName(body: Partial<z.infer<typeof vendorBody>>): { error: 
 }
 
 /**
- * 名冊重名（第六輪 F1；第七輪改比全部 key）：新資料的 rosterVendorKeys（名稱、簡稱 key≥3、帳戶戶名規則）與同租戶其他
- * 每家未刪廠商的 rosterVendorKeys 有交集 → 回撞到那一家的名稱；沒撞到回 null。呼叫端回 409 vendor_name_duplicate。
- * 本廠商帳戶戶名 key 等於自己的名稱 key 只算一個 key（rosterVendorKeys 去重），不算撞名。
+ * 名冊重名（第六輪 F1；第七輪改比全部 key；第八輪拆兩級）：
+ * 只拿「這次新增的 key」（新資料的 rosterVendorKeys 減掉自己舊資料已有的；新增廠商＝全部）去比同租戶其他每家未刪廠商：
+ * - exact（exactNameKey，只差空白／全形／標點／大小寫／臺台）有交集 → kind "exact"（409 vendor_name_duplicate，硬擋）；
+ * - similar（去公司後綴、分公司、括號段…）有交集 → kind "similar"（409 vendor_name_similar；帶 confirmDistinctReason 放行＋嚴格稽核）。
+ * 既有撞名不回溯：自己舊資料就有的 key 不拿來比，避免改電話之類的欄位或別家改名時卡住無辜方。沒撞到回 null。
  */
 type RosterIdentity = { name: string | null; short_name: string | null; account_holder: string | null }
-async function duplicateVendorName(tenantId: string, next: RosterIdentity, selfId: string | null): Promise<string | null> {
-  const mine = new Set(rosterVendorKeys({ id: selfId ?? "", ...next }))
-  if (mine.size === 0) return null
+type RosterNameHit = { kind: "exact" | "similar"; vendors: Array<{ id: string; name: string }> }
+async function duplicateVendorName(tenantId: string, next: RosterIdentity, selfId: string | null, prev: RosterIdentity | null): Promise<RosterNameHit | null> {
+  const nextKeys = rosterVendorKeys(next)
+  const prevKeys: RosterKeySets = prev ? rosterVendorKeys(prev) : { exact: [], similar: [] }
+  const mine: RosterKeySets = {
+    exact: nextKeys.exact.filter((k) => !prevKeys.exact.includes(k)),
+    similar: nextKeys.similar.filter((k) => !prevKeys.similar.includes(k)),
+  }
+  if (mine.exact.length === 0 && mine.similar.length === 0) return null
   const roster = await selectAllPages<{ id: string; name: string | null; short_name: string | null; account_holder: string | null }>(
     (from, to) =>
       supabaseAdmin
@@ -335,14 +359,34 @@ async function duplicateVendorName(tenantId: string, next: RosterIdentity, selfI
     "vendors (duplicate name)",
   )
   const isSelf = (v: { id: string }) => !!selfId && v.id.toLowerCase() === selfId.toLowerCase()
-  const hit = roster.find((v) => !isSelf(v) && (v.name ?? "").trim() !== "" && rosterVendorKeys(v).some((k) => mine.has(k)))
-  return hit ? (hit.name ?? "") : null
+  const exact: Array<{ id: string; name: string }> = []
+  const similar: Array<{ id: string; name: string }> = []
+  for (const v of roster) {
+    if (isSelf(v) || (v.name ?? "").trim() === "") continue
+    const kind = compareRosterKeySets(mine, rosterVendorKeys(v))
+    if (kind === "exact") exact.push({ id: v.id, name: v.name ?? "" })
+    else if (kind === "similar") similar.push({ id: v.id, name: v.name ?? "" })
+  }
+  if (exact.length > 0) return { kind: "exact", vendors: exact }
+  if (similar.length > 0) return { kind: "similar", vendors: similar }
+  return null
 }
 const vendorNameDuplicateBody = (existing: string) => ({
   error: "vendor_name_duplicate",
   matchedVendorName: existing,
   message: `名冊已有同名廠商「${existing}」`,
 })
+const vendorNameSimilarBody = (hit: RosterNameHit) => ({
+  error: "vendor_name_similar",
+  matchedVendorName: hit.vendors[0]?.name ?? "",
+  matchedVendorNames: hit.vendors.map((v) => v.name),
+  message: `名冊已有名稱相近的廠商「${hit.vendors[0]?.name ?? ""}」；若是同一家請直接使用該廠商，若確為不同公司請填寫說明`,
+})
+/** 第八輪：相近名稱的確認原因（req.body.confirmDistinctReason，trim 後非空才算）。 */
+function confirmDistinctReasonOf(req: Request): string {
+  const raw = (req.body as { confirmDistinctReason?: unknown } | undefined)?.confirmDistinctReason
+  return typeof raw === "string" ? raw.trim().slice(0, 500) : ""
+}
 
 type BankChangeCheck = {
   /** 名稱（trim 後不同）與收款帳戶同時改、且有未付款項 → 409 vendor_identity_change。 */
@@ -445,8 +489,9 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     // 名冊把廠商整筆改成另一家（2026-11-16）：同一次同時改名稱與收款帳戶，等於把這筆 vendor_id 換成另一家公司；
     // 掛在這個 vendor_id 上的未付期款／未匯款的放款單會跟著匯到新帳戶 → 有未付款項時 409 vendor_identity_change。
     // R2 第四輪：只改帳戶也要擋——有未匯款放款單 → 409；只有未付期款 → 須填變更原因（寫稽核）。
-    // 第七輪：改了名稱、簡稱或帳戶戶名任一（key 與現值不同）→ 整份新資料的 key 與其他廠商比對。
+    // 第七輪：改了名稱、簡稱或帳戶戶名任一 → 比對其他廠商；第八輪：只比這次新增的 key，exact 硬擋、similar 需說明。
     const nameBody = parsed.data as Partial<z.infer<typeof vendorBody>>
+    let similarAudit: (() => Promise<void>) | null = null
     if (nameBody.name !== undefined || nameBody.shortName !== undefined || nameBody.accountHolder !== undefined) {
       const { data: stored, error: storedErr } = await supabaseAdmin
         .from("vendors")
@@ -467,14 +512,30 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
           short_name: nameBody.shortName !== undefined ? nameBody.shortName ?? null : cur.short_name,
           account_holder: nameBody.accountHolder !== undefined ? nameBody.accountHolder ?? null : cur.account_holder,
         }
-        const k = (v: string | null | undefined) => payeeNameKeys(v).join("\u0000")
-        const changed =
-          k(next_.name) !== k(cur.name) || k(next_.short_name) !== k(cur.short_name) || k(next_.account_holder) !== k(cur.account_holder)
-        if (changed) {
-          const dupName = await duplicateVendorName(tenantId, next_, id)
-          if (dupName !== null) {
-            res.status(409).json(vendorNameDuplicateBody(dupName))
+        const dup = await duplicateVendorName(tenantId, next_, id, cur)
+        if (dup?.kind === "exact") {
+          res.status(409).json(vendorNameDuplicateBody(dup.vendors[0]?.name ?? ""))
+          return
+        }
+        if (dup?.kind === "similar") {
+          const reason = confirmDistinctReasonOf(req)
+          if (!reason) {
+            res.status(409).json(vendorNameSimilarBody(dup))
             return
+          }
+          // 稽核在其餘檢查都過之後、update 之前寫（嚴格：寫不進去就不改）。
+          similarAudit = async () => {
+            const actor = userId ? await resolveSelf(tenantId, userId) : null
+            await writeAuditLogStrict({
+              tenantId,
+              tableName: "vendors",
+              recordId: id,
+              action: "UPDATE",
+              oldRow: cur,
+              newRow: { ...next_, confirmDistinctVendor: true, similarVendorIds: dup.vendors.map((v) => v.id), similarVendorNames: dup.vendors.map((v) => v.name), confirmDistinctReason: reason },
+              actorEmpId: actor?.id ?? null,
+              context: "PATCH /vendors/:id 名稱與名冊廠商相近（確認為不同公司）",
+            })
           }
         }
       }
@@ -525,6 +586,7 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
         context: "PATCH /vendors/:id 更改收款帳戶（有未付期款）",
       })
     }
+    if (similarAudit) await similarAudit()
     const { data, error } = await withVendorCols((cols, roster) => {
       if (!roster && present.length > 0) return migrationBlocked()
       const row = toRow(parsed.data as z.infer<typeof vendorBody>, roster)

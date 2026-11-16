@@ -571,7 +571,7 @@ describe("R3：收款「其他」不可用登錄廠商的名稱／帳戶戶名",
       expect(res.body).toMatchObject({
         error: "payee_is_registered_vendor",
         matchedVendorName: "測試甲工程行",
-        message: "收款對象與名冊廠商「測試甲工程行」視為同一家，請改選登錄廠商「測試甲工程行」；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商",
+        message: "收款對象與名冊廠商「測試甲工程行」名稱相同，請改選登錄廠商「測試甲工程行」",
       })
       expect(anyWrites()).toHaveLength(0)
     }
@@ -823,16 +823,21 @@ describe("R3 第四輪：戶名正規化比對（第六輪起 #4 非登錄副委
   })
   const other = (name: string, allocations: unknown[] = []) => body({ payeeKind: "other", vendorId: null, payeeName: name, allocations })
 
-  it("中間空白、全形空白、零寬、大小寫、全形英數、加（股）／公司後綴、簡稱 → 全部 400", async () => {
-    const variants = [
-      "測試 甲工程行", "測試　甲工程行", "測試甲工程行（股）", "測試甲工程行(股)公司",
-      "測試甲工程行股份有限公司", "測甲工", "測試甲工程行 王小明", "TEST ALPHA", "ｔｅｓｔ　ａｌｐｈａ", "test alpha inc.", "Test Alpha Co.,Ltd",
-    ]
-    for (const name of variants) {
+  it("第八輪：中間空白、全形空白、大小寫、全形英數、標點、簡稱、帳戶戶名 → 400；加（股）／公司後綴 → 409 需說明", async () => {
+    const exact = ["測試 甲工程行", "測試　甲工程行", "測甲工", "測試甲工程行 王小明", "Test Alpha Co.,Ltd", "ＴＥＳＴ ＡＬＰＨＡ ＣＯ., ＬＴＤ."]
+    for (const name of exact) {
       fake.writes.length = 0
       const res = await as(request(app).post("/disbursements")).send(other(name))
       expect(res.status, name).toBe(400)
       expect(res.body.error, name).toBe("payee_is_registered_vendor")
+      expect(anyWrites()).toHaveLength(0)
+    }
+    const similar = ["測試甲工程行（股）", "測試甲工程行(股)公司", "測試甲工程行股份有限公司", "TEST ALPHA", "ｔｅｓｔ　ａｌｐｈａ", "test alpha inc."]
+    for (const name of similar) {
+      fake.writes.length = 0
+      const res = await as(request(app).post("/disbursements")).send(other(name))
+      expect(res.status, name).toBe(409)
+      expect(res.body.error, name).toBe("payee_name_similar")
       expect(anyWrites()).toHaveLength(0)
     }
     // 第五輪：零寬字元改為直接 400 invalid_payee_name（不可見字元一律拒收）。
@@ -850,14 +855,14 @@ describe("R3 第四輪：戶名正規化比對（第六輪起 #4 非登錄副委
     }
   })
 
-  it("第六輪：分攤全是非登錄副委託且戶名＝該副委託名稱（撞名冊）→ 也 400（請改綁名冊廠商）；零分攤冒用 → 400", async () => {
+  it("第八輪：戶名與名冊廠商相近（差公司後綴）→ 409 payee_name_similar（不只引導綁定）；零分攤同樣", async () => {
     const unbound = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
-    expect(unbound.status).toBe(400)
-    expect(unbound.body).toMatchObject({ error: "payee_is_registered_vendor", matchedVendorName: "測試非登錄下包有限公司" })
-    expect(unbound.body.message).toContain("請先在副委託下拉選擇該廠商")
+    expect(unbound.status).toBe(409)
+    expect(unbound.body).toMatchObject({ error: "payee_name_similar", matchedVendorName: "測試非登錄下包有限公司" })
+    expect(unbound.body.message).toContain("若確為不同公司請填寫說明")
     const zero = await as(request(app).post("/disbursements")).send(other("測試非登錄下包"))
-    expect(zero.status).toBe(400)
-    expect(zero.body.error).toBe("payee_is_registered_vendor")
+    expect(zero.status).toBe(409)
+    expect(zero.body.error).toBe("payee_name_similar")
   })
 
   it("#4 不適用：戶名與非登錄副委託名稱不同（冒用甲）→ 400", async () => {
@@ -922,13 +927,13 @@ describe("第五輪（2026-11-17）", () => {
   const other = (name: string, allocations: unknown[] = []) => body({ payeeKind: "other", vendorId: null, payeeName: name, allocations })
 
   describe("第六輪第 1 項：拿掉截止時間放行", () => {
-    it("非登錄同名副委託不論建立時間（截止前／後）一律 400 payee_is_registered_vendor", async () => {
+    it("非登錄副委託與名冊相近不論建立時間（截止前／後）一律 409 payee_name_similar（第八輪：需說明）", async () => {
       for (const createdAt of ["2026-01-01T00:00:00.000Z", "2026-11-17T00:00:00+08:00"]) {
         fake.db.project_subcontracts = fake.db.project_subcontracts!.map((s) => (s.id === SUB_FREE ? { ...s, created_at: createdAt } : s))
         fake.writes.length = 0
         const res = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
-        expect(res.status, createdAt).toBe(400)
-        expect(res.body.error).toBe("payee_is_registered_vendor")
+        expect(res.status, createdAt).toBe(409)
+        expect(res.body.error).toBe("payee_name_similar")
         expect(anyWrites()).toHaveLength(0)
       }
     })
@@ -968,13 +973,13 @@ describe("第五輪（2026-11-17）", () => {
       expect(res.body).toMatchObject({ error: "cannot_clear_allocations", message: "已分攤的放款單不能改成零分攤，請作廢後重開" })
       expect(anyWrites()).toHaveLength(0)
     })
-    it("第六輪：同名非登錄副委託的舊單（戶名＝副委託名稱、撞名冊）替換成同名另一期 → 400（請改綁名冊廠商）", async () => {
+    it("第六輪：同名非登錄副委託的舊單（戶名＝副委託名稱、與名冊相近）替換成同名另一期 → 409 payee_name_similar（第八輪）", async () => {
       fake.db.project_subcontract_payments!.push(paymentRow("dddddddd-0000-4000-8000-0000000000ba", SUB_FREE, 2))
       fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試非登錄下包", payee_bank_account: "123", payee_bank_code: null, payee_bank_name: null })]
       fake.db.disbursement_allocations = [allocRow(SUB_FREE, PAY_FREE)]
       const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: allocTo(SUB_FREE, "dddddddd-0000-4000-8000-0000000000ba") })
-      expect(res.status).toBe(400)
-      expect(res.body.error).toBe("payee_is_registered_vendor")
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe("payee_name_similar")
     })
   })
 
@@ -988,10 +993,16 @@ describe("第五輪（2026-11-17）", () => {
         expect(res.body, name).toMatchObject({ error: "invalid_payee_name", message: "名稱含有不可見字元，請重新輸入" })
         expect(anyWrites()).toHaveLength(0)
       }
-      for (const name of ["測試甲工程行.", "測試甲-工程行", "測試甲・工程行", "(股)測試甲工程行", "（股）測試甲工程行", "測試甲工程行(股)。"]) {
+      for (const name of ["測試甲工程行.", "測試甲-工程行", "測試甲・工程行"]) {
         const res = await as(request(app).post("/disbursements")).send(other(name))
         expect(res.status, name).toBe(400)
         expect(res.body.error, name).toBe("payee_is_registered_vendor")
+      }
+      // 第八輪：(股) 前後綴是「相近」→ 需說明。
+      for (const name of ["(股)測試甲工程行", "（股）測試甲工程行", "測試甲工程行(股)。"]) {
+        const res = await as(request(app).post("/disbursements")).send(other(name))
+        expect(res.status, name).toBe(409)
+        expect(res.body.error, name).toBe("payee_name_similar")
       }
     })
     it("登錄廠商單的戶名含不可見字元也 400；PATCH 只改備註的舊單不回溯", async () => {
