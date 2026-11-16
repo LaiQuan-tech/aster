@@ -717,6 +717,8 @@ const BRANCH_WORDS = [
 const COMPANY_TYPE_WORDS = [...new Set([...SUFFIXES_BARE, "股份有限公司", "有限公司", "公司", "股", "株", "株式会社", "企業社", "企業", "工作室", "行", "社", "號", "co", "coltd", "colimited", "ltd", "limited", "inc", "corp", "corporation", "company"])]
 /** 地名後可接的「市／縣／區／鄉／鎮」。 */
 const PLACE_TAILS = ["市", "縣", "區", "鄉", "鎮"]
+/** 改制前舊縣名（新竹縣等現行縣已在 TW_COUNTIES）。 */
+const OLD_COUNTIES = ["台北縣", "臺北縣", "桃園縣", "台中縣", "臺中縣", "台南縣", "臺南縣", "高雄縣"]
 /** 「第二廠」「二廠」「3廠」。 */
 const FACTORY_RE = /^第?[0-9〇零一二三四五六七八九十百]+廠/u
 /** 允許的附加字（依第一個字元分桶、長的先試）。 */
@@ -727,10 +729,18 @@ const EXTRA_TOKENS: ReadonlySet<string> = (() => {
     if (/\p{Script=Han}/u.test(p)) for (const t of PLACE_TAILS) set.add(p + t)
   }
   for (const c of TW_COUNTIES) set.add(c)
+  // 2026-11-17：改制前舊縣名（台北縣、桃園縣、台中縣、台南縣、高雄縣；臺寫法一併列，比對 key 會正規化為台）。
+  for (const c of OLD_COUNTIES) set.add(c)
   for (const t of TW_TOWNSHIPS) {
     set.add(t)
     const base = [...t].slice(0, -1).join("")
-    if ([...base].length >= 2) set.add(base)
+    if ([...base].length < 2) continue
+    set.add(base)
+    // 2026-11-17：簡稱＋市／鎮／鄉／區（改制前寫法：中壢市、板橋市、鳳山市…）；與縣市名相同者（新竹市）不另加。
+    for (const tail of PLACE_TAILS) {
+      if (tail === "縣") continue
+      if (!TW_COUNTIES.includes(base + tail)) set.add(base + tail)
+    }
   }
   return set
 })()
