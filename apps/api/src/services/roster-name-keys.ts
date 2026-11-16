@@ -1,11 +1,25 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { selectAllPages } from "../lib/select-all-pages.js"
-import { buildRosterKeyIndex, rosterKeyMatches } from "../lib/payee-name.js"
+import { buildRosterKeyIndex, invalidNameMessage, rosterKeyMatches } from "../lib/payee-name.js"
 
 export type RosterVendor = { id: string; name: string; short_name?: string | null; account_holder?: string | null }
 
 /** 409 must_bind_vendor 的回應本文（副委託整批 PUT、POST /projects 的 initialSubcontracts 共用）。 */
 export const MUST_BIND_VENDOR = { error: "must_bind_vendor", message: "此名稱與名冊廠商相同，請在下拉選擇名冊廠商" } as const
+
+/**
+ * 第七輪：副委託名稱含不可見字元或西里爾／希臘字母 → 400 invalid_subcontract_vendor_name
+ * （副委託整批 PUT 新建／改名列、POST /projects 的 initialSubcontracts 共用）。
+ */
+export function invalidSubcontractVendorNameBody(name: string | null | undefined, extra: Record<string, unknown> = {}) {
+  const reason = invalidNameMessage(name) ?? ""
+  return {
+    error: "invalid_subcontract_vendor_name",
+    ...extra,
+    vendorName: (name ?? "").trim(),
+    message: `副委託廠商名稱「${(name ?? "").trim()}」不合法：${reason}`,
+  }
+}
 
 /**
  * 409 must_bind_vendor 的完整回應（第六輪）：帶撞到的名冊廠商名稱 matchedVendorName 與副委託名稱 vendorName，

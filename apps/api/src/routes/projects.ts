@@ -4,7 +4,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf } from "../services/roster-name-keys.js"
+import { invalidSubcontractVendorNameBody, loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf } from "../services/roster-name-keys.js"
+import { invalidNameMessage } from "../lib/payee-name.js"
 import {
   nextProjectCode,
   isUniqueViolation,
@@ -1032,6 +1033,14 @@ projectsRouter.post(
     const initialSubcontracts = (b.initialSubcontracts ?? []).map((item) =>
       typeof item.vendorId === "string" ? { ...item, vendorId: item.vendorId.toLowerCase() } : item,
     )
+    // 第七輪：副委託名稱含不可見字元或西里爾／希臘字母 → 400 invalid_subcontract_vendor_name（同放款戶名、名冊名稱）。
+    {
+      const badIndex = initialSubcontracts.findIndex((item) => invalidNameMessage(item.vendorName) !== null)
+      if (badIndex >= 0) {
+        res.status(400).json(invalidSubcontractVendorNameBody(initialSubcontracts[badIndex]!.vendorName, { id: null, index: badIndex }))
+        return
+      }
+    }
     const seenInstallments = new Set<number>()
     let guildAdvances = 0
     for (const billing of billings) {

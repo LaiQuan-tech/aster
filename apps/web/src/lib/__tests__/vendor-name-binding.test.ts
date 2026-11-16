@@ -87,7 +87,7 @@ describe("humanizeVendorIdentityError — 名冊同時改名稱與帳戶被 409 
 
 describe("第五輪（2026-11-17）中文訊息", () => {
   it("名稱不可見字元、刪除仍有往來的廠商、副委託須綁名冊廠商", () => {
-    expect(humanizeVendorIdentityError("[400] invalid_vendor_name")).toBe("名稱含有不可見字元，或混用拉丁與西里爾／希臘字母，請重新輸入");
+    expect(humanizeVendorIdentityError("[400] invalid_vendor_name")).toBe("名稱含有不可見字元或西里爾／希臘字母，請重新輸入");
     // 第六輪：名冊重名 → 優先顯示後端帶廠商名稱的訊息
     expect(humanizeVendorIdentityError("[409] vendor_name_duplicate", "名冊已有同名廠商「測試甲工程行」")).toBe("名冊已有同名廠商「測試甲工程行」");
     expect(humanizeVendorIdentityError("[409] vendor_name_duplicate")).toBe("名冊已有同名廠商");
@@ -120,6 +120,23 @@ describe("第六輪：副委託改綁要原因（rebind_reason_required）", () 
     spy.mockReset().mockRejectedValueOnce(err);
     await expect(putProjectSubcontractsWithRebind("p1", { subcontracts: rows }, () => null)).rejects.toBe(err);
     spy.mockRestore();
+  });
+  it("第七輪：解除名冊綁定（vendorId: null）的 rebind_reason_required 也問原因、帶 rebindReason 重送", async () => {
+    const unbindRows = [{ ...(rows[0] as object), vendorId: null, vendorName: "測試非登錄" }] as never[];
+    const err = Object.assign(new Error("[400] rebind_reason_required"), { body: { error: "rebind_reason_required", id: "s1", unbind: true, message: "副委託「測試乙」仍有未付期款，解除與名冊廠商「測試乙」的綁定（改為非登錄廠商）請填寫原因" } });
+    const spy = vi.spyOn(apiClient, "apiFetch").mockRejectedValueOnce(err).mockResolvedValueOnce({ subcontracts: [] } as never);
+    const ask = vi.fn(() => "測試解除原因");
+    await putProjectSubcontractsWithRebind("p1", { subcontracts: unbindRows }, ask);
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("解除與名冊廠商"));
+    const sent = JSON.parse((spy.mock.calls[1]![1] as { body: string }).body);
+    expect(sent.subcontracts[0]).toMatchObject({ id: "s1", vendorId: null, rebindReason: "測試解除原因" });
+    spy.mockRestore();
+  });
+  it("第七輪：invalid_subcontract_vendor_name → 後端訊息優先，否則中文預設", () => {
+    const withServer = Object.assign(new Error("[400] invalid_subcontract_vendor_name"), { serverMessage: "副委託廠商名稱「Тест」不合法：名稱含有西里爾或希臘字母，請改用中文或英文字母重新輸入" });
+    expect(humanizeSubcontractError(withServer, "x")).toContain("不合法");
+    expect(humanizeSubcontractError(new Error("[400] invalid_subcontract_vendor_name"), "x")).toContain("西里爾／希臘字母");
+    expect(humanizeProjectExtError(new Error("[400] invalid_subcontract_vendor_name"), "x")).toContain("西里爾／希臘字母");
   });
   it("複製專案：自動綁定／原廠商已刪除的提示也顯示", () => {
     expect(duplicateSubcontractWarningText({ subcontractWarnings: [

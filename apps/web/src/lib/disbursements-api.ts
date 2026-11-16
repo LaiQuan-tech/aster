@@ -583,7 +583,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   vendor_bank_missing: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶。",
   payee_is_registered_vendor: "收款對象與名冊廠商視為同一家，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
   payee_bank_changed: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出；已核准的單請先撤回簽核再編輯。",
-  invalid_payee_name: "名稱含有不可見字元，或混用拉丁與西里爾／希臘字母，請重新輸入。",
+  invalid_payee_name: "名稱含有不可見字元或西里爾／希臘字母，請重新輸入。",
   vendor_has_unpaid_installments: "此廠商仍有未付期款，若要付期款請改用分攤；確定為非期款支出請勾選確認。",
   cannot_clear_allocations: "已分攤的放款單不能改成零分攤，請作廢後重開。",
   purpose_required: "登錄廠商不分攤期款（非專案支出）時，請填寫用途。",

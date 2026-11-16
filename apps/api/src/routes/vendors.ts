@@ -6,7 +6,7 @@ import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLogStrict } from "../services/audit.js"
 import { vendorHasOpenDisbursements, vendorHasUnpaidInstallments } from "../services/vendor-unpaid.js"
-import { invalidNameMessage, payeeNameKey } from "../lib/payee-name.js"
+import { invalidNameMessage, payeeNameKeys, rosterVendorKeys } from "../lib/payee-name.js"
 import { selectAllPages } from "../lib/select-all-pages.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
@@ -268,7 +268,11 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
       res.status(403).json(AFFILIATE_HR_ONLY)
       return
     }
-    const dupName = await duplicateVendorName(tenantId, parsed.data.name, null)
+    const dupName = await duplicateVendorName(
+      tenantId,
+      { name: parsed.data.name, short_name: parsed.data.shortName ?? null, account_holder: parsed.data.accountHolder ?? null },
+      null,
+    )
     if (dupName !== null) {
       res.status(409).json(vendorNameDuplicateBody(dupName))
       return
@@ -306,26 +310,32 @@ const BANK_FIELDS: Array<[keyof z.infer<typeof vendorBody>, string]> = [
  * 第六輪 F2：也不可拉丁字母混用西里爾／希臘字母。合法回 null，否則回 400 本文。
  */
 function invalidVendorName(body: Partial<z.infer<typeof vendorBody>>): { error: "invalid_vendor_name"; message: string } | null {
-  const message = invalidNameMessage(body.name) ?? invalidNameMessage(body.accountHolder)
+  const message = invalidNameMessage(body.name) ?? invalidNameMessage(body.shortName) ?? invalidNameMessage(body.accountHolder)
   return message ? { error: "invalid_vendor_name", message } : null
 }
 
 /**
- * 第六輪 F1（2026-11-17）：名冊重名——新名稱 key（payeeNameKey）等於同租戶另一家未刪廠商的名稱 key → 回那一家的名稱；
- * 沒撞到回 null。POST 與 PATCH（改名）用，呼叫端回 409 vendor_name_duplicate。
+ * 名冊重名（第六輪 F1；第七輪改比全部 key）：新資料的 rosterVendorKeys（名稱、簡稱 key≥3、帳戶戶名規則）與同租戶其他
+ * 每家未刪廠商的 rosterVendorKeys 有交集 → 回撞到那一家的名稱；沒撞到回 null。呼叫端回 409 vendor_name_duplicate。
+ * 本廠商帳戶戶名 key 等於自己的名稱 key 只算一個 key（rosterVendorKeys 去重），不算撞名。
  */
-async function duplicateVendorName(tenantId: string, name: string, selfId: string | null): Promise<string | null> {
-  const key = payeeNameKey(name)
-  if (!key) return null
-  const roster = await selectAllPages<{ id: string; name: string | null }>(
-    (from, to) => supabaseAdmin.from("vendors").select("id, name").eq("tenant_id", tenantId).is("deleted_at", null).order("id").range(from, to),
+type RosterIdentity = { name: string | null; short_name: string | null; account_holder: string | null }
+async function duplicateVendorName(tenantId: string, next: RosterIdentity, selfId: string | null): Promise<string | null> {
+  const mine = new Set(rosterVendorKeys({ id: selfId ?? "", ...next }))
+  if (mine.size === 0) return null
+  const roster = await selectAllPages<{ id: string; name: string | null; short_name: string | null; account_holder: string | null }>(
+    (from, to) =>
+      supabaseAdmin
+        .from("vendors")
+        .select("id, name, short_name, account_holder")
+        .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
+        .order("id")
+        .range(from, to),
     "vendors (duplicate name)",
   )
   const isSelf = (v: { id: string }) => !!selfId && v.id.toLowerCase() === selfId.toLowerCase()
-  // PATCH 名稱 key 沒變（只改大小寫、空白、後綴）不算改名，不回溯既有重名。
-  const self = roster.find(isSelf)
-  if (self && payeeNameKey(self.name) === key) return null
-  const hit = roster.find((v) => !isSelf(v) && (v.name ?? "").trim() !== "" && payeeNameKey(v.name) === key)
+  const hit = roster.find((v) => !isSelf(v) && (v.name ?? "").trim() !== "" && rosterVendorKeys(v).some((k) => mine.has(k)))
   return hit ? (hit.name ?? "") : null
 }
 const vendorNameDuplicateBody = (existing: string) => ({
@@ -435,11 +445,38 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     // 名冊把廠商整筆改成另一家（2026-11-16）：同一次同時改名稱與收款帳戶，等於把這筆 vendor_id 換成另一家公司；
     // 掛在這個 vendor_id 上的未付期款／未匯款的放款單會跟著匯到新帳戶 → 有未付款項時 409 vendor_identity_change。
     // R2 第四輪：只改帳戶也要擋——有未匯款放款單 → 409；只有未付期款 → 須填變更原因（寫稽核）。
-    if (parsed.data.name !== undefined) {
-      const dupName = await duplicateVendorName(tenantId, parsed.data.name, id)
-      if (dupName !== null) {
-        res.status(409).json(vendorNameDuplicateBody(dupName))
+    // 第七輪：改了名稱、簡稱或帳戶戶名任一（key 與現值不同）→ 整份新資料的 key 與其他廠商比對。
+    const nameBody = parsed.data as Partial<z.infer<typeof vendorBody>>
+    if (nameBody.name !== undefined || nameBody.shortName !== undefined || nameBody.accountHolder !== undefined) {
+      const { data: stored, error: storedErr } = await supabaseAdmin
+        .from("vendors")
+        .select("name, short_name, account_holder")
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .is("deleted_at", null)
+        .maybeSingle()
+      if (storedErr) {
+        next(new Error(`PATCH /vendors/${id} (load names): ${storedErr.message}`))
         return
+      }
+      // 查無這個廠商就往下走，由下面的 update 回 404。
+      if (stored) {
+        const cur = stored as RosterIdentity
+        const next_: RosterIdentity = {
+          name: nameBody.name !== undefined ? nameBody.name : cur.name,
+          short_name: nameBody.shortName !== undefined ? nameBody.shortName ?? null : cur.short_name,
+          account_holder: nameBody.accountHolder !== undefined ? nameBody.accountHolder ?? null : cur.account_holder,
+        }
+        const k = (v: string | null | undefined) => payeeNameKeys(v).join("\u0000")
+        const changed =
+          k(next_.name) !== k(cur.name) || k(next_.short_name) !== k(cur.short_name) || k(next_.account_holder) !== k(cur.account_holder)
+        if (changed) {
+          const dupName = await duplicateVendorName(tenantId, next_, id)
+          if (dupName !== null) {
+            res.status(409).json(vendorNameDuplicateBody(dupName))
+            return
+          }
+        }
       }
     }
     const bankCheck = await checkBankChange(tenantId, id, parsed.data)

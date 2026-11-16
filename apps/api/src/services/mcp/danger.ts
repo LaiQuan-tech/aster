@@ -35,6 +35,22 @@ const hasAnyKey = (keys: string[]) => (body: unknown) =>
 const confirmsNonInstallment = (body: unknown): boolean =>
   !!body && typeof body === "object" && !Array.isArray(body) && (body as Record<string, unknown>).confirmNonInstallment === true
 
+/**
+ * 第七輪：副委託整批 PUT 任一列帶 rebindReason（改綁名冊廠商）或任一列「有 id 且 vendorId 為 null」（可能解除名冊綁定）
+ * ＝改變期款的收款對象，最高風險。
+ */
+const rebindsSubcontractVendor = (body: unknown): boolean => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false
+  const rows = (body as Record<string, unknown>).subcontracts
+  if (!Array.isArray(rows)) return false
+  return rows.some((r) => {
+    if (!r || typeof r !== "object") return false
+    const row = r as Record<string, unknown>
+    if (Object.prototype.hasOwnProperty.call(row, "rebindReason") && row.rebindReason !== undefined) return true
+    return Object.prototype.hasOwnProperty.call(row, "vendorId") && row.vendorId === null && typeof row.id === "string" && row.id !== ""
+  })
+}
+
 /** body 任何一層含銀行相關鍵（bankCode／bank_name／bankAccount／accountHolder／account_holder／任何 bank* 鍵）。 */
 function hasBankKey(body: unknown): boolean {
   if (Array.isArray(body)) return body.some(hasBankKey)
@@ -176,6 +192,7 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "POST", path: "/disbursements", tier: "high", label: "建立放款單（含收款銀行帳戶）", when: hasBankKey },
   { method: "PATCH", path: "/disbursements/:id", tier: "high", label: "修改放款單收款銀行帳戶", when: hasBankKey },
   { method: "PATCH", path: "/disbursements/:id", label: "修改放款單" },
+  { method: "PUT", path: "/projects/:id/subcontracts", tier: "high", label: "修改複委託（改綁／解除綁定名冊廠商）", when: rebindsSubcontractVendor },
   { method: "PUT", path: "/projects/:id/subcontracts", label: "修改複委託" },
   { method: "POST", path: "/projects/:id/subcontracts/:sid/payments/:installmentNo/accept", label: "複委託付款驗收" },
   { method: "POST", path: "/attendance-sheets/:id/approve", label: "核定出勤月表（鎖定）" },

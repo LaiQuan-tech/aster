@@ -1,5 +1,5 @@
 import { selectAllPages } from "../lib/select-all-pages.js"
-import { invalidNameMessage, payeeNameKey, rosterVendorKeys } from "../lib/payee-name.js"
+import { invalidNameMessage, payeeNameKeys, rosterVendorKeys } from "../lib/payee-name.js"
 import { vendorHasUnpaidInstallments } from "./vendor-unpaid.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isProjectDeletedError, isRetryableConflictError, isRowDeletedError } from "../middleware/project-deleted.js"
@@ -806,7 +806,7 @@ export async function getDisbursement(tenantId: string, id: string): Promise<Ser
  * 第六輪（核准頁標示）：這些單中有「確認非期款支出」稽核的 id（建單 INSERT 稽核或改單嚴格稽核的
  * new_row.confirmNonInstallment＝true）。查稽核表失敗不擋顯示，回空集合並記 log。
  */
-export async function nonInstallmentConfirmedIds(tenantId: string, ids: string[]): Promise<Set<string>> {
+export async function nonInstallmentConfirmedIds(tenantId: string, ids: string[], opts: { strict?: boolean } = {}): Promise<Set<string>> {
   const out = new Set<string>()
   for (let i = 0; i < ids.length; i += 100) {
     const { data, error } = await supabaseAdmin
@@ -817,6 +817,8 @@ export async function nonInstallmentConfirmedIds(tenantId: string, ids: string[]
       .in("record_id", ids.slice(i, i + 100))
       .contains("new_row", { confirmNonInstallment: true })
     if (error) {
+      // 第七輪 M2：送審／核准／付款守門用 strict——查不到就不放行（500），不當成「沒確認」誤回 409。
+      if (opts.strict) throw new Error(`nonInstallmentConfirmedIds: ${error.message}`)
       logger.warn({ err: error.message }, "nonInstallmentConfirmedIds: audit lookup failed")
       return out
     }
@@ -1510,8 +1512,8 @@ export { payeeNameKey } from "../lib/payee-name.js"
  * 同名一律擋，請改選登錄廠商（副委託請先綁名冊廠商）。建單／改單回 400；送審／核准／付款守門回 409（F4）。
  */
 export async function assertPayeeNotRegisteredVendor(tenantId: string, payeeName: string, status: 400 | 409 = 400): Promise<void> {
-  const key = payeeNameKey(payeeName)
-  if (!key) return
+  const keys = payeeNameKeys(payeeName)
+  if (keys.length === 0) return
   const vendors = await selectAllPages<{ id: string; name: string | null; short_name?: string | null; account_holder: string | null }>(
     (from, to) =>
       supabaseAdmin
@@ -1523,7 +1525,7 @@ export async function assertPayeeNotRegisteredVendor(tenantId: string, payeeName
         .range(from, to),
     "assertPayeeNotRegisteredVendor",
   )
-  const hit = vendors.find((v) => rosterVendorKeys(v).includes(key))
+  const hit = vendors.find((v) => rosterVendorKeys(v).some((k) => keys.includes(k)))
   if (!hit) return
   const matchedVendorName = hit.name ?? ""
   throw new DisbursementError(status, "payee_is_registered_vendor", {
@@ -1564,6 +1566,24 @@ async function assertZeroAllocVendorConfirmed(
     })
   }
   return true
+}
+
+/**
+ * 第七輪 M2：送審、核准、付款（含批次）前，登錄廠商零分攤單重驗——開單時廠商沒有未付期款（免確認），
+ * 之後才新增期款：單上沒有「確認非期款支出」稽核（nonInstallmentConfirmedIds）且廠商現在有未付期款
+ * → 409 vendor_has_unpaid_installments（請編輯放款單改用分攤或勾選確認）。駁回、作廢不呼叫。
+ */
+export async function assertZeroAllocVendorStillConfirmed(
+  tenantId: string,
+  current: Pick<DisbursementRow, "id" | "payee_kind" | "vendor_id">,
+  allocations: ReadonlyArray<unknown>,
+): Promise<void> {
+  if (current.payee_kind !== "vendor" || !current.vendor_id || allocations.length > 0) return
+  if (!(await vendorHasUnpaidInstallments(tenantId, current.vendor_id, "assertZeroAllocVendorStillConfirmed"))) return
+  if ((await nonInstallmentConfirmedIds(tenantId, [current.id], { strict: true })).has(current.id)) return
+  throw new DisbursementError(409, "vendor_has_unpaid_installments", {
+    message: "此廠商仍有未付期款，這張不分攤期款的放款單尚未確認為非期款支出；請編輯放款單改用分攤，或勾選確認為非期款支出",
+  })
 }
 
 async function auditNonInstallmentConfirm(
@@ -2829,6 +2849,8 @@ export async function payDisbursement(
   await assertPayeeBankStillMatchesVendor(tenantId, current)
   // F4（第六輪）：「其他」收款單付款前（含批次付款）重驗戶名不是名冊廠商。
   await assertOtherPayeeStillNotRegisteredVendor(tenantId, current)
+  // M2（第七輪）：登錄廠商零分攤單付款前（含批次付款）重驗「廠商有未付期款 → 須已確認非期款支出」。
+  await assertZeroAllocVendorStillConfirmed(tenantId, current, allocations)
   // M5：付款前再確認一次期款都已驗收（建單之後才被取消驗收的情況）。
   await assertPaymentsAccepted(
     tenantId,

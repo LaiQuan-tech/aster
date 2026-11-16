@@ -659,7 +659,7 @@ export function putSubcontractPayments(
 }
 
 /**
- * 第六輪：副委託整批 PUT 遇 400 rebind_reason_required（既有列從名冊廠商 A 改綁 B 且有未付期款）→
+ * 第六輪：副委託整批 PUT 遇 400 rebind_reason_required（既有列從名冊廠商 A 改綁 B、第七輪起也含解除綁定成非登錄，且有未付期款）→
  * 用 ask 問改綁原因、帶在該列 rebindReason 重送；使用者取消（空白）就把原錯誤丟出去。
  */
 export async function putProjectSubcontractsWithRebind(
@@ -694,9 +694,17 @@ export function mustBindVendorText(err: unknown): string | null {
   return `「${x}」與名冊廠商「${y}」視為同一家，請在下拉選擇該廠商。`
 }
 
+/** 400 invalid_subcontract_vendor_name（第七輪）：副委託名稱含不可見字元或西里爾／希臘字母；後端訊息帶名稱與原因，優先顯示。 */
+export function invalidSubcontractVendorNameText(err: unknown): string {
+  const server = (err as { serverMessage?: unknown } | null)?.serverMessage
+  if (typeof server === "string" && server.trim()) return server
+  return SUBCONTRACT_ERRORS.invalid_subcontract_vendor_name!
+}
+
 export const SUBCONTRACT_ERRORS: Record<string, string> = {
   must_bind_vendor: "此名稱與名冊廠商視為同一家，請在下拉選擇名冊廠商。",
-  rebind_reason_required: "副委託改綁另一家名冊廠商且仍有未付期款，請填寫改綁原因。",
+  invalid_subcontract_vendor_name: "副委託廠商名稱含有不可見字元或西里爾／希臘字母，請改用中文或英文字母重新輸入。",
+  rebind_reason_required: "副委託改綁另一家名冊廠商（或解除名冊綁定）且仍有未付期款，請填寫原因。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_contract: "選到的合約不屬於本專案或已作廢。",
   invalid_company: "選到的公司主體不存在。",
@@ -724,6 +732,7 @@ export function humanizeSubcontractError(err: unknown, fallback: string): string
   const bind = mustBindVendorText(err)
   if (bind) return bind
   if (msg.includes("rebind_reason_required") && typeof server === "string" && server.trim()) return server
+  if (msg.includes("invalid_subcontract_vendor_name")) return invalidSubcontractVendorNameText(err)
   for (const [code, text] of Object.entries(SUBCONTRACT_ERRORS)) {
     if (msg.includes(code)) return text
   }
@@ -1068,6 +1077,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("invalid_parent")) return "母案不合法：必須是同租戶的主案、不能是自己；主案本身也不能再掛母案。"
   if (msg.includes("has_child_projects")) return "這個主案底下還有追加／變更／代墊案，不能改成其他案型。請先把那些案的母案移走或清空。"
   if (msg.includes("must_bind_vendor")) return mustBindVendorText(err) ?? "協力廠商名稱與名冊廠商視為同一家，請在下拉選擇名冊廠商。"
+  if (msg.includes("invalid_subcontract_vendor_name")) return invalidSubcontractVendorNameText(err)
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
   if (msg.includes("invalid_company")) return "選到的承接公司不存在或不屬於本租戶，請重新選擇。"
   if (msg.includes("company_inactive")) return "選到的承接公司已停用，請改選其他公司。"

@@ -43,6 +43,7 @@ import {
   assertAllocationVendorsStillMatch,
   assertPayeeBankStillMatchesVendor,
   assertOtherPayeeStillNotRegisteredVendor,
+  assertZeroAllocVendorStillConfirmed,
   nonInstallmentConfirmedIds,
   loadDisbursement,
   serializeMany,
@@ -382,6 +383,8 @@ export async function submitDisbursement(
   await assertPayeeBankStillMatchesVendor(tenantId, current)
   // F4（第六輪）：「其他」收款單送簽前重驗戶名不是名冊廠商（開單後名冊才新增同名廠商）。
   await assertOtherPayeeStillNotRegisteredVendor(tenantId, current)
+  // M2（第七輪）：登錄廠商零分攤單送簽前重驗「廠商有未付期款 → 須已確認非期款支出」。
+  await assertZeroAllocVendorStillConfirmed(tenantId, current, allocations)
   await assertPaymentsAccepted(
     tenantId,
     actor,
@@ -582,11 +585,14 @@ export async function decideDisbursement(params: {
   const takeOver = isCandidate && step.approver_emp_id !== actor.empId
   // R1b：核准前重驗分攤副委託的廠商仍是收款廠商（駁回不擋）。
   if (action === "approve") {
-    await assertAllocationVendorsStillMatch(tenantId, current, await loadAllocations(tenantId, [id]))
+    const approveAllocations = await loadAllocations(tenantId, [id])
+    await assertAllocationVendorsStillMatch(tenantId, current, approveAllocations)
     // N-1：核准前重驗收款帳戶快照仍等於名冊現值（駁回不擋）。
     await assertPayeeBankStillMatchesVendor(tenantId, current)
     // F4（第六輪）：「其他」收款單核准前重驗戶名不是名冊廠商（駁回不擋）。
     await assertOtherPayeeStillNotRegisteredVendor(tenantId, current)
+    // M2（第七輪）：登錄廠商零分攤單核准前重驗（駁回不擋）。
+    await assertZeroAllocVendorStillConfirmed(tenantId, current, approveAllocations)
   }
 
   const actedAt = new Date().toISOString()

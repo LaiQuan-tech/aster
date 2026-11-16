@@ -544,6 +544,17 @@ describe("POST /projects primary contract", () => {
       }
     })
 
+    it("第七輪：副委託名稱全西里爾／含希臘字母／不可見字元 → 400 invalid_subcontract_vendor_name，未呼叫 RPC", async () => {
+      for (const [i, name] of ["Тест Вендор", "測試Ωmega工程", "測試\u200b廠商"].entries()) {
+        h.operations.length = 0
+        const response = await post([{ vendorId: null, vendorName: "測試名冊外廠商", amount: 5_000 }, { vendorId: null, vendorName: name, amount: 5_000 }], `VN-CYR-${i}`)
+        expect(response.status, name).toBe(400)
+        expect(response.body).toMatchObject({ error: "invalid_subcontract_vendor_name", index: 1 })
+        expect(rpcCalls()).toEqual([])
+        expect(h.db.project_subcontracts).toEqual([])
+      }
+    })
+
     it("{vendorId: null, 任意名稱} → 201，不比對", async () => {
       const response = await post([{ discipline: "機電", vendorId: null, vendorName: "測試名冊外廠商", amount: 10_000 }], "VN-NULL")
       expect(response.status).toBe(201)

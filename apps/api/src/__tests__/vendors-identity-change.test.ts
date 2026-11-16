@@ -155,7 +155,7 @@ describe("R2：改收款帳戶（2026-11-16 第四輪）", () => {
     })
   })
 
-  it("U3 第六輪：未付定義同應付清單——有付款日＝已付（部分付款也算）、歸檔專案與金額 0 的期款不算", async () => {
+  it("U3 第六輪／H2 第七輪：未付定義同應付清單——有付款日＝已付（部分付款也算）、金額 0 不算；歸檔專案照算、已刪專案不算", async () => {
     fake.db.project_subcontract_payments = [{ ...unpaid()[0], paid_on: "2026-10-01", paid_amount: "500", withheld_amount: "0" }]
     const partial = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002" })
     expect(partial.status).toBe(200)
@@ -163,9 +163,14 @@ describe("R2：改收款帳戶（2026-11-16 第四輪）", () => {
     fake.db.project_subcontract_payments = [{ ...unpaid()[0], amount: "0" }]
     expect((await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000003" })).status).toBe(200)
     fake.db.project_subcontract_payments = unpaid()
-    fake.db.projects = [{ id: "p1", tenant_id: TENANT_ID, deleted_at: null, archived_at: "2026-10-01T00:00:00Z" }]
+    fake.db.projects = [{ id: "p1", tenant_id: TENANT_ID, deleted_at: "2026-10-01T00:00:00Z", archived_at: null }]
     expect((await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000004" })).status).toBe(200)
     expect(audits()).toHaveLength(0)
+    // 第七輪 H2：歸檔（封存）專案的未付期款照算 → 要原因。
+    fake.db.projects = [{ id: "p1", tenant_id: TENANT_ID, deleted_at: null, archived_at: "2026-10-01T00:00:00Z" }]
+    const archived = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000006" })
+    expect(archived.status).toBe(400)
+    expect(archived.body.error).toBe("change_reason_required")
     // 對照：未歸檔、未付、金額 > 0 → 仍要原因。
     fake.db.projects = [{ id: "p1", tenant_id: TENANT_ID, deleted_at: null, archived_at: null }]
     const need = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000005" })

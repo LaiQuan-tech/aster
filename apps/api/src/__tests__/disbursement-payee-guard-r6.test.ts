@@ -174,8 +174,8 @@ describe("第六輪第 1 項：「其他」收款同名一律擋（不再看副�
     const mixed = await create(other("ABC Dеsign Ltd"))
     expect(mixed.status).toBe(400)
     expect(mixed.body.error).toBe("invalid_payee_name")
-    // 只有希臘字母（沒混拉丁）→ 不擋
-    expect((await create(other("Αθήνα測試"))).status).toBe(201)
+    // 第七輪：只有希臘字母（沒混拉丁）也擋
+    expect((await create(other("Αθήνα測試"))).body.error).toBe("invalid_payee_name")
   })
 })
 

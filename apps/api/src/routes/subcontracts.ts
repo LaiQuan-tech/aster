@@ -23,7 +23,8 @@ import {
   type PaymentRow,
 } from "../services/project-application-store.js"
 import { loadPaymentAcceptance, paymentsHaveAcceptance } from "../services/disbursements.js"
-import { loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf } from "../services/roster-name-keys.js"
+import { invalidSubcontractVendorNameBody, loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf } from "../services/roster-name-keys.js"
+import { invalidNameMessage } from "../lib/payee-name.js"
 import { subcontractsWithUnpaidInstallments } from "../services/vendor-unpaid.js"
 import { firstNewlyPickedInactive } from "../services/company-lifecycle.js"
 import { writeAuditLog, writeAuditLogStrict } from "../services/audit.js"
@@ -425,6 +426,16 @@ subcontractsRouter.put(
           res.status(400).json({ error: "invalid_vendor", vendorId: p.vendorId })
           return
         }
+        // 第七輪：新建列、或既有列改了名稱 → 名稱含不可見字元或西里爾／希臘字母 → 400 invalid_subcontract_vendor_name。
+        // 既有列名稱沒變、原樣存檔不擋（不回溯）。
+        {
+          const prevRow = p.id ? existingById.get(p.id) : undefined
+          const renamed = p.vendorName !== undefined && (!prevRow || (p.vendorName ?? "").trim() !== (prevRow.vendor_name ?? "").trim())
+          if (renamed && invalidNameMessage(p.vendorName) !== null) {
+            res.status(400).json(invalidSubcontractVendorNameBody(p.vendorName, { id: p.id ?? null, index: payload.indexOf(p) }))
+            return
+          }
+        }
         if (p.contractId && !contracts.has(p.contractId)) {
           res.status(400).json({ error: "invalid_contract", contractId: p.contractId })
           return
@@ -626,13 +637,16 @@ subcontractsRouter.put(
         }
       }
 
-      // 第六輪 F1（2026-11-17）：既有列 vendor_id 從登錄廠商 A 改綁另一家登錄廠商 B（非 null→非 null 且不同），
+      // 第六輪 F1（2026-11-17）：既有列 vendor_id 從登錄廠商 A 改綁另一家登錄廠商 B（非 null→非 null 且不同；第七輪起也含→null），
       // 而該副委託仍有未付期款（vendor-unpaid 同定義）→ 須帶該列 rebindReason，否則 400 rebind_reason_required；
       // 有帶就在寫入前以嚴格稽核記下舊廠商、新廠商、原因（稽核寫不進去就不改）。
+      // 第七輪 H1：既有列從登錄廠商解除綁定（prevVendorId 非 null → 送 vendorId: null）同樣算改綁——
+      // 期款改由非登錄名稱收款（之後可用「其他」收款付到任意帳戶），一樣要原因與嚴格稽核。
       const rebinds = payload.filter((p) => {
         const prev = p.id ? existingById.get(p.id) : undefined
         const prevVendorId = prev?.vendor_id ? prev.vendor_id.toLowerCase() : null
-        return !!prev && !!prevVendorId && !!p.vendorId && p.vendorId !== prevVendorId
+        if (!prev || !prevVendorId || p.vendorId === undefined) return false
+        return p.vendorId === null || p.vendorId !== prevVendorId
       })
       if (rebinds.length > 0) {
         const label = `PUT /projects/${projectId}/subcontracts (rebind)`
@@ -643,14 +657,18 @@ subcontractsRouter.put(
         if (missing) {
           const prev = existingById.get(missing.id!)!
           const oldVendorName = oldNames.get(prev.vendor_id!.toLowerCase()) ?? prev.vendor_name ?? ""
-          const newVendorName = vendors.get(missing.vendorId!) ?? missing.vendorName ?? ""
+          const unbind = missing.vendorId === null
+          const newVendorName = unbind ? (missing.vendorName ?? prev.vendor_name ?? "") : (vendors.get(missing.vendorId!) ?? missing.vendorName ?? "")
           res.status(400).json({
             error: "rebind_reason_required",
             id: missing.id,
             index: payload.indexOf(missing),
             oldVendorName,
             newVendorName,
-            message: `副委託「${prev.vendor_name ?? ""}」仍有未付期款，從「${oldVendorName}」改綁「${newVendorName}」請填寫改綁原因`,
+            unbind,
+            message: unbind
+              ? `副委託「${prev.vendor_name ?? ""}」仍有未付期款，解除與名冊廠商「${oldVendorName}」的綁定（改為非登錄廠商）請填寫原因`
+              : `副委託「${prev.vendor_name ?? ""}」仍有未付期款，從「${oldVendorName}」改綁「${newVendorName}」請填寫改綁原因`,
           })
           return
         }
@@ -662,9 +680,12 @@ subcontractsRouter.put(
             recordId: p.id!,
             action: "UPDATE",
             oldRow: { vendor_id: prev.vendor_id, vendor_name: prev.vendor_name, vendor_roster_name: oldNames.get(prev.vendor_id!.toLowerCase()) ?? null },
-            newRow: { vendor_id: p.vendorId, vendor_name: p.vendorName ?? null, rebindReason: (p.rebindReason ?? "").trim() },
+            newRow: { vendor_id: p.vendorId, vendor_name: p.vendorName ?? null, rebindReason: (p.rebindReason ?? "").trim(), ...(p.vendorId === null ? { unbind: true } : {}) },
             actorEmpId: scope.self.id,
-            context: "PUT /projects/:id/subcontracts 副委託改綁另一家名冊廠商（有未付期款）",
+            context:
+              p.vendorId === null
+                ? "PUT /projects/:id/subcontracts 副委託解除名冊廠商綁定（有未付期款）"
+                : "PUT /projects/:id/subcontracts 副委託改綁另一家名冊廠商（有未付期款）",
           })
         }
       }

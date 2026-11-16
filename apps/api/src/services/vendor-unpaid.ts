@@ -5,7 +5,7 @@ export const UNSETTLED_DISBURSEMENT_STATUSES = ["draft", "pending_approval", "ap
 
 /**
  * 未付期款的定義（第六輪 U3，2026-11-17，與應付清單 buildPayables 一致）：
- * 未刪除副委託底下、所屬專案未刪除也未歸檔（projects.deleted_at／archived_at 皆空），
+ * 未刪除副委託底下、所屬專案未刪除（projects.deleted_at 為空；第七輪 H2：封存／歸檔專案照算——應付清單本來就不排除封存案），
  * 期款 paid_on 為空（有付款日＝已付，部分付款不再另算）且應付金額（override_amount ?? amount）> 0。
  * 名冊改帳戶、刪廠商、零分攤確認、副委託改綁共用。
  */
@@ -25,7 +25,6 @@ async function unpaidSubcontractIds(
       .eq("tenant_id", tenantId)
       .in("id", projectIds.slice(i, i + 100))
       .is("deleted_at", null)
-      .is("archived_at", null)
     if (error) throw new Error(`${label} (load projects): ${error.message}`)
     for (const r of (data ?? []) as Array<{ id: string }>) liveProjects.add(r.id)
   }
