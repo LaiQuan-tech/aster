@@ -97,6 +97,7 @@ const subExtrasAvailable = () => columnsExist("project_subcontracts", SUB_EXTRA_
 /**
  * 依類型決定這一列要寫哪幾個 0089 欄位：firm → 代扣日期（發票清 null）；其他 → 發票（代扣日期清 null）。
  * 「沒帶」的欄位不出現在回傳物件裡＝沿用 DB 現值。純函式，測試直接打。
+ * PUT 呼叫時傳入的 kind 是「有效類型」：有帶用帶的；更新沒帶用 DB 現有 kind（不改類型）；新建沒帶＝subcontract。
  */
 export function subcontractExtraFields(p: {
   kind?: string
@@ -515,17 +516,25 @@ subcontractsRouter.put(
 
         for (let i = 0; i < payload.length; i++) {
           const p = payload[i]
+          // 更新既有列：request 沒帶（undefined）的欄位不送、保留 DB 原值；帶 null＝清空（kind 不能是 null）。
+          // 新建：沒帶的照舊補預設（kind→subcontract、其他→null、sort_order→陣列位置）。
+          // 例：MCP 只送 {id, amount} 不能把事務所的 kind／代扣日期／專業別／備註洗掉（2026-11-16）。
+          const prev = p.id ? existingById.get(p.id) : undefined
+          const col = <T>(name: string, v: T | undefined, insertDefault: unknown): Record<string, unknown> =>
+            v !== undefined ? { [name]: v } : p.id ? {} : { [name]: insertDefault }
+          // 決定 0089 欄位寫哪一組的 kind：有帶用帶的；更新沒帶用 DB 現有 kind（不改類型）；新建沒帶＝subcontract。
+          const effectiveKind = p.kind ?? prev?.kind ?? "subcontract"
           const fields: Record<string, unknown> = {
-            kind: p.kind ?? "subcontract",
-            discipline: p.discipline ?? null,
-            vendor_id: p.vendorId ?? null,
-            vendor_name: p.vendorName ?? null,
-            contact: p.contact ?? null,
-            item: p.item ?? null,
+            ...col("kind", p.kind, "subcontract"),
+            ...col("discipline", p.discipline, null),
+            ...col("vendor_id", p.vendorId, null),
+            ...col("vendor_name", p.vendorName, null),
+            ...col("contact", p.contact, null),
+            ...col("item", p.item, null),
             amount: p.amount,
-            billing_basis: p.billingBasis ?? null,
-            order_type: p.orderType ?? null,
-            contract_id: p.contractId ?? null,
+            ...col("billing_basis", p.billingBasis, null),
+            ...col("order_type", p.orderType, null),
+            ...col("contract_id", p.contractId, null),
             // 代扣率：有帶就用帶的值；沒帶時——更新保留 DB 既有值（不送這欄），新建才用預設（0＝不代扣）。
             ...(p.withholdingRate != null
               ? { withholding_rate: p.withholdingRate }
@@ -538,10 +547,10 @@ subcontractsRouter.put(
               : p.id
                 ? {}
                 : { withholding_threshold: DEFAULT_WITHHOLDING_THRESHOLD }),
-            sort_order: p.sortOrder ?? i,
-            note: p.note ?? null,
+            ...col("sort_order", p.sortOrder, i),
+            ...col("note", p.note, null),
             updated_at: nowIso,
-            ...(extrasAvailable ? subcontractExtraFields(p) : {}),
+            ...(extrasAvailable ? subcontractExtraFields({ ...p, kind: effectiveKind }) : {}),
           }
           if (p.id) {
             const { data: updated, error } = await supabaseAdmin
