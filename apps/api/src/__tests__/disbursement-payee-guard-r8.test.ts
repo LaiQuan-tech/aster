@@ -230,7 +230,8 @@ describe("第八輪：「其他」收款", () => {
       const insIdx = fake.writes.findIndex((w) => w.table === "disbursements" && w.action === "insert")
       expect(strictIdx, payee).toBeGreaterThanOrEqual(0)
       expect(strictIdx).toBeLessThan(insIdx)
-      expect((fake.writes[strictIdx]!.payload as Row).new_row).toMatchObject({ confirmDistinctPayee: true, payee_name: payee.trim(), similarVendorNames: [rosterName] })
+      // 第九輪 H-1：「包含」也算相近（例：王小明 ⊂ 甲的帳戶戶名「測試甲王小明」），相近名單至少含這一家。
+      expect((fake.writes[strictIdx]!.payload as Row).new_row).toMatchObject({ confirmDistinctPayee: true, payee_name: payee.trim(), similarVendorNames: expect.arrayContaining([rosterName]) })
       const g = await as(request(app).get(`/disbursements/${ok.body.disbursement.id}`))
       expect(g.body.disbursement.payeeSimilarWarning, payee).toMatchObject({
         matchedVendorName: rosterName,

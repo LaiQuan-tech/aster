@@ -628,12 +628,12 @@ describe("第五輪 #4（2026-11-17）：非登錄副委託不可與名冊廠商
     expect(res.status, JSON.stringify(res.body)).toBe(200)
   })
 
-  it("第六輪第 2 項：比對範圍同放款端——簡稱（key≥3）、帳戶戶名也算；回 matchedVendorName", async () => {
+  it("第六輪第 2 項：比對範圍同放款端——簡稱（key≥3）、帳戶戶名也算（第九輪 H-2：只到相近，需說明）；回 matchedVendorName", async () => {
     fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_SAME ? { ...v, account_holder: "測試戶名王小明" } : v))
     for (const vendorName of ["測試簡稱行", "測試戶名王小明"]) {
       const res = await put([{ id: SUB_FIRM, amount: 100000 }, { id: SUB_PLAIN, amount: 30000 }, { amount: 7000, vendorId: null, vendorName }])
       expect(res.status, vendorName).toBe(409)
-      expect(res.body).toMatchObject({ error: "must_bind_vendor", matchedVendorName: "測試廠商股份有限公司", vendorName, index: 2 })
+      expect(res.body).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測試廠商股份有限公司", vendorName, index: 2 })
     }
     // 簡稱 key < 3 字不比
     fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_SAME ? { ...v, short_name: "測簡" } : v))

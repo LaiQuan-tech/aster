@@ -29,6 +29,7 @@ import {
   PAYEE_KIND_LABELS,
   type Disbursement,
   type DisbursementInput,
+  payeeSimilarWarningText,
 } from "@/lib/disbursements-api";
 import { buildRemittanceText, copyText } from "@/lib/remittance";
 import { getEmployees, type Employee } from "@/lib/admin-api";
@@ -490,7 +491,7 @@ export default function DisbursementDetailPage() {
               {/* 第八輪：收款名稱與名冊廠商相近（已說明或開單後才相近）→ 醒目標示，請核准人確認收款對象。 */}
               {d.payeeSimilarWarning && (
                 <p role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
-                  ⚠ {d.payeeSimilarWarning.message}
+                  ⚠ {payeeSimilarWarningText(d.payeeSimilarWarning)}
                 </p>
               )}
               {d.note && <p className="mt-3 text-sm text-gray-600">備註：{d.note}</p>}

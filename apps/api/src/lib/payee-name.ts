@@ -194,8 +194,13 @@ export function invalidNameMessage(name: string | null | undefined): string | nu
   return null
 }
 
+/** 第九輪 L-1：exact key 保留的標點（\p{P} 裡仍有辨識意義的 & @ # % *）；\p{S}（+、$、=…）本來就保留。 */
+const EXACT_DROP_PUNCT_RE = /(?![&@#%*])\p{P}/gu
+
 /**
- * 第八輪（2026-11-17）「幾乎完全相同」比對 key（硬擋用）：NFKC → 小寫 → 去掉所有空白、格式／不可見字元、標點與符號 → 臺→台。
+ * 第八輪（2026-11-17）「幾乎完全相同」比對 key（硬擋用）：NFKC → 小寫 → 去掉所有空白、格式／不可見字元與標點 → 臺→台。
+ * 第九輪 L-1：只去空白與標點，保留符號（\p{S}：+、$、=…）及 & @ # % *——「A&B」與「AB」、「C+」與「C」不再算完全相同
+ *（去符號後相同的改由 similarNameKeys 判為相近）。
  * 不去任何公司後綴、不去分公司／括號／-xxx 段。「測試甲 工程行」「ＴＥＳＴ甲工程行」「測試甲工程行。」「臺北甲」＝「台北甲」皆相同；
  * 「測試甲工程行」與「測試甲工程有限公司」不同（那是 similarNameKeys 的事）。空名稱回 ""。
  */
@@ -205,52 +210,103 @@ export function exactNameKey(name: string | null | undefined): string {
     .toLowerCase()
     .replace(/臺/g, "台")
     .replace(STRIP_RE, "")
-    .replace(PUNCT_OR_SYMBOL_RE, "")
+    .replace(EXACT_DROP_PUNCT_RE, "")
+}
+
+/** 第九輪 L-1：exact key 再去掉所有符號（第八輪的 exact）。只用於相近級別。 */
+function strippedNameKey(name: string | null | undefined): string {
+  return exactNameKey(name).replace(PUNCT_OR_SYMBOL_RE, "")
 }
 
 /**
  * 第八輪「相似」比對 key（需確認＋原因＋嚴格稽核，不硬擋）：payeeNameKeys（去公司後綴、分公司、括號段、-xxx 段，
- * 有 2 中文字／3 拉丁字元下限）再加上 exactNameKey。空名稱回 []。
+ * 有 2 中文字／3 拉丁字元下限）再加上 exactNameKey 與去符號後的 key（第九輪 L-1）。空名稱回 []。
  */
 export function similarNameKeys(name: string | null | undefined): string[] {
   const exact = exactNameKey(name)
   if (!exact) return []
-  return [...new Set([exact, ...payeeNameKeys(name)])]
+  const stripped = strippedNameKey(name)
+  return [...new Set([exact, ...(stripped ? [stripped] : []), ...payeeNameKeys(name)])]
+}
+
+/**
+ * 第九輪 H-1「包含」判斷的長度下限：key（去掉結尾公司型態字後）至少 3 個中文字或 5 個拉丁字母／數字才拿來做子字串比對
+ *（「台灣」「工程」「e-Life」「7-11」「有限公司」「工程有限公司」這類短詞／純後綴不觸發）。
+ */
+export function meetsContainFloor(key: string): boolean {
+  // 先去掉結尾的公司型態字再數（「有限公司」「工程有限公司」本身不算有辨識度的名稱）。
+  let core = key.replace(PUNCT_OR_SYMBOL_RE, "")
+  for (let changed = true; changed; ) {
+    changed = false
+    for (const suf of SUFFIXES_BARE) {
+      if (core.endsWith(suf)) {
+        core = core.slice(0, -suf.length)
+        changed = true
+        break
+      }
+    }
+  }
+  const han = (core.match(HAN_RE) ?? []).length
+  if (han >= 3) return true
+  const other = (core.match(OTHER_ALNUM_RE) ?? []).length - han
+  return other >= 5
 }
 
 /** 名冊廠商（比對用的欄位）。 */
 export type RosterKeyVendor = { id: string; name: string | null; short_name?: string | null; account_holder?: string | null }
 
-/** 一家名冊廠商的兩級比對 key：exact（硬擋）與 similar（需說明）。similar 包含 exact。 */
-export type RosterKeySets = { exact: string[]; similar: string[] }
+/**
+ * 一家名冊廠商的比對 key：
+ * - exact（硬擋）：第九輪 H-2 起只有「名稱」的 exactNameKey（簡稱、帳戶戶名不再硬擋，只列相近）；
+ * - similar（需說明）：名稱／簡稱（≥3 字）／帳戶戶名（等於名稱 key 或 ≥3 字）的 similarNameKeys（含 exact）；
+ * - full（第九輪 H-1「包含」的被包含方）：名稱、簡稱、帳戶戶名各自的 exactNameKey 與去符號 key。
+ */
+export type RosterKeySets = { exact: string[]; similar: string[]; full: string[] }
 
 /**
- * 一家名冊廠商「視為同名」的比對 key（放款「其他」收款、副委託 must_bind_vendor、名冊重名、複製專案共用）：
- * 名稱 key；簡稱 key（≥3 字）；帳戶戶名 key（等於名稱 key，或 ≥3 字）。
- * 第八輪拆兩級：exact＝各欄位的 exactNameKey；similar＝各欄位的 similarNameKeys（含 exact）。
+ * 一家名冊廠商「視為同名／相近」的比對 key（放款「其他」收款、副委託 must_bind_vendor、名冊重名、複製專案共用）。
+ * 第八輪拆兩級；第九輪 H-2：exact 只看名稱。
  */
 export function rosterVendorKeys(v: Omit<RosterKeyVendor, "id"> & { id?: string }): RosterKeySets {
   const exact = new Set<string>()
   const similar = new Set<string>()
+  const full = new Set<string>()
   const nameExact = exactNameKey(v.name)
   const nameSimilar = similarNameKeys(v.name)
   if (nameExact) exact.add(nameExact)
   for (const k of nameSimilar) similar.add(k)
-  const shortExact = exactNameKey(v.short_name)
-  if (shortExact && keyLength(shortExact) >= 3) exact.add(shortExact)
   for (const k of similarNameKeys(v.short_name)) if (keyLength(k) >= 3) similar.add(k)
-  const holderExact = exactNameKey(v.account_holder)
-  if (holderExact && (holderExact === nameExact || keyLength(holderExact) >= 3)) exact.add(holderExact)
   for (const k of similarNameKeys(v.account_holder)) if (nameSimilar.includes(k) || keyLength(k) >= 3) similar.add(k)
   for (const k of exact) similar.add(k)
-  return { exact: [...exact], similar: [...similar] }
+  for (const field of [v.name, v.short_name, v.account_holder]) {
+    for (const k of [exactNameKey(field), strippedNameKey(field)]) if (k) full.add(k)
+  }
+  return { exact: [...exact], similar: [...similar], full: [...full] }
 }
 
-/** 名冊 → 兩級 key 索引（key → 撞到的廠商，同一家只列一次）。 */
-export type RosterKeyIndex<T> = { exact: Map<string, T[]>; similar: Map<string, T[]> }
+/**
+ * 第九輪 H-1「包含」：a 的 similar key（過長度下限）是 b 的 full key 的子字串，或反過來 → true。
+ * 例：名冊「測試己有限公司」的「測試己」出現在「(台中)測試己有限公司」裡；新名稱「陳大文」出現在名冊「陳大文水電行」裡。
+ */
+function containsEither(a: Pick<RosterKeySets, "similar" | "full">, b: Pick<RosterKeySets, "similar" | "full">): boolean {
+  const inside = (keys: readonly string[], hay: readonly string[]) =>
+    keys.some((k) => meetsContainFloor(k) && hay.some((h) => h !== k && h.includes(k)))
+  return inside(a.similar, b.full) || inside(b.similar, a.full)
+}
+
+/** 新名稱（放款戶名、副委託名稱）比對用的 key 組（exact＝名稱 exact；full＝exact 與去符號 key）。 */
+function nameKeySets(name: string | null | undefined): RosterKeySets {
+  const exact = exactNameKey(name)
+  if (!exact) return { exact: [], similar: [], full: [] }
+  const stripped = strippedNameKey(name)
+  return { exact: [exact], similar: similarNameKeys(name), full: [...new Set([exact, ...(stripped ? [stripped] : [])])] }
+}
+
+/** 名冊 → 兩級 key 索引（key → 撞到的廠商，同一家只列一次）；entries 供「包含」判斷逐家比。 */
+export type RosterKeyIndex<T> = { exact: Map<string, T[]>; similar: Map<string, T[]>; entries: Array<{ vendor: T; keys: RosterKeySets }> }
 
 export function buildRosterKeyIndex<T extends RosterKeyVendor>(vendors: readonly T[]): RosterKeyIndex<T> {
-  const index: RosterKeyIndex<T> = { exact: new Map(), similar: new Map() }
+  const index: RosterKeyIndex<T> = { exact: new Map(), similar: new Map(), entries: [] }
   const add = (map: Map<string, T[]>, key: string, v: T) => {
     const list = map.get(key) ?? []
     if (!list.includes(v)) list.push(v)
@@ -260,33 +316,44 @@ export function buildRosterKeyIndex<T extends RosterKeyVendor>(vendors: readonly
     const keys = rosterVendorKeys(v)
     for (const key of keys.exact) add(index.exact, key, v)
     for (const key of keys.similar) add(index.similar, key, v)
+    index.entries.push({ vendor: v, keys })
   }
   return index
 }
 
-/** 名稱撞到的名冊廠商：exact＝幾乎完全相同（硬擋）；similar＝相似但不是 exact（需說明），已排除 exact 裡的廠商。 */
+/** 名稱撞到的名冊廠商：exact＝名稱幾乎完全相同（硬擋）；similar＝相近但不是 exact（需說明），已排除 exact 裡的廠商。 */
 export type RosterKeyMatch<T> = { exact: T[]; similar: T[] }
 
+/**
+ * 第九輪 H-1：similar 另加「包含」——名冊廠商的 similar key（≥3 中文字或 ≥5 拉丁字元／數字）出現在新名稱的 exact key 裡，
+ * 或新名稱的 similar key（同下限）出現在名冊廠商名稱／簡稱／戶名的 exact key 裡 → 相近。寧可多報相近，不硬擋。
+ */
 export function rosterKeyMatches<T>(index: RosterKeyIndex<T>, name: string | null | undefined): RosterKeyMatch<T> {
   const exact: T[] = []
   const similar: T[] = []
-  const ek = exactNameKey(name)
-  if (ek) for (const v of index.exact.get(ek) ?? []) if (!exact.includes(v)) exact.push(v)
-  for (const key of similarNameKeys(name)) {
+  const mine = nameKeySets(name)
+  if (mine.exact.length === 0) return { exact, similar }
+  for (const v of index.exact.get(mine.exact[0]!) ?? []) if (!exact.includes(v)) exact.push(v)
+  for (const key of mine.similar) {
     for (const v of index.similar.get(key) ?? []) if (!exact.includes(v) && !similar.includes(v)) similar.push(v)
+  }
+  for (const { vendor, keys } of index.entries) {
+    if (exact.includes(vendor) || similar.includes(vendor)) continue
+    if (containsEither(mine, keys)) similar.push(vendor)
   }
   return { exact, similar }
 }
 
 /**
- * 兩組 key 集合比對（名冊新增／修改用）：exact 有交集 → "exact"；similar 有交集 → "similar"；否則 null。
- * mine 只放「這次新增的 key」（自己舊資料沒有的），避免既有撞名卡住無辜方。
+ * 兩組 key 集合比對（名冊新增／修改用）：exact 有交集 → "exact"；similar 有交集或「包含」→ "similar"；否則 null。
+ * mine 可以只放「這次新增的 key」（自己舊資料沒有的），避免既有撞名卡住無辜方；名稱 exact 有變時呼叫端放整組（第九輪 A）。
  */
 export function compareRosterKeySets(mine: RosterKeySets, other: RosterKeySets): "exact" | "similar" | null {
   const otherExact = new Set(other.exact)
   if (mine.exact.some((k) => otherExact.has(k))) return "exact"
   const otherSimilar = new Set(other.similar)
   if (mine.similar.some((k) => otherSimilar.has(k))) return "similar"
+  if (containsEither(mine, other)) return "similar"
   return null
 }
 

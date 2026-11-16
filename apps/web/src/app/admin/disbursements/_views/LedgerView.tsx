@@ -16,6 +16,7 @@ import {
   describeBatchPayError,
   humanizeDisbursementError,
   type Disbursement,
+  payeeSimilarWarningText,
 } from "@/lib/disbursements-api";
 import {
   LEDGER_CHIPS,
@@ -298,7 +299,15 @@ export default function LedgerView({
                           <td className="whitespace-nowrap py-1.5 pr-2 font-mono text-xs">
                             <Link href={`/admin/disbursements/${d.id}`} className="hover:underline" style={{ color: "var(--brand)" }}>{d.disbursementNo}</Link>
                           </td>
-                          <td className="py-1.5 pr-2 text-gray-800">{d.payeeName}</td>
+                          <td className="py-1.5 pr-2 text-gray-800">
+                            {d.payeeName}
+                            {/* 第九輪 C：收款名稱與名冊廠商相近（或無法確認比對）→ 批次付款前也醒目標示。 */}
+                            {d.payeeSimilarWarning && (
+                              <p role="alert" className="mt-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700">
+                                ⚠ {payeeSimilarWarningText(d.payeeSimilarWarning)}
+                              </p>
+                            )}
+                          </td>
                           <td className="py-1.5 pr-2 text-gray-500">{d.allocationLabel ?? "—"}</td>
                           <td className="py-1.5 pr-2 text-right tabular-nums text-gray-500">{fmtMoney(d.withheldAmount)}</td>
                           <td className="py-1.5 pr-2 text-right tabular-nums text-gray-700">{fmtMoney(d.amount)}</td>

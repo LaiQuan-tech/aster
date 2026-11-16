@@ -6,7 +6,7 @@ import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLogStrict } from "../services/audit.js"
 import { vendorHasOpenDisbursements, vendorHasUnpaidInstallments } from "../services/vendor-unpaid.js"
-import { compareRosterKeySets, invalidNameMessage, rosterVendorKeys, type RosterKeySets } from "../lib/payee-name.js"
+import { compareRosterKeySets, exactNameKey, invalidNameMessage, rosterVendorKeys, type RosterKeySets } from "../lib/payee-name.js"
 import { selectAllPages } from "../lib/select-all-pages.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
@@ -332,7 +332,8 @@ function invalidVendorName(body: Partial<z.infer<typeof vendorBody>>): { error: 
 
 /**
  * 名冊重名（第六輪 F1；第七輪改比全部 key；第八輪拆兩級）：
- * 只拿「這次新增的 key」（新資料的 rosterVendorKeys 減掉自己舊資料已有的；新增廠商＝全部）去比同租戶其他每家未刪廠商：
+ * 只拿「這次新增的 key」（新資料的 rosterVendorKeys 減掉自己舊資料已有的；新增廠商、或名稱 exact key 有變＝全部，第九輪 A）
+ * 去比同租戶其他每家未刪廠商（第九輪 H-2：exact 只看名稱；簡稱／戶名只到相近；H-1：相近含「包含」）：
  * - exact（exactNameKey，只差空白／全形／標點／大小寫／臺台）有交集 → kind "exact"（409 vendor_name_duplicate，硬擋）；
  * - similar（去公司後綴、分公司、括號段…）有交集 → kind "similar"（409 vendor_name_similar；帶 confirmDistinctReason 放行＋嚴格稽核）。
  * 既有撞名不回溯：自己舊資料就有的 key 不拿來比，避免改電話之類的欄位或別家改名時卡住無辜方。沒撞到回 null。
@@ -341,12 +342,16 @@ type RosterIdentity = { name: string | null; short_name: string | null; account_
 type RosterNameHit = { kind: "exact" | "similar"; vendors: Array<{ id: string; name: string }> }
 async function duplicateVendorName(tenantId: string, next: RosterIdentity, selfId: string | null, prev: RosterIdentity | null): Promise<RosterNameHit | null> {
   const nextKeys = rosterVendorKeys(next)
-  const prevKeys: RosterKeySets = prev ? rosterVendorKeys(prev) : { exact: [], similar: [] }
+  // 第九輪 A：名稱的 exact key 有變（改名）→ 整組 key 重新比對（不只新增的 key；自己那筆在下面排除）；
+  // 名稱沒變、只改簡稱／戶名 → 只比這次新增的 key（既有撞名不回溯）。
+  const renamed = !prev || exactNameKey(prev.name) !== exactNameKey(next.name)
+  const prevKeys: RosterKeySets = prev && !renamed ? rosterVendorKeys(prev) : { exact: [], similar: [], full: [] }
   const mine: RosterKeySets = {
     exact: nextKeys.exact.filter((k) => !prevKeys.exact.includes(k)),
     similar: nextKeys.similar.filter((k) => !prevKeys.similar.includes(k)),
+    full: nextKeys.full.filter((k) => !prevKeys.full.includes(k)),
   }
-  if (mine.exact.length === 0 && mine.similar.length === 0) return null
+  if (mine.exact.length === 0 && mine.similar.length === 0 && mine.full.length === 0) return null
   const roster = await selectAllPages<{ id: string; name: string | null; short_name: string | null; account_holder: string | null }>(
     (from, to) =>
       supabaseAdmin

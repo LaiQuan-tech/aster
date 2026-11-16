@@ -245,7 +245,7 @@ describe("第七輪 H1：既有列解除名冊綁定（A → null）也要原因
 
 describe("第七輪：名冊撞名比全部 key（名稱、簡稱、帳戶戶名）", () => {
   const post = (b: Row) => as(request(app).post("/vendors")).send(b)
-  it("新建：簡稱／帳戶戶名／名稱與他家任一 key 完全相同 → 409 duplicate（訊息帶撞到的廠商名）、0 寫入；相近 → 409 similar", async () => {
+  it("新建：名稱與他家名稱完全相同 → 409 duplicate；第九輪 H-2：簡稱／帳戶戶名撞他家 → 只到相近 409 similar、0 寫入", async () => {
     fake.writes.length = 0
     const sim = await post({ name: "甲工程有限公司" })
     expect(sim.status).toBe(409)
@@ -259,19 +259,24 @@ describe("第七輪：名冊撞名比全部 key（名稱、簡稱、帳戶戶名
       fake.writes.length = 0
       const res = await post(b)
       expect(res.status, JSON.stringify(b)).toBe(409)
-      expect(res.body).toMatchObject({ error: "vendor_name_duplicate", matchedVendorName: "測試甲工程行", message: "名冊已有同名廠商「測試甲工程行」" })
+      expect(res.body).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測試甲工程行" })
       expect(fake.writes.filter((w) => w.table === "vendors")).toHaveLength(0)
     }
+    fake.writes.length = 0
+    const dup = await post({ name: " 測試甲 工程行。" })
+    expect(dup.status).toBe(409)
+    expect(dup.body).toMatchObject({ error: "vendor_name_duplicate", matchedVendorName: "測試甲工程行", message: "名冊已有同名廠商「測試甲工程行」" })
+    expect(fake.writes.filter((w) => w.table === "vendors")).toHaveLength(0)
   })
   it("例外：本廠商帳戶戶名等於自己名稱 → 201；簡稱 2 字不比 → 201", async () => {
     expect((await post({ name: "測試全新丁", accountHolder: "測試全新丁" })).status).toBe(201)
     expect((await post({ name: "測試全新戊", shortName: "甲工" })).status).toBe(201)
   })
-  it("修改：乙改簡稱／帳戶戶名撞甲 → 409、不寫；乙改備註不比；乙改成不撞的簡稱 → 200", async () => {
+  it("修改：乙改簡稱／帳戶戶名撞甲 → 409 similar（第九輪 H-2）、不寫；乙改備註不比；乙改成不撞的簡稱 → 200", async () => {
     for (const b of [{ shortName: "甲工程" }, { accountHolder: "測試甲王小明" }]) {
       const res = await as(request(app).patch(`/vendors/${VB}`)).send(b)
       expect(res.status, JSON.stringify(b)).toBe(409)
-      expect(res.body.error).toBe("vendor_name_duplicate")
+      expect(res.body.error).toBe("vendor_name_similar")
     }
     const sim = await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試甲工程(台北)" })
     expect(sim.status).toBe(409)
@@ -279,10 +284,15 @@ describe("第七輪：名冊撞名比全部 key（名稱、簡稱、帳戶戶名
     expect(fake.db.vendors!.find((v) => v.id === VB)).toMatchObject({ short_name: null, account_holder: null, name: "測試乙工程行" })
     expect((await as(request(app).patch(`/vendors/${VB}`)).send({ shortName: "乙工程" })).status).toBe(200)
   })
-  it("既有撞名不回溯：key 沒變（只改大小寫／後綴）或只改其他欄位 → 200", async () => {
+  it("既有撞名不回溯：名稱 exact key 沒變（只改大小寫／空白／標點）或只改其他欄位 → 200；第九輪 A：名稱 exact key 有變 → 整組重比", async () => {
     fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VB ? { ...v, short_name: "甲工程" } : v))
-    expect((await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試乙工程行有限公司", shortName: "甲工程" })).status).toBe(200)
+    expect((await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試乙 工程行。", shortName: "甲工程" })).status).toBe(200)
     expect((await as(request(app).patch(`/vendors/${VB}`)).send({ note: "測試備註" })).status).toBe(200)
+    const renamed = await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試乙工程行有限公司", shortName: "甲工程" })
+    expect(renamed.status).toBe(409)
+    expect(renamed.body).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測試甲工程行" })
+    const ok = await as(request(app).patch(`/vendors/${VB}`)).send({ name: "測試乙工程行有限公司", shortName: "甲工程", confirmDistinctReason: "測試：不同統編" })
+    expect(ok.status).toBe(200)
   })
 })
 

@@ -6,6 +6,7 @@ import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { invalidSubcontractVendorNameBody, loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf, similarVendorBody } from "../services/roster-name-keys.js"
 import { invalidNameMessage } from "../lib/payee-name.js"
+import { logger } from "../lib/logger.js"
 import {
   nextProjectCode,
   isUniqueViolation,
@@ -1262,6 +1263,9 @@ projectsRouter.post(
       }
 
       // 第八輪：非登錄副委託與名冊廠商名稱相近、已說明確為不同公司 → 建案前嚴格稽核（寫不進去就不建）。
+      // 第九輪 D：建案前還沒有 project_id → 先帶 confirmationId 寫嚴格稽核（建案失敗也不影響資料），
+      // 建案成功後再補一筆帶 project_id 與副委託 id 的稽核（同一個 confirmationId 對得起來）。
+      const confirmationId = similarInitialConfirms.length > 0 ? crypto.randomUUID() : null
       for (const c of similarInitialConfirms) {
         await writeAuditLogStrict({
           tenantId,
@@ -1270,6 +1274,7 @@ projectsRouter.post(
           action: "INSERT",
           oldRow: null,
           newRow: {
+            confirmationId,
             project_name: b.name,
             index: c.index,
             vendor_id: null,
@@ -1284,20 +1289,67 @@ projectsRouter.post(
         })
       }
 
-      const createWithCode = (code: string) => createProjectApplicationAtomic(
-        tenantId,
-        self.id,
-        { ...baseRow, code },
-        primaryContract,
-        billings,
-        initialSubcontracts.map((item, index) => ({
-          ...item,
-          kind: item.kind ?? "subcontract",
-          withholdingRate: item.withholdingRate ?? DEFAULT_WITHHOLDING_RATE,
-          withholdingThreshold: item.withholdingThreshold ?? DEFAULT_WITHHOLDING_THRESHOLD,
-          sortOrder: item.sortOrder ?? index,
-        })),
-      )
+      /** 第九輪 D：建案成功後補記相近說明的 project_id 與副委託 id（建案已成功，這筆寫失敗只記 log，不回 500）。 */
+      const auditSimilarAfterCreate = async (projectId: string) => {
+        if (similarInitialConfirms.length === 0) return
+        try {
+          const { data: subs, error: subsErr } = await supabaseAdmin
+            .from("project_subcontracts")
+            .select("id, sort_order, vendor_name, vendor_id")
+            .eq("tenant_id", tenantId)
+            .eq("project_id", projectId)
+          if (subsErr) throw new Error(subsErr.message)
+          const rows = (subs ?? []) as Array<{ id: string; sort_order: number | null; vendor_name: string | null; vendor_id: string | null }>
+          for (const c of similarInitialConfirms) {
+            const sortOrder = initialSubcontracts[c.index]?.sortOrder ?? c.index
+            const sub =
+              rows.find((r) => !r.vendor_id && r.sort_order === sortOrder && (r.vendor_name ?? "").trim() === c.name) ??
+              rows.find((r) => !r.vendor_id && (r.vendor_name ?? "").trim() === c.name)
+            await writeAuditLogStrict({
+              tenantId,
+              tableName: "project_subcontracts",
+              recordId: sub?.id ?? null,
+              action: "INSERT",
+              oldRow: null,
+              newRow: {
+                confirmationId,
+                project_id: projectId,
+                subcontract_id: sub?.id ?? null,
+                index: c.index,
+                vendor_id: null,
+                vendor_name: c.name,
+                confirmDistinctVendor: true,
+                similarVendorIds: c.matches.map((m) => m.id),
+                similarVendorNames: c.matches.map((m) => m.name),
+                confirmDistinctReason: c.reason,
+              },
+              actorEmpId: self.id,
+              context: "POST /projects 非登錄副委託與名冊廠商名稱相近（確認為不同公司，建案後補記 project_id）",
+            })
+          }
+        } catch (err) {
+          logger.error({ err: err instanceof Error ? err.message : String(err), projectId, confirmationId }, "POST /projects: similar-name audit follow-up failed")
+        }
+      }
+
+      const createWithCode = async (code: string) => {
+        const created = await createProjectApplicationAtomic(
+          tenantId,
+          self.id,
+          { ...baseRow, code },
+          primaryContract,
+          billings,
+          initialSubcontracts.map((item, index) => ({
+            ...item,
+            kind: item.kind ?? "subcontract",
+            withholdingRate: item.withholdingRate ?? DEFAULT_WITHHOLDING_RATE,
+            withholdingThreshold: item.withholdingThreshold ?? DEFAULT_WITHHOLDING_THRESHOLD,
+            sortOrder: item.sortOrder ?? index,
+          })),
+        )
+        await auditSimilarAfterCreate(created.id)
+        return created
+      }
 
       // 人工指定編號：只試一次。撞號回 409——人工指定代表那個號有意義，
       // 不該被系統自動換掉。

@@ -563,8 +563,15 @@ describe("A1：銀行欄位不接受「帳號＋戶名」拼接繞過", () => {
 describe("R3：收款「其他」不可用登錄廠商的名稱／帳戶戶名", () => {
   const other = (name: string) => body({ payeeKind: "other", vendorId: null, payeeName: name, allocations: [] })
 
-  it("戶名＝名冊名稱（含前後空白）或帳戶戶名 → 400 payee_is_registered_vendor，零寫入", async () => {
-    for (const name of [" 測試甲工程行 ", "測試甲工程行王小明"]) {
+  it("戶名＝名冊名稱（含前後空白）→ 400 payee_is_registered_vendor，零寫入；＝帳戶戶名 → 第九輪 H-2 只到相近（409 需說明）", async () => {
+    {
+      fake.writes.length = 0
+      const res = await as(request(app).post("/disbursements")).send(other("測試甲工程行王小明"))
+      expect(res.status).toBe(409)
+      expect(res.body).toMatchObject({ error: "payee_name_similar", matchedVendorName: "測試甲工程行" })
+      expect(anyWrites()).toHaveLength(0)
+    }
+    for (const name of [" 測試甲工程行 "]) {
       fake.writes.length = 0
       const res = await as(request(app).post("/disbursements")).send(other(name))
       expect(res.status, name).toBe(400)
@@ -823,8 +830,8 @@ describe("R3 第四輪：戶名正規化比對（第六輪起 #4 非登錄副委
   })
   const other = (name: string, allocations: unknown[] = []) => body({ payeeKind: "other", vendorId: null, payeeName: name, allocations })
 
-  it("第八輪：中間空白、全形空白、大小寫、全形英數、標點、簡稱、帳戶戶名 → 400；加（股）／公司後綴 → 409 需說明", async () => {
-    const exact = ["測試 甲工程行", "測試　甲工程行", "測甲工", "測試甲工程行 王小明", "Test Alpha Co.,Ltd", "ＴＥＳＴ ＡＬＰＨＡ ＣＯ., ＬＴＤ."]
+  it("第八輪：中間空白、全形空白、大小寫、全形英數、標點 → 400；第九輪 H-2：簡稱、帳戶戶名、加（股）／公司後綴 → 409 需說明", async () => {
+    const exact = ["測試 甲工程行", "測試　甲工程行", "Test Alpha Co.,Ltd", "ＴＥＳＴ ＡＬＰＨＡ ＣＯ., ＬＴＤ."]
     for (const name of exact) {
       fake.writes.length = 0
       const res = await as(request(app).post("/disbursements")).send(other(name))
@@ -832,7 +839,7 @@ describe("R3 第四輪：戶名正規化比對（第六輪起 #4 非登錄副委
       expect(res.body.error, name).toBe("payee_is_registered_vendor")
       expect(anyWrites()).toHaveLength(0)
     }
-    const similar = ["測試甲工程行（股）", "測試甲工程行(股)公司", "測試甲工程行股份有限公司", "TEST ALPHA", "ｔｅｓｔ　ａｌｐｈａ", "test alpha inc."]
+    const similar = ["測甲工", "測試甲工程行 王小明", "測試甲工程行（股）", "測試甲工程行(股)公司", "測試甲工程行股份有限公司", "TEST ALPHA", "ｔｅｓｔ　ａｌｐｈａ", "test alpha inc."]
     for (const name of similar) {
       fake.writes.length = 0
       const res = await as(request(app).post("/disbursements")).send(other(name))
@@ -848,8 +855,11 @@ describe("R3 第四輪：戶名正規化比對（第六輪起 #4 非登錄副委
     }
   })
 
-  it("不相干的名稱、只剩後綴的名稱 → 201", async () => {
-    for (const name of ["測試甲工程行二廠", "Test Beta", "有限公司"]) {
+  it("不相干的名稱、只剩後綴的名稱 → 201；第九輪 H-1：包含名冊名稱（測試甲工程行二廠）→ 409 需說明", async () => {
+    const contains = await as(request(app).post("/disbursements")).send(other("測試甲工程行二廠"))
+    expect(contains.status).toBe(409)
+    expect(contains.body.error).toBe("payee_name_similar")
+    for (const name of ["Test Beta", "有限公司"]) {
       const res = await as(request(app).post("/disbursements")).send(other(name))
       expect(res.status, name).toBe(201)
     }

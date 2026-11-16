@@ -423,7 +423,11 @@ subcontractsRouter.put(
           res.status(404).json({ error: "not_found", id: p.id })
           return
         }
-        if (p.vendorId && !vendors.has(p.vendorId)) {
+        // 第九輪 M-2：只在這列的 vendorId 有變（新建列、或既有列改綁）時才檢查廠商存在／未刪——
+        // 某列綁的廠商後來被刪，不該卡住整批原樣重存的其他列（也不卡這列本身原樣重存）。
+        const prevForVendor = p.id ? existingById.get(p.id) : undefined
+        const vendorIdChanged = !prevForVendor || (p.vendorId !== undefined && (p.vendorId ?? null) !== (prevForVendor.vendor_id ? prevForVendor.vendor_id.toLowerCase() : null))
+        if (p.vendorId && vendorIdChanged && !vendors.has(p.vendorId)) {
           res.status(400).json({ error: "invalid_vendor", vendorId: p.vendorId })
           return
         }

@@ -113,14 +113,28 @@ export interface Disbursement {
   payeeSimilarWarning?: PayeeSimilarWarning
 }
 
-/** 第八輪：收款名稱與名冊廠商相近的標示。reason 為 null＝開單後名冊才新增相近廠商、沒有說明紀錄。 */
+/**
+ * 第八輪：收款名稱與名冊廠商相近的標示。reason 為 null＝開單後名冊才新增相近廠商、沒有說明紀錄。
+ * 第九輪：unknown＝後端比對查詢失敗（message「無法確認收款名稱比對，請人工核對收款對象」）；
+ * unconfirmedVendorNames＝目前相近但未經說明的廠商。
+ */
 export interface PayeeSimilarWarning {
+  unknown?: true
   matchedVendorName: string
   matchedVendorNames: string[]
+  unconfirmedVendorNames?: string[]
   reason: string | null
   confirmedByName: string | null
   /** 「收款名稱與名冊廠商『Y』相近，已由 XXX 說明：…」 */
   message: string
+}
+
+/** 第九輪 M-1：比對查詢失敗時的紅框文字。 */
+export const PAYEE_SIMILAR_UNKNOWN_TEXT = "無法確認收款名稱比對，請人工核對收款對象"
+
+/** 紅框要顯示的文字：unknown 一律顯示「無法確認…」，其餘用後端組好的 message。 */
+export function payeeSimilarWarningText(w: PayeeSimilarWarning): string {
+  return w.unknown ? PAYEE_SIMILAR_UNKNOWN_TEXT : w.message
 }
 
 /** 一關簽核（disbursement_approval_steps）。 */

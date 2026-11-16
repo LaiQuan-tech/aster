@@ -582,7 +582,7 @@ export type SerializedDisbursement = {
    * 只有單筆 GET 帶；列表不帶。
    */
   nonInstallmentConfirmed?: boolean
-  /** 第八輪：「其他」收款名稱與名冊廠商相近的標示（由稽核查出）；只有單筆 GET 與待簽清單帶。 */
+  /** 第八輪：「其他」收款名稱與名冊廠商相近的標示（由稽核查出）；單筆 GET、待簽清單與列表（未付的單，第九輪 C）帶。 */
   payeeSimilarWarning?: PayeeSimilarWarning
   /** 簽核軌跡（只有 GET /disbursements/:id 帶；services/disbursement-approval.ts 填）。 */
   approvalSteps?: SerializedApprovalStep[]
@@ -918,7 +918,17 @@ export async function listDisbursements(
     .limit(1000)
   if (error) throw new Error(`listDisbursements: ${error.message}`)
   const rows = (data ?? []) as unknown as DisbursementRow[]
-  return { from, to, disbursements: await serializeMany(tenantId, rows) }
+  const disbursements = await serializeMany(tenantId, rows)
+  // 第九輪 C：批次付款頁（請款與放款）也要紅框——未付（草稿／送簽／已核准）的「其他」收款單帶 payeeSimilarWarning。
+  const pending = rows.filter((r) => r.payee_kind === "other" && r.status !== "paid" && r.status !== "void")
+  if (pending.length > 0) {
+    const warnings = await payeeSimilarWarnings(tenantId, pending)
+    for (const d of disbursements) {
+      const w = warnings.get(d.id)
+      if (w) d.payeeSimilarWarning = w
+    }
+  }
+  return { from, to, disbursements }
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -1543,7 +1553,13 @@ export type PayeeSimilarHit = { matchedVendorId: string; matchedVendorName: stri
 export async function assertPayeeNotRegisteredVendor(
   tenantId: string,
   payeeName: string,
-  opts: { status?: 400 | 409; gate?: boolean; confirmDistinctReason?: string | null } = {},
+  opts: {
+    status?: 400 | 409
+    gate?: boolean
+    confirmDistinctReason?: string | null
+    /** 第九輪 L-2：分攤到非登錄副委託（vendor_id 為 null）→ 撞名時訊息補「先到專案副委託綁定」。 */
+    unboundSubcontractAllocated?: boolean
+  } = {},
 ): Promise<PayeeSimilarHit | null> {
   if (!exactNameKey(payeeName)) return null
   const vendors = (await loadRosterForPayee(tenantId, "assertPayeeNotRegisteredVendor")).filter((v) => (v.name ?? "").trim() !== "")
@@ -1554,7 +1570,9 @@ export async function assertPayeeNotRegisteredVendor(
     throw new DisbursementError(opts.status ?? 400, "payee_is_registered_vendor", {
       matchedVendorName,
       matchedVendorId: hit.id,
-      message: `收款對象與名冊廠商「${matchedVendorName}」名稱相同，請改選登錄廠商「${matchedVendorName}」`,
+      message: opts.unboundSubcontractAllocated
+        ? `收款對象與名冊廠商「${matchedVendorName}」名稱相同。請先到專案副委託把該列綁定為名冊廠商「${matchedVendorName}」，再以登錄廠商開單`
+        : `收款對象與名冊廠商「${matchedVendorName}」名稱相同，請改選登錄廠商「${matchedVendorName}」`,
     })
   }
   if (similar.length === 0 || opts.gate) return null
@@ -1607,20 +1625,38 @@ function payeeSimilarAuditFields(hit: PayeeSimilarHit, reason: string) {
   }
 }
 
-/** 核准頁／詳情頁的「收款名稱與名冊廠商相近」標示（第八輪）。 */
+/** 核准頁／詳情頁／批次付款頁的「收款名稱與名冊廠商相近」標示（第八輪；第九輪加 unconfirmedVendorNames／unknown）。 */
 export type PayeeSimilarWarning = {
+  /** 第九輪 M-1：查稽核／名冊失敗，無法確認比對結果 → true（前端照樣顯示紅框，請人工核對）。 */
+  unknown?: true
   matchedVendorName: string
+  /** 目前名冊中與收款名稱相近的廠商（第九輪 E：以「目前」為準；目前已無相近者則列說明當時的名單）。 */
   matchedVendorNames: string[]
-  /** 已說明的原因；null＝開單後名冊才新增相近廠商、沒有說明紀錄。 */
+  /** 第九輪 E：目前相近、但說明紀錄沒涵蓋的廠商（說明後名冊才新增或改名而相近）。沒有說明紀錄時＝全部。 */
+  unconfirmedVendorNames: string[]
+  /** 已說明的原因；null＝沒有說明紀錄（開單後名冊才新增相近廠商）或無法確認。 */
   reason: string | null
   confirmedByName: string | null
   message: string
 }
 
+/** 第九輪 M-1：比對查詢失敗時每張「其他」收款單回的標示。 */
+export const PAYEE_SIMILAR_UNKNOWN_MESSAGE = "無法確認收款名稱比對，請人工核對收款對象"
+const unknownPayeeSimilarWarning = (): PayeeSimilarWarning => ({
+  unknown: true,
+  matchedVendorName: "",
+  matchedVendorNames: [],
+  unconfirmedVendorNames: [],
+  reason: null,
+  confirmedByName: null,
+  message: PAYEE_SIMILAR_UNKNOWN_MESSAGE,
+})
+
 /**
  * 第八輪：「其他」收款單的相近名稱標示（無 DDL，從稽核查）：
  * 稽核 new_row.confirmDistinctPayee＝true 且 payee_name 等於單上現值的最新一筆 → 「已由 XXX 說明：…」；
- * 沒有說明紀錄但現在名冊有相近廠商（開單後才新增）→ 「相近（未說明）」。查失敗不擋顯示，回空 Map 並記 log。
+ * 沒有說明紀錄但現在名冊有相近廠商（開單後才新增）→ 「相近（未說明）」。
+ * 第九輪：有說明紀錄時仍以目前名冊的相近名單為準，標出未涵蓋者（E）；查失敗不擋顯示，但每張「其他」收款單回 unknown（M-1）。
  */
 export async function payeeSimilarWarnings(
   tenantId: string,
@@ -1630,7 +1666,7 @@ export async function payeeSimilarWarnings(
   const others = rows.filter((r) => r.payee_kind === "other" && exactNameKey(r.payee_name))
   if (others.length === 0) return out
   try {
-    const confirmed = new Map<string, { names: string[]; reason: string; actor: string | null }>()
+    const confirmed = new Map<string, { ids: string[]; names: string[]; reason: string; actor: string | null }>()
     const ids = others.map((r) => r.id)
     const nameOf = new Map(others.map((r) => [r.id, (r.payee_name ?? "").trim()]))
     for (let i = 0; i < ids.length; i += 100) {
@@ -1648,7 +1684,8 @@ export async function payeeSimilarWarnings(
         const nr = r.new_row ?? {}
         if (String(nr.payee_name ?? "").trim() !== nameOf.get(r.record_id)) continue
         const names = Array.isArray(nr.similarVendorNames) ? nr.similarVendorNames.map((n) => String(n)) : []
-        confirmed.set(r.record_id, { names, reason: String(nr.confirmDistinctReason ?? ""), actor: r.actor_emp_id })
+        const vids = Array.isArray(nr.similarVendorIds) ? nr.similarVendorIds.map((n) => String(n).toLowerCase()) : []
+        confirmed.set(r.record_id, { ids: vids, names, reason: String(nr.confirmDistinctReason ?? ""), actor: r.actor_emp_id })
       }
     }
     const actorIds = [...new Set([...confirmed.values()].map((c) => c.actor).filter((v): v is string => !!v))]
@@ -1662,24 +1699,36 @@ export async function payeeSimilarWarnings(
     const index = buildRosterKeyIndex(roster)
     for (const r of others) {
       const c = confirmed.get(r.id)
+      // 第九輪 E：以「目前」名冊的相近名單為準，標出說明紀錄沒涵蓋的廠商（說明後名冊才新增／改名而相近）。
+      const similar = rosterKeyMatches(index, r.payee_name).similar
       if (c) {
         const by = (c.actor && actorNames.get(c.actor)) || "（未知）"
-        const main = c.names[0] ?? ""
+        const coveredIds = new Set(c.ids)
+        const coveredNames = new Set(c.names)
+        const unconfirmed = similar.filter((v) => !coveredIds.has(String(v.id).toLowerCase()) && !(c.ids.length === 0 && coveredNames.has(v.name ?? "")))
+        const current = similar.map((v) => v.name ?? "")
+        const names = current.length > 0 ? current : c.names
+        const main = names[0] ?? ""
+        const unconfirmedNames = unconfirmed.map((v) => v.name ?? "")
         out.set(r.id, {
           matchedVendorName: main,
-          matchedVendorNames: c.names,
+          matchedVendorNames: names,
+          unconfirmedVendorNames: unconfirmedNames,
           reason: c.reason,
           confirmedByName: c.actor ? (actorNames.get(c.actor) ?? null) : null,
-          message: `收款名稱與名冊廠商「${main}」相近，已由 ${by} 說明：${c.reason}`,
+          message:
+            `收款名稱與名冊廠商「${c.names[0] ?? main}」相近，已由 ${by} 說明：${c.reason}` +
+            (unconfirmedNames.length > 0 ? `；但「${unconfirmedNames.join("」「")}」為說明後才相近的名冊廠商，未經說明，請確認收款對象` : ""),
         })
         continue
       }
-      const similar = rosterKeyMatches(index, r.payee_name).similar
       if (similar.length > 0) {
         const main = similar[0]!.name ?? ""
+        const names = similar.map((v) => v.name ?? "")
         out.set(r.id, {
           matchedVendorName: main,
-          matchedVendorNames: similar.map((v) => v.name ?? ""),
+          matchedVendorNames: names,
+          unconfirmedVendorNames: names,
           reason: null,
           confirmedByName: null,
           message: `收款名稱與名冊廠商「${main}」相近（開單時名冊尚無此廠商，未經說明），請確認收款對象`,
@@ -1687,8 +1736,11 @@ export async function payeeSimilarWarnings(
       }
     }
   } catch (err) {
+    // 第九輪 M-1：查不到不能讓紅框消失——每張「其他」收款單都回 unknown，請人工核對。
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "payeeSimilarWarnings: lookup failed")
-    return new Map()
+    const unknown = new Map<string, PayeeSimilarWarning>()
+    for (const r of others) unknown.set(r.id, unknownPayeeSimilarWarning())
+    return unknown
   }
   return out
 }
@@ -2534,7 +2586,10 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
   const confirmDistinctReason = (input.confirmDistinctReason ?? "").trim()
   const payeeSimilar =
     header.payee_kind === "other"
-      ? await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, { confirmDistinctReason })
+      ? await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, {
+          confirmDistinctReason,
+          unboundSubcontractAllocated: allocations.some((a) => !!a.subcontractId && a.subcontractVendorId === null),
+        })
       : null
   assertAllocationVendors(header.vendor_id, allocations)
   assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
@@ -2902,12 +2957,16 @@ export async function updateDisbursement(
     let payeeSimilar: PayeeSimilarHit | null = null
     if (header.payee_kind === "other" && (payeeChanged || payeeNameChanged || allocationsChanged)) {
       try {
-        payeeSimilar = await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, { confirmDistinctReason })
+        payeeSimilar = await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, {
+          confirmDistinctReason,
+          unboundSubcontractAllocated: allocations.some((a) => !!a.subcontractId && a.subcontractVendorId === null),
+        })
       } catch (err) {
         // 戶名沒變、只改分攤：這個名稱先前已說明過（稽核有紀錄）就不重問。
+        // 第九輪 E：但目前名冊有舊說明沒涵蓋的相近廠商（說明後才新增／改名）、或查不到比對結果 → 要求重新說明。
         if (!(err instanceof DisbursementError) || err.code !== "payee_name_similar" || payeeChanged || payeeNameChanged) throw err
         const prior = (await payeeSimilarWarnings(tenantId, [current])).get(id)
-        if (!prior || prior.reason === null) throw err
+        if (!prior || prior.unknown || prior.reason === null || prior.unconfirmedVendorNames.length > 0) throw err
       }
     }
     if (payeeChanged) {

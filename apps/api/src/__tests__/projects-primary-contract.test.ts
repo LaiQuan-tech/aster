@@ -565,6 +565,51 @@ describe("POST /projects primary contract", () => {
       expect(stored[0]).toMatchObject({ vendor_id: null, vendor_name: "合格廠商股份有限公司" })
     })
 
+    it("第九輪 D：相近說明的嚴格稽核建案前先寫（帶 confirmationId），建案後補一筆帶 project_id 與副委託 id", async () => {
+      h.db.audit_logs = []
+      const response = await post(
+        [
+          { vendorId: null, vendorName: "測試名冊外廠商", amount: 5_000 },
+          { vendorId: null, vendorName: "合格廠商股份有限公司", amount: 10_000, confirmDistinctReason: "測試：不同統編的另一家" },
+        ],
+        "VN-SIM-AUDIT",
+      )
+      expect(response.status, JSON.stringify(response.body)).toBe(201)
+      const audits = (h.db.audit_logs ?? []).filter((a) => a.table_name === "project_subcontracts" && a.new_row?.confirmDistinctVendor)
+      expect(audits).toHaveLength(2)
+      const [before, after] = audits
+      expect(before.new_row).toMatchObject({ vendor_name: "合格廠商股份有限公司", confirmDistinctReason: "測試：不同統編的另一家" })
+      expect(before.new_row.confirmationId).toEqual(expect.any(String))
+      const stored = await loadSubcontracts(h.tenantId, response.body.id)
+      const sub = stored.find((r) => r.vendor_name === "合格廠商股份有限公司")!
+      expect(after.record_id).toBe(sub.id)
+      expect(after.new_row).toMatchObject({
+        confirmationId: before.new_row.confirmationId,
+        project_id: response.body.id,
+        subcontract_id: sub.id,
+        similarVendorNames: ["合格廠商"],
+      })
+      // 建案前的嚴格稽核在 RPC 之前
+      const rpcAt = h.operations.indexOf("rpc:create_project_application_atomic")
+      expect(rpcAt).toBeGreaterThan(h.operations.indexOf("insert:audit_logs"))
+    })
+
+    it("第九輪 H-2：只撞名冊廠商帳戶戶名／簡稱 → 相近需說明（不 must_bind）；H-1：包含名冊名稱 → 相近", async () => {
+      h.db.vendors = [
+        ...h.db.vendors,
+        { id: "44444444-4444-4444-8444-44444444445a", tenant_id: h.tenantId, name: "測試陳大文水電行", short_name: "大文水電行", account_holder: "陳大文", deleted_at: null },
+      ]
+      for (const [i, vendorName] of ["陳大文", "大文水電行", "(台中)合格廠商", "合格廠商台中辦事處"].entries()) {
+        h.operations.length = 0
+        const response = await post([{ vendorId: null, vendorName, amount: 5_000 }], `VN-H2-${i}`)
+        expect(response.status, vendorName).toBe(409)
+        expect(response.body.error, vendorName).toBe("vendor_name_similar")
+        expect(rpcCalls()).toEqual([])
+        const ok = await post([{ vendorId: null, vendorName, amount: 5_000, confirmDistinctReason: "測試：確為不同對象" }], `VN-H2-OK-${i}`)
+        expect(ok.status, vendorName).toBe(201)
+      }
+    })
+
     it("第七輪：副委託名稱全西里爾／含希臘字母／不可見字元 → 400 invalid_subcontract_vendor_name，未呼叫 RPC", async () => {
       for (const [i, name] of ["Тест Вендор", "測試Ωmega工程", "測試\u200b廠商"].entries()) {
         h.operations.length = 0

@@ -39,6 +39,7 @@ import {
   rejectDisbursement,
   DISBURSEMENT_STEP_KIND_LABELS,
   type PendingDisbursementApproval,
+  payeeSimilarWarningText,
 } from "@/lib/disbursements-api";
 import { requestAmountsOf } from "@/lib/approval-view";
 import { fmtMoney, relativeTime } from "@/lib/ess-format";
@@ -830,7 +831,7 @@ export default function ApprovalsPage() {
                     {/* 第八輪：收款名稱與名冊廠商相近（已說明或開單後才相近）→ 醒目標示，請核准人確認收款對象。 */}
                     {d.payeeSimilarWarning && (
                       <p role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
-                        ⚠ {d.payeeSimilarWarning.message}
+                        ⚠ {payeeSimilarWarningText(d.payeeSimilarWarning)}
                       </p>
                     )}
 
