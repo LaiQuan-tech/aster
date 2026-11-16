@@ -122,17 +122,17 @@ const SPECIFIC: Record<string, string> = {
   "POST /requests/:id/reject": "駁回申請單（body: comment?）",
   "POST /requests/batch-decision": "批次簽核（body: ids[], action, comment?）",
   "PUT /projects/:id/subcontracts":
-    "副委託整批（body: subcontracts[], deleteReason?）：未列出的既有列會被軟刪（需 deleteReason）；既有列沒帶的欄位保留原值、帶 null 清空；amount 必填。換廠商須同時送新廠商的 vendorId 與它在名冊上的名稱；非登錄廠商送 vendorId: null + vendorName：名稱與名冊廠商（名稱、簡稱或帳戶戶名）幾乎完全相同（只差空白／全形／標點／大小寫／臺台）→ 409 must_bind_vendor（回 matchedVendorName／index），請改送該廠商的 vendorId；名稱相近（去公司後綴、分公司、括號段後相同）→ 409 vendor_name_similar（回 matchedVendorName／index），同一家請改送該廠商 vendorId，確為不同公司則在該列帶 confirmDistinctReason（寫嚴格稽核）。既有列原本綁名冊廠商、vendorId 有變（改綁或解除綁定成 null），不論有無未付期款，該列都須帶 rebindReason（否則 400 rebind_reason_required），會寫嚴格稽核。任一列帶 rebindReason 或 confirmDistinctReason 為最高風險。新建／改名列名稱含不可見字元或西里爾／希臘字母 → 400 invalid_subcontract_vendor_name。沒帶 kind 時，事務所列不可送發票欄位、其他列不可送代扣日期（回 400 field_not_applicable）。",
+    "副委託整批（body: subcontracts[], deleteReason?）：未列出的既有列會被軟刪（需 deleteReason）；既有列沒帶的欄位保留原值、帶 null 清空；amount 必填。換廠商須同時送新廠商的 vendorId 與它在名冊上的名稱；非登錄廠商送 vendorId: null + vendorName：只有與名冊廠商「名稱」完全相同（只差空白／全形／標點／大小寫／臺台）才硬擋 → 409 must_bind_vendor（回 matchedVendorName／index），請改送該廠商的 vendorId；與簡稱或帳戶戶名相同、或名稱包含／相近（去公司後綴、分公司、地名、括號段）→ 409 vendor_name_similar（回 matchedVendorName／index），同一家請改送該廠商 vendorId，確為不同公司則在該列帶 confirmDistinctReason 說明（寫嚴格稽核）。既有列原本綁名冊廠商、vendorId 有變（改綁或解除綁定成 null），不論有無未付期款，該列都須帶 rebindReason（否則 400 rebind_reason_required），會寫嚴格稽核。任一列帶 rebindReason 或 confirmDistinctReason 為最高風險。新建／改名列名稱含不可見字元或西里爾／希臘字母 → 400 invalid_subcontract_vendor_name。沒帶 kind 時，事務所列不可送發票欄位、其他列不可送代扣日期（回 400 field_not_applicable）。",
   "POST /projects":
-    "建立專案（含 initialSubcontracts?）：非登錄副委託（vendorId 空）名稱與名冊廠商幾乎完全相同 → 409 must_bind_vendor（回 matchedVendorName、index），請改送該廠商的 vendorId；名稱相近 → 409 vendor_name_similar，確為不同公司請在該列帶 confirmDistinctReason（嚴格稽核、最高風險）。",
+    "建立專案（含 initialSubcontracts?）：非登錄副委託（vendorId 空）只有與名冊廠商「名稱」完全相同才硬擋 → 409 must_bind_vendor（回 matchedVendorName、index），請改送該廠商的 vendorId；與簡稱或帳戶戶名相同、或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請在該列帶 confirmDistinctReason 說明（嚴格稽核、最高風險）。",
   "POST /disbursements":
-    "建立放款單：payeeKind vendor（帶 vendorId，帳戶照名冊帶；名冊沒帳戶卻手填 → 400 vendor_bank_missing）或 other（戶名與名冊廠商幾乎完全相同 → 400 payee_is_registered_vendor，請改選該廠商；名稱相近 → 409 payee_name_similar（回 matchedVendorName），同一家請改選該廠商，確為不同公司請帶 confirmDistinctReason——最高風險、寫嚴格稽核、核准頁標示）。戶名含不可見字元或西里爾／希臘字母 → 400 invalid_payee_name。登錄廠商零分攤（非期款支出）且廠商仍有未付期款 → 409 vendor_has_unpaid_installments，確定非期款須帶 confirmNonInstallment: true（最高風險、寫稽核）。",
+    "建立放款單：payeeKind vendor（帶 vendorId，帳戶照名冊帶；名冊沒帳戶卻手填 → 400 vendor_bank_missing）或 other（只有戶名與名冊廠商「名稱」完全相同才硬擋 → 400 payee_is_registered_vendor，請改選該廠商；與簡稱或帳戶戶名相同、或名稱包含／相近 → 409 payee_name_similar（回 matchedVendorName），同一家請改選該廠商，確為不同公司請帶 confirmDistinctReason 說明——最高風險、寫嚴格稽核、核准頁與放款紀錄頁紅框標示）。戶名含不可見字元或西里爾／希臘字母 → 400 invalid_payee_name。登錄廠商零分攤（非期款支出）且廠商仍有未付期款 → 409 vendor_has_unpaid_installments，確定非期款須帶 confirmNonInstallment: true（最高風險、寫稽核）。",
   "PATCH /disbursements/:id":
     "修改放款單（只限草稿／已核准的備註類欄位）：已分攤的單不可改成零分攤（400 cannot_clear_allocations）；登錄廠商零分攤單改金額／用途／分攤，廠商有未付期款時須帶 confirmNonInstallment: true；「其他」收款改戶名後與名冊廠商相近須帶 confirmDistinctReason（最高風險）；其餘錯誤碼同 POST /disbursements。",
   "POST /vendors":
-    "新增廠商：名稱／簡稱／帳戶戶名與名冊既有廠商幾乎完全相同 → 409 vendor_name_duplicate（回 matchedVendorName）；名稱相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason（最高風險、寫嚴格稽核）；名稱／簡稱／帳戶戶名含不可見字元或西里爾／希臘字母 → 400 invalid_vendor_name。",
+    "新增廠商：只有名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate（回 matchedVendorName）；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險、寫嚴格稽核）；名稱／簡稱／帳戶戶名含不可見字元或西里爾／希臘字母 → 400 invalid_vendor_name。",
   "PATCH /vendors/:id":
-    "修改廠商：改名稱／簡稱／帳戶戶名後與名冊既有廠商幾乎完全相同 → 409 vendor_name_duplicate；相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason（最高風險）；名稱不合法 → 400 invalid_vendor_name；有未匯款放款單時不可改帳戶（409 vendor_has_open_disbursements）、只有未付期款改帳戶須帶 changeReason（第一次補帳戶免）。",
+    "修改廠商：只有改後名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險）；名稱不合法 → 400 invalid_vendor_name；有未匯款放款單時不可改帳戶（409 vendor_has_open_disbursements）、只有未付期款改帳戶須帶 changeReason（第一次補帳戶免）。",
   "DELETE /vendors/:id": "刪除廠商（HR）：仍有未付期款或未匯款放款單 → 409 vendor_in_use。",
   "GET /punch": "打卡紀錄；query: employeeId, deptId, from, to, type, source",
   "GET /attendance/punch-overview": "打卡當日總覽／週表；query: date 或 from/to, deptId, employeeId",

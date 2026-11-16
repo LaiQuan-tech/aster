@@ -18,6 +18,7 @@ import {
   type Disbursement,
   type DisbursementStatus,
   type ManualPaidPayment,
+  payeeSimilarWarningText,
 } from "@/lib/disbursements-api";
 import { buildRemittanceText, copyText } from "@/lib/remittance";
 
@@ -279,7 +280,15 @@ export default function RecordsView({
                       </Link>
                     </td>
                     <td className="py-1.5 pr-2 text-gray-500">{d.paidOn ?? "—"}</td>
-                    <td className="py-1.5 pr-2 text-gray-800">{d.payeeName}</td>
+                    <td className="py-1.5 pr-2 text-gray-800">
+                      {d.payeeName}
+                      {/* 第十輪：收款名稱與名冊廠商相近（或無法確認比對）→ 放款紀錄頁也紅框，複製帳號前看得到。 */}
+                      {d.payeeSimilarWarning && (
+                        <p role="alert" className="mt-1 whitespace-normal rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700">
+                          ⚠ {payeeSimilarWarningText(d.payeeSimilarWarning)}
+                        </p>
+                      )}
+                    </td>
                     <td className="py-1.5 pr-2 text-gray-600">{d.payingCompanyName ?? "—"}</td>
                     <td className="py-1.5 pr-2 text-right text-gray-700">{fmtMoney(d.amount)}</td>
                     <td className="py-1.5 pr-2 text-right text-gray-500">{fmtMoney(d.withheldAmount)}</td>
@@ -302,6 +311,14 @@ export default function RecordsView({
                       >
                         {copiedId === d.id ? "已複製" : "複製帳號"}
                       </button>
+                      {d.payeeSimilarWarning && (
+                        <span
+                          className="ml-1 rounded border border-red-300 bg-red-50 px-1 text-xs font-medium text-red-700"
+                          title={payeeSimilarWarningText(d.payeeSimilarWarning)}
+                        >
+                          ⚠ {d.payeeSimilarWarning.unknown ? "無法確認收款對象" : "名稱相近，請核對收款對象"}
+                        </span>
+                      )}
                       {d.status === "draft" && (
                         <button
                           type="button"

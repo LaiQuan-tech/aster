@@ -85,7 +85,7 @@ import {
 import { projectHasReviewedBonus } from "../services/bonus-run-store.js"
 import type { MainContractInput } from "../services/main-contract.js"
 import type { NewBillingInput } from "../services/billing-store.js"
-import { AtomicProjectCreationError, createProjectApplicationAtomic } from "../services/project-creation.js"
+import { AtomicProjectCreationError, createProjectApplicationAtomic, mapInitialSubcontractRows, type InitialSubcontractRow } from "../services/project-creation.js"
 import {
   checkProjectCompany,
   defaultCompanyOf,
@@ -1295,16 +1295,17 @@ projectsRouter.post(
         try {
           const { data: subs, error: subsErr } = await supabaseAdmin
             .from("project_subcontracts")
-            .select("id, sort_order, vendor_name, vendor_id")
+            .select("id, sort_order, vendor_name, vendor_id, amount, item, contact, note, discipline, kind")
             .eq("tenant_id", tenantId)
             .eq("project_id", projectId)
           if (subsErr) throw new Error(subsErr.message)
-          const rows = (subs ?? []) as Array<{ id: string; sort_order: number | null; vendor_name: string | null; vendor_id: string | null }>
+          // 第十輪：以列 index 對應（sort_order＝建案時的 sortOrder ?? index），不再以名稱找——同名非登錄多列時不會全指到同一列。
+          const subIds = mapInitialSubcontractRows(
+            initialSubcontracts.map((item, index) => ({ ...item, sortOrder: item.sortOrder ?? index })),
+            (subs ?? []) as InitialSubcontractRow[],
+          )
           for (const c of similarInitialConfirms) {
-            const sortOrder = initialSubcontracts[c.index]?.sortOrder ?? c.index
-            const sub =
-              rows.find((r) => !r.vendor_id && r.sort_order === sortOrder && (r.vendor_name ?? "").trim() === c.name) ??
-              rows.find((r) => !r.vendor_id && (r.vendor_name ?? "").trim() === c.name)
+            const sub = subIds[c.index] ? { id: subIds[c.index]! } : null
             await writeAuditLogStrict({
               tenantId,
               tableName: "project_subcontracts",

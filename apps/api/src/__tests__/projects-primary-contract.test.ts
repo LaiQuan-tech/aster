@@ -594,6 +594,27 @@ describe("POST /projects primary contract", () => {
       expect(rpcAt).toBeGreaterThan(h.operations.indexOf("insert:audit_logs"))
     })
 
+    it("第十輪：同名非登錄多列（同 sortOrder）各帶說明 → 建案後補記的副委託 id 依列 index 對回各自那列（不是全指到同一列）", async () => {
+      h.db.audit_logs = []
+      const response = await post(
+        [
+          { vendorId: null, vendorName: "合格廠商股份有限公司", amount: 1_000, sortOrder: 0, confirmDistinctReason: "測試：第一列說明" },
+          { vendorId: null, vendorName: "測試名冊外廠商", amount: 5_000, sortOrder: 0 },
+          { vendorId: null, vendorName: "合格廠商股份有限公司", amount: 2_000, sortOrder: 0, confirmDistinctReason: "測試：第三列說明" },
+        ],
+        "VN-SIM-SAME",
+      )
+      expect(response.status, JSON.stringify(response.body)).toBe(201)
+      const stored = await loadSubcontracts(h.tenantId, response.body.id)
+      const first = stored.find((r) => r.vendor_name === "合格廠商股份有限公司" && Number(r.amount) === 1_000)!
+      const third = stored.find((r) => r.vendor_name === "合格廠商股份有限公司" && Number(r.amount) === 2_000)!
+      const after = (h.db.audit_logs ?? []).filter((a) => a.table_name === "project_subcontracts" && a.new_row?.project_id)
+      expect(after).toHaveLength(2)
+      const byReason = new Map(after.map((a) => [a.new_row.confirmDistinctReason, a]))
+      expect(byReason.get("測試：第一列說明")).toMatchObject({ record_id: first.id, new_row: { subcontract_id: first.id, index: 0 } })
+      expect(byReason.get("測試：第三列說明")).toMatchObject({ record_id: third.id, new_row: { subcontract_id: third.id, index: 2 } })
+    })
+
     it("第九輪 H-2：只撞名冊廠商帳戶戶名／簡稱 → 相近需說明（不 must_bind）；H-1：包含名冊名稱 → 相近", async () => {
       h.db.vendors = [
         ...h.db.vendors,

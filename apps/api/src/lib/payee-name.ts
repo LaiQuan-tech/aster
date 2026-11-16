@@ -9,6 +9,24 @@ const INVISIBLE_RE = new RegExp(`[${INVISIBLE_CLASS}]`, "u")
 const STRIP_RE = new RegExp(`[\\s\\p{Cf}${INVISIBLE_CLASS}]`, "gu")
 
 /**
+ * 第十輪（2026-11-17）：比對 key 一律先去掉的附加字（不影響辨識、卻會讓比對 key 不同）：
+ * 注音符號（U+3100–312F、U+31A0–31BF）、聲調符號（ˉˊˇˋ˙）、「丶」「々」、日文長音「ー」（半形ｰ NFKC 後也是ー）；
+ * ™ ℠ ℡ 這類 NFKC 會變成字母（tm／sm／tel）的符號在 NFKC 之前先去掉。
+ */
+const ANNOTATION_STRIP_RE = /[\u3100-\u312F\u31A0-\u31BF\u02C9\u02CA\u02C7\u02CB\u02D9\u4E36\u3005\u30FC\uFF70\u2122\u2120\u2121]/gu
+
+/** 所有比對 key 的共同前處理：去附加字 → NFKC → 小寫 → 臺→台 → 去空白／格式／不可見字元 → 再去一次附加字。 */
+function baseNormalize(name: string | null | undefined): string {
+  return String(name ?? "")
+    .replace(ANNOTATION_STRIP_RE, "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/臺/g, "台")
+    .replace(STRIP_RE, "")
+    .replace(ANNOTATION_STRIP_RE, "")
+}
+
+/**
  * 名稱含不可見字元（先 NFC 組字，可組合的重音字母不算）→ true。
  * 呼叫端回 400 invalid_payee_name／invalid_vendor_name「名稱含有不可見字元，請重新輸入」。
  */
@@ -138,11 +156,7 @@ function stripPrefixes(input: string): string {
 }
 
 function nameKey(name: string | null | undefined, segments: boolean): string {
-  const cleaned = String(name ?? "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/臺/g, "台")
-    .replace(STRIP_RE, "")
+  const cleaned = baseNormalize(name)
   let key = stripPrefixes(cleaned)
   key = stripSuffixes(key, SUFFIXES_WITH_PUNCT, true, segments)
   key = stripPrefixes(key)
@@ -205,12 +219,7 @@ const EXACT_DROP_PUNCT_RE = /(?![&@#%*])\p{P}/gu
  * 「測試甲工程行」與「測試甲工程有限公司」不同（那是 similarNameKeys 的事）。空名稱回 ""。
  */
 export function exactNameKey(name: string | null | undefined): string {
-  return String(name ?? "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/臺/g, "台")
-    .replace(STRIP_RE, "")
-    .replace(EXACT_DROP_PUNCT_RE, "")
+  return baseNormalize(name).replace(EXACT_DROP_PUNCT_RE, "")
 }
 
 /** 第九輪 L-1：exact key 再去掉所有符號（第八輪的 exact）。只用於相近級別。 */
@@ -261,7 +270,20 @@ export type RosterKeyVendor = { id: string; name: string | null; short_name?: st
  * - similar（需說明）：名稱／簡稱（≥3 字）／帳戶戶名（等於名稱 key 或 ≥3 字）的 similarNameKeys（含 exact）；
  * - full（第九輪 H-1「包含」的被包含方）：名稱、簡稱、帳戶戶名各自的 exactNameKey 與去符號 key。
  */
-export type RosterKeySets = { exact: string[]; similar: string[]; full: string[] }
+export type RosterKeySets = {
+  exact: string[]
+  similar: string[]
+  full: string[]
+  /**
+   * 第十輪「名稱包含」（只看「名稱」欄位，不含簡稱／戶名）：名稱的 exactNameKey 與去符號 key（insideExact 的被包含方／包含方）。
+   * 省略＝不參與（例：名冊只改簡稱、名稱沒變）。
+   */
+  name?: string[]
+  /** 第十輪：名稱去公司型態字後恰為 2 個中文字或 2 個英數字的核心（「宏碁」「王明」「3m」「hp」）；其餘 null。 */
+  nameCore?: string | null
+  /** 第十輪：名稱保留括號的比對字串（baseNormalize 後只去括號以外的標點），供「核心＋地名／分公司／括號段」判斷。 */
+  nameParen?: string
+}
 
 /**
  * 一家名冊廠商「視為同名／相近」的比對 key（放款「其他」收款、副委託 must_bind_vendor、名冊重名、複製專案共用）。
@@ -281,7 +303,133 @@ export function rosterVendorKeys(v: Omit<RosterKeyVendor, "id"> & { id?: string 
   for (const field of [v.name, v.short_name, v.account_holder]) {
     for (const k of [exactNameKey(field), strippedNameKey(field)]) if (k) full.add(k)
   }
-  return { exact: [...exact], similar: [...similar], full: [...full] }
+  return { exact: [...exact], similar: [...similar], full: [...full], ...nameContainKeys(v.name) }
+}
+
+/** 去掉結尾公司型態字（可疊加；去完變空就停）後的核心（輸入為已去標點符號的 key）。 */
+function stripCoreSuffixes(key: string): string {
+  let core = key
+  for (let changed = true; changed; ) {
+    changed = false
+    for (const suf of SUFFIXES_BARE) {
+      if (core.endsWith(suf) && core.length > suf.length) {
+        core = core.slice(0, -suf.length)
+        changed = true
+        break
+      }
+    }
+  }
+  return core
+}
+
+const LATIN_DIGIT_RE = /^[a-z0-9]+$/u
+const ALL_HAN_RE = /^\p{Script=Han}+$/u
+
+/** 第十輪：名稱欄位的「名稱包含」比對資料（name／nameCore／nameParen）。空名稱回空。 */
+function nameContainKeys(name: string | null | undefined): Pick<RosterKeySets, "name" | "nameCore" | "nameParen"> {
+  const exact = exactNameKey(name)
+  if (!exact) return { name: [], nameCore: null, nameParen: "" }
+  const stripped = strippedNameKey(name)
+  const core = stripCoreSuffixes(stripped || exact)
+  const chars = [...core]
+  const twoChar = chars.length === 2 && (ALL_HAN_RE.test(core) || LATIN_DIGIT_RE.test(core))
+  return {
+    name: [...new Set([exact, ...(stripped ? [stripped] : [])])],
+    nameCore: twoChar ? core : null,
+    nameParen: baseNormalize(name).replace(/(?![()])\p{P}/gu, "").replace(/[^\p{L}\p{N}()]/gu, ""),
+  }
+}
+
+/**
+ * 第十輪 insideExact 的下限：名冊名稱的 exact key 至少 3 字元（code point），且去公司型態字後仍有 ≥2 個中文字或 ≥2 個英數字。
+ *（「大同行」「全聯社」「永豐行」「IBM」「HP Inc」「金德行」過；「宏碁」「3M」只有 2 字元，改走核心＋地名規則。）
+ */
+function meetsInsideExactFloor(key: string): boolean {
+  if ([...key].length < 3) return false
+  const core = stripCoreSuffixes(key.replace(PUNCT_OR_SYMBOL_RE, ""))
+  const han = (core.match(HAN_RE) ?? []).length
+  if (han >= 2) return true
+  return (core.match(OTHER_ALNUM_RE) ?? []).length - han >= 2
+}
+
+/** 台灣常見縣市／區名（核心＋地名規則用；臺已正規化為台）。 */
+const PLACE_NAMES = [
+  "台灣", "中華民國", "台北", "新北", "桃園", "台中", "台南", "高雄", "基隆", "新竹", "苗栗", "彰化", "南投", "雲林", "嘉義", "屏東",
+  "宜蘭", "花蓮", "台東", "澎湖", "金門", "連江", "馬祖",
+  "北北基", "大台北", "北部", "中部", "南部", "東部", "北區", "中區", "南區", "東區", "西區",
+  "板橋", "三重", "中和", "永和", "新莊", "新店", "土城", "蘆洲", "汐止", "樹林", "鶯歌", "三峽", "林口", "淡水", "五股", "泰山",
+  "中正", "大同", "中山", "松山", "大安", "萬華", "信義", "士林", "北投", "內湖", "南港", "文山",
+  "中壢", "平鎮", "八德", "龜山", "蘆竹", "大園", "楊梅", "龍潭", "竹北", "竹東", "頭份", "竹南",
+  "豐原", "大里", "太平", "北屯", "西屯", "南屯", "烏日", "沙鹿", "清水", "大甲", "霧峰", "潭子", "大雅",
+  "員林", "鹿港", "和美", "斗六", "虎尾", "朴子", "民雄", "永康", "安平", "新營", "仁德", "歸仁", "善化",
+  "鳳山", "左營", "三民", "苓雅", "前鎮", "楠梓", "鼓山", "小港", "岡山", "路竹", "潮州", "羅東", "頭城",
+  "taiwan", "taipei", "newtaipei", "taoyuan", "taichung", "tainan", "kaohsiung", "hsinchu", "keelung", "tw", "roc",
+]
+/** 分公司／營業據點字。 */
+const BRANCH_WORDS = [
+  "分公司", "總公司", "營業所", "營業處", "辦事處", "服務處", "分處", "門市部", "門市", "分店", "總店", "店", "工廠", "廠", "分行", "總行",
+  "branch", "office", "store", "shop", "factory",
+]
+/** 公司型態字（含後綴表、開頭表去標點後的字）。 */
+const COMPANY_TYPE_WORDS = [...new Set([...SUFFIXES_BARE, "股份有限公司", "有限公司", "公司", "股", "株", "株式会社", "企業社", "企業", "工作室", "行", "社", "號", "co", "coltd", "colimited", "ltd", "limited", "inc", "corp", "corporation", "company"])]
+/** 地名後可接的「市／縣／區／鄉／鎮」。 */
+const PLACE_TAILS = ["市", "縣", "區", "鄉", "鎮"]
+const REMAINDER_TOKENS = (() => {
+  const set = new Set<string>([...BRANCH_WORDS, ...COMPANY_TYPE_WORDS])
+  for (const p of PLACE_NAMES) {
+    set.add(p)
+    if (/\p{Script=Han}/u.test(p)) for (const t of PLACE_TAILS) set.add(p + t)
+  }
+  return [...set].sort((a, b) => b.length - a.length)
+})()
+
+/** 第十輪：剩餘部分是否只由地名、分公司／營業所等、公司型態字、括號段組成（空字串也算）。 */
+function isOnlyPlaceBranchType(rest: string): boolean {
+  const memo = new Map<number, boolean>()
+  const ok = (i: number): boolean => {
+    if (i === rest.length) return true
+    const cached = memo.get(i)
+    if (cached !== undefined) return cached
+    let result = false
+    if (rest[i] === "(") {
+      const close = rest.indexOf(")", i + 1)
+      if (close > i && !rest.slice(i + 1, close).includes("(")) result = ok(close + 1)
+    }
+    if (!result) {
+      for (const t of REMAINDER_TOKENS) {
+        if (rest.startsWith(t, i) && ok(i + t.length)) {
+          result = true
+          break
+        }
+      }
+    }
+    memo.set(i, result)
+    return result
+  }
+  return ok(0)
+}
+
+/**
+ * 第十輪「名冊名稱被新名稱包含」（只看這個方向；roster＝名冊廠商、mine＝新名稱）：
+ * - insideExact：名冊名稱的 exact／去符號 key 過 meetsInsideExactFloor，且整串出現在新名稱的 exact／去符號 key 裡
+ *  （「大同行」⊂「大同行台中營業所」「(台中)大同行」「大同行企業有限公司」；「ibm」⊂「ibmtaiwan」；「金德行」⊂「金德行貿易有限公司」）；
+ * - 核心＋地名：名冊名稱去公司型態字後只剩 2 個中文字或 2 個英數字（「宏碁」「3m」），新名稱以它開頭或結尾，
+ *   其餘只有地名、分公司／營業所／辦事處／門市／店／廠／分行、公司型態字、括號段（「宏碁台中分公司」「台中宏碁」「3M Taiwan」）。
+ */
+export function rosterNameInside(roster: Pick<RosterKeySets, "name" | "nameCore">, mine: Pick<RosterKeySets, "name" | "nameParen">): boolean {
+  const hay = mine.name ?? []
+  if (hay.length === 0) return false
+  for (const k of roster.name ?? []) {
+    if (meetsInsideExactFloor(k) && hay.some((h) => h.includes(k))) return true
+  }
+  const core = roster.nameCore
+  const paren = mine.nameParen ?? ""
+  if (core && paren) {
+    // 核心本身可能被括號包著（「宏碁(台中)」「(台中)宏碁」）：用保留括號的字串判斷開頭／結尾。
+    if (paren.startsWith(core) && isOnlyPlaceBranchType(paren.slice(core.length))) return true
+    if (paren.endsWith(core) && isOnlyPlaceBranchType(paren.slice(0, paren.length - core.length))) return true
+  }
+  return false
 }
 
 /**
@@ -299,7 +447,7 @@ function nameKeySets(name: string | null | undefined): RosterKeySets {
   const exact = exactNameKey(name)
   if (!exact) return { exact: [], similar: [], full: [] }
   const stripped = strippedNameKey(name)
-  return { exact: [exact], similar: similarNameKeys(name), full: [...new Set([exact, ...(stripped ? [stripped] : [])])] }
+  return { exact: [exact], similar: similarNameKeys(name), full: [...new Set([exact, ...(stripped ? [stripped] : [])])], ...nameContainKeys(name) }
 }
 
 /** 名冊 → 兩級 key 索引（key → 撞到的廠商，同一家只列一次）；entries 供「包含」判斷逐家比。 */
@@ -339,7 +487,7 @@ export function rosterKeyMatches<T>(index: RosterKeyIndex<T>, name: string | nul
   }
   for (const { vendor, keys } of index.entries) {
     if (exact.includes(vendor) || similar.includes(vendor)) continue
-    if (containsEither(mine, keys)) similar.push(vendor)
+    if (containsEither(mine, keys) || rosterNameInside(keys, mine)) similar.push(vendor)
   }
   return { exact, similar }
 }
@@ -354,6 +502,8 @@ export function compareRosterKeySets(mine: RosterKeySets, other: RosterKeySets):
   const otherSimilar = new Set(other.similar)
   if (mine.similar.some((k) => otherSimilar.has(k))) return "similar"
   if (containsEither(mine, other)) return "similar"
+  // 第十輪：名冊兩家互比（新增／改名的一方 mine 與既有 other），任一方名稱被另一方名稱包含 → 相近。
+  if (rosterNameInside(other, mine) || rosterNameInside(mine, other)) return "similar"
   return null
 }
 

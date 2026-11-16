@@ -350,8 +350,10 @@ async function duplicateVendorName(tenantId: string, next: RosterIdentity, selfI
     exact: nextKeys.exact.filter((k) => !prevKeys.exact.includes(k)),
     similar: nextKeys.similar.filter((k) => !prevKeys.similar.includes(k)),
     full: nextKeys.full.filter((k) => !prevKeys.full.includes(k)),
+    // 第十輪「名稱包含」只看名稱：名稱沒變（只改簡稱／戶名）就不比，改名或新增才比。
+    ...(renamed ? { name: nextKeys.name, nameCore: nextKeys.nameCore, nameParen: nextKeys.nameParen } : { name: [], nameCore: null, nameParen: "" }),
   }
-  if (mine.exact.length === 0 && mine.similar.length === 0 && mine.full.length === 0) return null
+  if (mine.exact.length === 0 && mine.similar.length === 0 && mine.full.length === 0 && (mine.name ?? []).length === 0) return null
   const roster = await selectAllPages<{ id: string; name: string | null; short_name: string | null; account_holder: string | null }>(
     (from, to) =>
       supabaseAdmin
