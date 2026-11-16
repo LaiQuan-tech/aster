@@ -3,7 +3,7 @@
  * 放款單（services/disbursements.ts）、廠商名冊（routes/vendors.ts）、副委託整批 PUT（routes/subcontracts.ts）共用。
  */
 
-import { TW_COUNTIES, TW_TOWNSHIPS } from "./tw-places.js"
+import { TW_COUNTIES, TW_FORMER_TOWNSHIPS, TW_TOWNSHIPS } from "./tw-places.js"
 
 /** 會讓兩個「看起來一樣」的名稱比對不同的不可見字元：預設可忽略字元、組合符號、點字空白與韓文填充字。 */
 const INVISIBLE_CLASS = "\\p{Default_Ignorable_Code_Point}\\p{M}\\u2800\\u3164\\u115F\\u1160\\uFFA0"
@@ -576,7 +576,7 @@ const GENERIC_HAN_WORDS = [
   "電力", "電信", "銀行", "商業銀行", "保險", "人壽", "產物", "產險", "證券", "投信", "投顧", "郵局", "郵政", "醫院", "診所", "藥局",
   "瓦斯", "天然氣", "自來水", "電話", "電視", "網路", "超商", "便利商店", "商店", "超市", "量販", "百貨", "汽車", "機車", "運輸", "客運",
   "物流", "貨運", "快遞", "航空", "鐵路", "高鐵", "捷運", "石油", "加油站", "水利", "農會", "漁會", "合作社", "信用合作社", "協會", "學會",
-  "基金會", "公會", "政府", "法院", "國稅局", "稅務", "學校", "大學", "醫療", "餐飲", "餐廳", "旅行社", "飯店", "酒店",
+  "基金會", "公會", "政府", "法院", "公所", "戶政事務所", "地政事務所", "衛生所", "清潔隊", "圖書館", "市場", "國稅局", "稅務", "學校", "大學", "醫療", "餐飲", "餐廳", "旅行社", "飯店", "酒店",
 ]
 const GENERIC_LATIN_WORDS = ["bank", "insurance", "telecom", "power", "electric", "securities", "airlines", "airline", "hospital", "post"]
 const INDUSTRY_LATIN_WORDS = [
@@ -734,14 +734,10 @@ const EXTRA_TOKENS: ReadonlySet<string> = (() => {
   for (const t of TW_TOWNSHIPS) {
     set.add(t)
     const base = [...t].slice(0, -1).join("")
-    if ([...base].length < 2) continue
-    set.add(base)
-    // 2026-11-17：簡稱＋市／鎮／鄉／區（改制前寫法：中壢市、板橋市、鳳山市…）；與縣市名相同者（新竹市）不另加。
-    for (const tail of PLACE_TAILS) {
-      if (tail === "縣") continue
-      if (!TW_COUNTIES.includes(base + tail)) set.add(base + tail)
-    }
+    if ([...base].length >= 2) set.add(base)
   }
+  // 2026-11-17：改制前真實存在過的縣轄市與鎮（中壢市、板橋市、鳳山市…）；不做簡稱＋市／鎮機械組合（會造出「新城市」「大城市」）。
+  for (const t of TW_FORMER_TOWNSHIPS) set.add(t)
   return set
 })()
 /**

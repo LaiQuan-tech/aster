@@ -55,6 +55,65 @@ describe("鄉鎮簡稱＋市／鎮／鄉、舊縣名", () => {
   })
 })
 
+describe("改制前地名只認真實存在過的名稱（不做簡稱＋市／鎮機械組合）", () => {
+  it("新城市／大城市不是地名：與 7dd9031 一致判相近", () => {
+    expectAll("新城市建設有限公司", "新城市營造", "similar")
+    expectAll("大城市室內裝修有限公司", "大城市設計有限公司", "similar")
+  })
+  it("金城市／車城市類（金城鎮、車城鄉的機械組合）不被當地名剝除", () => {
+    expectAll("金城市建設有限公司", "金城市營造", "similar")
+    expectAll("車城市室內裝修有限公司", "車城市設計有限公司", "similar")
+    // 若被當地名剝掉，「金城市宏碁」會對「宏碁」相近；不剝則核心是「金城市宏碁」，「宏碁」只是被包含——但不可被當地名直接剝成 exact
+    expect(relation("金城市宏碁有限公司", "宏碁")).not.toBe("exact")
+  })
+  it("真實存在過的鎮（鶯歌鎮、麻豆鎮、岡山鎮、楊梅鎮、員林鎮）× 品牌皆相近", () => {
+    for (const t of ["鶯歌鎮", "三峽鎮", "大溪鎮", "楊梅鎮", "東勢鎮", "麻豆鎮", "岡山鎮", "旗山鎮", "頭份鎮", "員林鎮"]) {
+      expectAll(`${t}宏碁有限公司`, "宏碁", "similar")
+      expectAll("宏碁", `${t}宏碁`, "similar")
+    }
+  })
+})
+
+describe("誤報評估（假資料）：機關名冊 20 家 × 30 個機關收款", () => {
+  const ROSTER = [
+    "中壢區公所", "板橋區公所", "竹北市公所", "員林市公所", "新城鄉公所", "大城鄉公所", "花蓮市公所", "苗栗市公所",
+    "中壢區戶政事務所", "板橋區戶政事務所", "竹北市戶政事務所", "斗六市戶政事務所", "中壢地政事務所", "板橋地政事務所",
+    "竹北市衛生所", "新城鄉衛生所", "竹北市清潔隊", "員林市立圖書館", "宜蘭市公有零售市場", "羅東鎮農會",
+  ]
+  const PAYEES = [
+    "台北市政府", "新北市政府", "桃園市政府", "高雄市政府", "台中市政府地方稅務局", "財政部台北國稅局",
+    "大安區公所", "鳳山區公所", "宜蘭市公所", "斗南鎮公所", "新營區公所", "麻豆區公所",
+    "大安區戶政事務所", "鳳山區戶政事務所", "宜蘭市戶政事務所", "新營區戶政事務所", "大安地政事務所", "鳳山地政事務所",
+    "宜蘭市衛生所", "鳳山區衛生所", "宜蘭市清潔隊", "鳳山區清潔隊", "台北市立圖書館", "高雄市立圖書館",
+    "鳳山第一公有零售市場", "鳳山區農會", "新竹區漁會", "勞動部勞工保險局", "衛生福利部中央健康保險署", "台灣電力股份有限公司",
+  ]
+  it("硬擋 0，相近比例回報", () => {
+    expect(ROSTER).toHaveLength(20)
+    expect(PAYEES).toHaveLength(30)
+    const index = buildRosterKeyIndex(ROSTER.map((name, i) => ({ id: `g${i}`, name })))
+    let exact = 0
+    let similar = 0
+    let rosterExact = 0
+    let rosterSimilar = 0
+    const hits: string[] = []
+    for (const p of PAYEES) {
+      const m = rosterKeyMatches(index, p)
+      exact += m.exact.length
+      similar += m.similar.length
+      for (const v of m.similar) hits.push(`${v.name} ← ${p}`)
+      for (const r of ROSTER) {
+        const k = rosterRelation(r, p)
+        if (k === "exact") rosterExact++
+        if (k === "similar") rosterSimilar++
+      }
+    }
+    const total = ROSTER.length * PAYEES.length
+    console.info(`機關誤報評估：其他收款 exact ${exact}／similar ${similar}／${total}；名冊入口 exact ${rosterExact}／similar ${rosterSimilar}／${total}；${hits.join("；")}`)
+    expect(exact).toBe(0)
+    expect(rosterExact).toBe(0)
+  })
+})
+
 describe("誤報評估（假資料）：名冊 20 家常見公司 × 收款 60 個機關／銀行／超商／電信／保險／個人", () => {
   const ROSTER = [
     "台灣積體電路製造股份有限公司", "鴻海精密工業股份有限公司", "宏碁股份有限公司", "華碩電腦股份有限公司", "統一企業股份有限公司",
