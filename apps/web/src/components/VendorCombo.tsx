@@ -2,6 +2,7 @@
 
 import { inputCls } from "@/components/admin-ui";
 import { vendorOptionLabel, type Vendor } from "@/lib/company-api";
+import { vendorIdForTypedName } from "@/lib/vendor-name-binding";
 
 /** 廠商挑選：可選名冊裡的 vendor，也可以直接輸入自由文字名稱。兩者並存
  * （選了 vendor 就把名稱一併帶入，之後改名冊不影響這裡已存的字串）。
@@ -38,7 +39,9 @@ export function VendorCombo({
         className={`${inputCls} text-xs`}
         value={name ?? ""}
         placeholder="名稱"
-        onChange={(e) => onChange({ vendorId: vendorId ?? null, name: e.target.value })}
+        // 手改名稱：只有（trim 後）完全等於名冊名稱才保留／綁定 vendorId，否則清成 null，
+        // 避免「名稱寫乙、vendor_id 仍是甲」→ 放款單顯示乙、帳號帶甲（見 vendorIdForTypedName）。
+        onChange={(e) => onChange({ vendorId: vendorIdForTypedName(vendors, vendorId, e.target.value), name: e.target.value })}
       />
     </div>
   );

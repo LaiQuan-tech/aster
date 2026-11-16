@@ -445,7 +445,7 @@ describe("POST /projects primary contract", () => {
         code: "WITH-SUBCONTRACTS",
         contractAmount: 1_000_000,
         initialSubcontracts: [
-          { discipline: "機電", vendorId: h.db.vendors[0].id, amount: 300_000, item: "機電設計" },
+          { discipline: "機電", vendorId: h.db.vendors[0].id, vendorName: "合格廠商", amount: 300_000, item: "機電設計" },
           { kind: "technician", discipline: "消防", vendorName: "未建檔技師", amount: 80_000 },
         ],
       })
@@ -469,6 +469,76 @@ describe("POST /projects primary contract", () => {
     expect(response.status).toBe(400)
     expect(response.body.error).toBe("invalid_vendor")
     expect(h.operations.filter((operation) => operation.startsWith("rpc:"))).toEqual([])
+  })
+
+  describe("initialSubcontracts：vendorName 必須是 vendorId 在名冊上的名稱（2026-11-16）", () => {
+    const VENDOR_ID = "44444444-4444-4444-8444-444444444444"
+    const post = (initialSubcontracts: unknown[], code: string) =>
+      request(app)
+        .post("/projects")
+        .set("Authorization", "Bearer finance-user")
+        .send({ name: "測試副委託廠商專案", code, initialSubcontracts })
+    const rpcCalls = () => h.operations.filter((operation) => operation.startsWith("rpc:"))
+
+    beforeEach(() => {
+      h.db.projects = []
+      h.db.contracts = []
+      h.db.project_subcontracts = []
+      h.operations.length = 0
+    })
+
+    it("{甲的 id, 名稱乙} → 400 vendor_name_mismatch，且未呼叫 RPC", async () => {
+      const response = await post([{ discipline: "機電", vendorId: VENDOR_ID, vendorName: "測試乙廠商", amount: 10_000 }], "VN-BAD")
+      expect(response.status).toBe(400)
+      expect(response.body).toMatchObject({ error: "vendor_name_mismatch", id: null, vendorId: VENDOR_ID })
+      expect(response.body.message).toBe("廠商名稱與登錄廠商不符，請使用名冊上的名稱或改為非登錄廠商（vendorId: null）")
+      expect(rpcCalls()).toEqual([])
+      expect(h.db.project_subcontracts).toEqual([])
+    })
+
+    it("第二列名稱不符 → 整批 400、未呼叫 RPC", async () => {
+      const response = await post([
+        { discipline: "機電", vendorId: VENDOR_ID, vendorName: "合格廠商", amount: 10_000 },
+        { discipline: "消防", vendorId: VENDOR_ID, vendorName: "測試乙廠商", amount: 20_000 },
+      ], "VN-BAD2")
+      expect(response.status).toBe(400)
+      expect(response.body.error).toBe("vendor_name_mismatch")
+      expect(rpcCalls()).toEqual([])
+    })
+
+    it("vendorId 有值但沒帶名稱 → 400 vendor_name_mismatch", async () => {
+      const response = await post([{ vendorId: VENDOR_ID, amount: 10_000 }], "VN-NONAME")
+      expect(response.status).toBe(400)
+      expect(response.body.error).toBe("vendor_name_mismatch")
+      expect(rpcCalls()).toEqual([])
+    })
+
+    it("{甲的 id, 名稱甲}（前後空白不計）→ 201", async () => {
+      const response = await post([{ discipline: "機電", vendorId: VENDOR_ID, vendorName: " 合格廠商 ", amount: 10_000 }], "VN-OK")
+      expect(response.status).toBe(201)
+      const stored = await loadSubcontracts(h.tenantId, response.body.id)
+      expect(stored[0]).toMatchObject({ vendor_id: VENDOR_ID, vendor_name: "合格廠商" })
+    })
+
+    it("{vendorId: null, 任意名稱} → 201，不比對", async () => {
+      const response = await post([{ discipline: "機電", vendorId: null, vendorName: "測試名冊外廠商", amount: 10_000 }], "VN-NULL")
+      expect(response.status).toBe(201)
+      const stored = await loadSubcontracts(h.tenantId, response.body.id)
+      expect(stored[0]).toMatchObject({ vendor_id: null, vendor_name: "測試名冊外廠商" })
+    })
+
+    it("大寫 uuid＋名冊名稱 → 201，寫入轉小寫；大寫 uuid＋錯名 → 400", async () => {
+      const ok = await post([{ discipline: "機電", vendorId: VENDOR_ID.toUpperCase(), vendorName: "合格廠商", amount: 10_000 }], "VN-UPPER")
+      expect(ok.status).toBe(201)
+      const stored = await loadSubcontracts(h.tenantId, ok.body.id)
+      expect(stored[0]).toMatchObject({ vendor_id: VENDOR_ID, vendor_name: "合格廠商" })
+
+      h.operations.length = 0
+      const bad = await post([{ discipline: "機電", vendorId: VENDOR_ID.toUpperCase(), vendorName: "測試乙廠商", amount: 10_000 }], "VN-UPPER-BAD")
+      expect(bad.status).toBe(400)
+      expect(bad.body.error).toBe("vendor_name_mismatch")
+      expect(rpcCalls()).toEqual([])
+    })
   })
 
   it.each([

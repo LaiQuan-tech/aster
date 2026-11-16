@@ -1027,7 +1027,10 @@ projectsRouter.post(
     const primaryContract: MainContractInput | null =
       b.primaryContract ?? (b.contractAmount !== undefined ? { amount: b.contractAmount } : null)
     const billings: NewBillingInput[] = b.billings ?? []
-    const initialSubcontracts = b.initialSubcontracts ?? []
+    // vendorId 大小寫不敏感（2026-11-16）：uuid 一律轉小寫再比對名冊／寫入。
+    const initialSubcontracts = (b.initialSubcontracts ?? []).map((item) =>
+      typeof item.vendorId === "string" ? { ...item, vendorId: item.vendorId.toLowerCase() } : item,
+    )
     const seenInstallments = new Set<number>()
     let guildAdvances = 0
     for (const billing of billings) {
@@ -1099,16 +1102,35 @@ projectsRouter.post(
       if (vendorIds.length > 0) {
         const { data: vendors, error: vendorError } = await supabaseAdmin
           .from("vendors")
-          .select("id")
+          .select("id, name")
           .eq("tenant_id", tenantId)
           .in("id", vendorIds)
           .is("deleted_at", null)
         if (vendorError) throw new Error(`POST /projects vendor validation: ${vendorError.message}`)
-        const validVendorIds = new Set((vendors ?? []).map((vendor) => vendor.id as string))
-        const invalidVendorId = vendorIds.find((id) => !validVendorIds.has(id))
+        // id（小寫）→ 名冊名稱。不在本租戶名冊（或已刪）的不會出現在 Map 裡。
+        const rosterNames = new Map(
+          (vendors ?? []).map((vendor: { id: string; name: string | null }) => [vendor.id.toLowerCase(), vendor.name ?? ""]),
+        )
+        const invalidVendorId = vendorIds.find((id) => !rosterNames.has(id))
         if (invalidVendorId) {
           res.status(400).json({ error: "invalid_vendor", vendorId: invalidVendorId })
           return
+        }
+        // 名稱須是名冊上的名稱（2026-11-16，同副委託整批 PUT 26d3c74）：放款單名稱帶副委託存的 vendor_name、
+        // 銀行帳號依 vendor_id 從名冊帶，{vendorId: 甲, vendorName: 乙} 會「顯示乙、匯給甲」。
+        // 建案的副委託都是新建列 → vendorId 非 null 一律比對（trim 後完全相同）。
+        // create_project_application_atomic 本身不比對名稱，只靠這裡在呼叫 RPC 前擋。
+        for (const item of initialSubcontracts) {
+          if (!item.vendorId) continue
+          if ((item.vendorName ?? "").trim() !== (rosterNames.get(item.vendorId) ?? "").trim()) {
+            res.status(400).json({
+              error: "vendor_name_mismatch",
+              id: null,
+              vendorId: item.vendorId,
+              message: "廠商名稱與登錄廠商不符，請使用名冊上的名稱或改為非登錄廠商（vendorId: null）",
+            })
+            return
+          }
         }
       }
 
