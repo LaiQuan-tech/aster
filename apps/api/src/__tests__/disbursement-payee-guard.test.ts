@@ -138,11 +138,29 @@ describe("A. 分攤的副委託廠商必須是收款廠商", () => {
     expect(writesTo("disbursement_allocations")).toHaveLength(1)
   })
 
-  it("非登錄收款方：分攤到任何副委託維持原行為 → 201", async () => {
+  it("非登錄收款方：分攤到登錄廠商（乙）的期款 → 400，零寫入", async () => {
     const res = await as(request(app).post("/disbursements")).send(
       body({ payeeKind: "other", vendorId: null, payeeName: "測試任意收款人", allocations: allocTo(SUB_B, PAY_B) }),
     )
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "allocation_vendor_mismatch", message: "分攤的副委託廠商與收款廠商不同，請確認收款對象" })
+    expect(anyWrites()).toHaveLength(0)
+  })
+
+  it("非登錄收款方：分攤到非登錄副委託維持原行為 → 201", async () => {
+    const res = await as(request(app).post("/disbursements")).send(
+      body({ payeeKind: "other", vendorId: null, payeeName: "測試任意收款人", allocations: allocTo(SUB_FREE, PAY_FREE) }),
+    )
     expect(res.status).toBe(201)
+  })
+
+  it("PATCH 草稿把收款方從甲改成「其他」（分攤仍是甲的期款）→ 400，單據不動", async () => {
+    fake.db.disbursements = [draftRow()]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeKind: "other", vendorId: null, payeeName: "測試任意收款人" })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("allocation_vendor_mismatch")
+    expect(anyWrites()).toHaveLength(0)
   })
 
   it("PATCH 草稿把收款廠商換成乙（分攤仍是甲的期款）→ 400，單據與分攤不動", async () => {
@@ -216,9 +234,67 @@ describe("B. 登錄廠商的收款戶名不可覆寫成他人", () => {
   })
 })
 
+describe("C. 登錄廠商的收款銀行欄位必須等於名冊", () => {
+  it("有送且與名冊不同（帳號／代碼／銀行名）→ 400 payee_bank_mismatch，零寫入", async () => {
+    for (const over of [{ payeeBankAccount: "9999999" }, { payeeBankCode: "998" }, { payeeBankName: "另一家測試銀行" }]) {
+      fake.writes.length = 0
+      const res = await as(request(app).post("/disbursements")).send(body(over))
+      expect(res.status, JSON.stringify(over)).toBe(400)
+      expect(res.body.error).toBe("payee_bank_mismatch")
+      expect(res.body.message).toBe("收款帳戶與登錄廠商名冊不同；若帳戶已變更請先到廠商名冊更新（需財務權限）")
+      expect(anyWrites()).toHaveLength(0)
+    }
+  })
+
+  it("帶 null 想清掉名冊帳號 → 也擋", async () => {
+    const res = await as(request(app).post("/disbursements")).send(body({ payeeBankAccount: null }))
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("payee_bank_mismatch")
+  })
+
+  it("與名冊相同（帳號含空白與連字號、銀行名前後空白）→ 201；沒送 → 201 且照名冊帶", async () => {
+    const ok = await as(request(app).post("/disbursements")).send(
+      body({ payeeBankAccount: " 000-01 11 ", payeeBankCode: "999", payeeBankName: " 測試銀行 " }),
+    )
+    expect(ok.status).toBe(201)
+    fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => ({ ...p, disbursement_id: null }))
+    const none = await as(request(app).post("/disbursements")).send(body())
+    expect(none.status).toBe(201)
+    const inserted = writesTo("disbursements").filter((w) => w.action === "insert").at(-1)!.payload as Row
+    expect(inserted).toMatchObject({ payee_bank_code: "999", payee_bank_name: "測試銀行（999）", payee_bank_account: "0000111 測試甲工程行王小明" })
+  })
+
+  it("非登錄收款方任意帳戶 → 201", async () => {
+    const res = await as(request(app).post("/disbursements")).send(
+      body({ payeeKind: "other", vendorId: null, payeeName: "測試任意收款人", payeeBankAccount: "123-456", payeeBankCode: "001", allocations: [] }),
+    )
+    expect(res.status).toBe(201)
+  })
+
+  it("PATCH 只改帳號成他人 → 400，單據不動；改回名冊帳號 → 200", async () => {
+    fake.db.disbursements = [draftRow({ payee_bank_account: "0000111 測試甲工程行王小明", payee_bank_code: "999", payee_bank_name: "測試銀行（999）" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    const bad = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeBankAccount: "9999999" })
+    expect(bad.status).toBe(400)
+    expect(bad.body).toMatchObject({ error: "payee_bank_mismatch", field: "payeeBankAccount" })
+    expect(anyWrites()).toHaveLength(0)
+    const ok = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeBankAccount: "0000111" })
+    expect(ok.status).toBe(200)
+  })
+
+  it("PATCH 換收款廠商成乙但帶甲的帳號 → 400", async () => {
+    fake.db.disbursements = [draftRow()]
+    fake.db.disbursement_allocations = []
+    const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ vendorId: VENDOR_B, payeeBankAccount: "0000111", amount: 0 })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("payee_bank_mismatch")
+  })
+})
+
 describe("不回溯：既有單子的其他操作不被新檢查擋", () => {
   // 既有的「不一致」舊單：收款甲、戶名是乙、分攤到乙的期款。
-  const legacy = (over: Row = {}) => draftRow({ payee_name: "測試乙工程行", ...over })
+  const legacy = (over: Row = {}) =>
+    draftRow({ payee_name: "測試乙工程行", payee_bank_account: "0000222", payee_bank_code: "999", payee_bank_name: "測試銀行", ...over })
 
   it("舊草稿只改備註（整份表單回送、戶名與分攤沒變）→ 200", async () => {
     fake.db.disbursements = [legacy()]
@@ -227,6 +303,9 @@ describe("不回溯：既有單子的其他操作不被新檢查擋", () => {
       payeeKind: "vendor",
       vendorId: VENDOR_A,
       payeeName: "測試乙工程行",
+      payeeBankAccount: "0000222",
+      payeeBankCode: "999",
+      payeeBankName: "測試銀行",
       note: "補備註",
       allocations: allocTo(SUB_B, PAY_B),
     })
@@ -250,19 +329,28 @@ describe("不回溯：既有單子的其他操作不被新檢查擋", () => {
   it("已匯款的舊單：改發票號碼 → 200", async () => {
     fake.db.disbursements = [legacy({ status: "paid", paid_on: "2026-11-01" })]
     fake.db.disbursement_allocations = [allocRow(SUB_B, PAY_B)]
-    const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ invoiceNo: "ZZ00000000", payeeName: "測試乙工程行" })
+    const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ invoiceNo: "ZZ00000000", payeeName: "測試乙工程行", payeeBankAccount: "0000222" })
+    expect(res.status).toBe(200)
+  })
+
+  it("舊的「其他」收款方草稿（分攤到登錄廠商期款）只改備註 → 200", async () => {
+    fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試任意收款人", payee_bank_account: "123" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_B, PAY_B)]
+    const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ note: "補備註", payeeKind: "other", allocations: allocTo(SUB_B, PAY_B) })
     expect(res.status).toBe(200)
   })
 })
 
-describe("MCP：POST /disbursements 帶銀行欄位要確認", () => {
-  const tier = (b?: unknown) => dangerOf("POST", "/disbursements", b)?.tier ?? null
-  it("不帶銀行欄位 → 維持免確認", () => {
-    expect(tier({ payeeKind: "vendor", vendorId: VENDOR_A, amount: 1 })).toBeNull()
+describe("MCP：放款單帶銀行欄位＝最高風險（後台本人確認）", () => {
+  const tier = (m: string, p: string, b?: unknown) => dangerOf(m, p, b)?.tier ?? null
+  it("不帶銀行欄位 → 建立維持免確認、修改維持中風險", () => {
+    expect(tier("POST", "/disbursements", { payeeKind: "vendor", vendorId: VENDOR_A, amount: 1 })).toBeNull()
+    expect(tier("PATCH", `/disbursements/${DISB}`, { note: "x" })).toBe("medium")
   })
-  it("帶 payeeBankAccount／payeeBankCode／payeeBankName → 需確認", () => {
+  it("POST／PATCH 帶 payeeBankAccount／payeeBankCode／payeeBankName（含 null）→ high", () => {
     for (const b of [{ payeeBankAccount: "1" }, { payeeBankCode: "999" }, { payeeBankName: "x" }, { payeeBankAccount: null }]) {
-      expect(tier(b), JSON.stringify(b)).not.toBeNull()
+      expect(tier("POST", "/disbursements", b), JSON.stringify(b)).toBe("high")
+      expect(tier("PATCH", `/disbursements/${DISB}`, b), JSON.stringify(b)).toBe("high")
     }
   })
 })

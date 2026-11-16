@@ -1312,11 +1312,14 @@ export function assertAllocationVendors(
   payeeVendorId: string | null,
   allocations: ReadonlyArray<{ subcontractId: string | null; subcontractVendorId?: string | null }>,
 ): void {
-  if (!payeeVendorId) return
-  const payee = payeeVendorId.toLowerCase()
+  const payee = payeeVendorId ? payeeVendorId.toLowerCase() : null
   allocations.forEach((a, index) => {
     if (a.subcontractVendorId === undefined) return
-    if (!a.subcontractVendorId || a.subcontractVendorId.toLowerCase() !== payee) {
+    // 收款方非登錄（「其他」）：不能分攤到登錄廠商的期款（2026-11-16 第二輪）；分攤到非登錄副委託維持原行為。
+    const mismatch = payee
+      ? !a.subcontractVendorId || a.subcontractVendorId.toLowerCase() !== payee
+      : !!a.subcontractVendorId
+    if (mismatch) {
       throw new DisbursementError(400, "allocation_vendor_mismatch", {
         index,
         subcontractId: a.subcontractId,
@@ -1324,6 +1327,45 @@ export function assertAllocationVendors(
       })
     }
   })
+}
+
+export type PayeeBankField = "payeeBankName" | "payeeBankAccount" | "payeeBankCode"
+export const PAYEE_BANK_FIELDS: readonly PayeeBankField[] = ["payeeBankName", "payeeBankAccount", "payeeBankCode"]
+
+function normBankText(v: unknown): string {
+  return typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim()
+}
+function normBankAccount(v: unknown): string {
+  return normBankText(v).replace(/[\s\-－‐–—]/g, "")
+}
+
+/** 名冊上這家廠商「可接受」的收款帳戶值：原始欄位，或系統自己複製的快照格式（銀行名（代碼）／帳號 戶名）。 */
+function vendorBankAllowed(v: VendorLite, field: PayeeBankField): string[] {
+  if (field === "payeeBankCode") return [normBankText(v.bank_code)]
+  if (field === "payeeBankName") return [normBankText(v.bank_name), normBankText(vendorBankName(v))]
+  return [normBankAccount(v.bank_account), normBankAccount([v.bank_account, v.account_holder].filter(Boolean).join(" "))]
+}
+
+/**
+ * 付錯人防線（2026-11-16 第二輪）：收款方是登錄廠商時，有送的收款銀行欄位必須等於名冊上該廠商的值
+ * （trim；帳號去掉空白與連字號後比對；空值＝名冊也空）。帳戶變更要先改廠商名冊（需財務權限）。
+ */
+export function assertPayeeBankMatchesVendor(
+  vendor: VendorLite,
+  input: Partial<Record<PayeeBankField, string | null | undefined>>,
+  fields: Iterable<PayeeBankField>,
+): void {
+  for (const field of fields) {
+    const sent = input[field]
+    if (sent === undefined) continue
+    const got = field === "payeeBankAccount" ? normBankAccount(sent) : normBankText(sent)
+    if (!vendorBankAllowed(vendor, field).includes(got)) {
+      throw new DisbursementError(400, "payee_bank_mismatch", {
+        field,
+        message: "收款帳戶與登錄廠商名冊不同；若帳戶已變更請先到廠商名冊更新（需財務權限）",
+      })
+    }
+  }
 }
 
 /**
@@ -1383,7 +1425,7 @@ async function resolveHeader(
   tenantId: string,
   input: Omit<DisbursementInput, "status" | "allocations">,
   stored?: { payingCompanyId?: string | null; receiptIssuerCompanyId?: string | null },
-  opts: { checkPayeeName?: boolean } = {},
+  opts: { checkPayeeName?: boolean; checkBankFields?: Iterable<PayeeBankField> } = {},
 ): Promise<ResolvedHeader> {
   let vendor: VendorLite | null = null
   if (input.payeeKind === "vendor") {
@@ -1402,6 +1444,7 @@ async function resolveHeader(
   const payeeName = (input.payeeName ?? "").trim() || vendor?.name || ""
   if (!payeeName) throw new DisbursementError(400, "payee_name_required")
   if (vendor && opts.checkPayeeName !== false) assertPayeeNameMatchesVendor(payeeName, vendor)
+  if (vendor) assertPayeeBankMatchesVendor(vendor, input, opts.checkBankFields ?? PAYEE_BANK_FIELDS)
 
   const companyIds = uniq([input.payingCompanyId, input.receiptIssuerCompanyId])
   const companies = await loadCompanies(tenantId, companyIds)
@@ -2320,6 +2363,15 @@ export async function updateDisbursement(
       (patch.payeeKind !== undefined && patch.payeeKind !== current.payee_kind) ||
       (patch.vendorId !== undefined && (patch.vendorId ?? null) !== (current.vendor_id ?? null))
     const payeeNameChanged = patch.payeeName !== undefined && normalize(patch.payeeName) !== normalize(current.payee_name)
+    // 銀行欄位同理：換了收款方就驗有送的；沒換就只驗「這次真的改了值」的欄位（舊單整份表單回送原快照放行）。
+    const storedBank: Record<PayeeBankField, string | null> = {
+      payeeBankName: current.payee_bank_name,
+      payeeBankAccount: current.payee_bank_account,
+      payeeBankCode: current.payee_bank_code,
+    }
+    const bankFieldsToCheck = PAYEE_BANK_FIELDS.filter((f) =>
+      payeeChanged ? true : patch[f] !== undefined && normalize(patch[f]) !== normalize(storedBank[f]),
+    )
     const header = await resolveHeader(
       tenantId,
       merged,
@@ -2327,7 +2379,7 @@ export async function updateDisbursement(
         payingCompanyId: current.paying_company_id,
         receiptIssuerCompanyId: current.receipt_issuer_company_id,
       },
-      { checkPayeeName: payeeChanged || payeeNameChanged },
+      { checkPayeeName: payeeChanged || payeeNameChanged, checkBankFields: bankFieldsToCheck },
     )
     const allocInputs: AllocationInput[] =
       patch.allocations !== undefined

@@ -163,10 +163,12 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "POST", path: "/bonus-runs/:id/submit", label: "送出獎金批次" },
   { method: "POST", path: "/overtime-settlements", label: "新增加班超額另計" },
   { method: "PATCH", path: "/overtime-settlements/:id", label: "修改加班超額另計" },
+  // 2026-11-16 付錯人驗收：放款單帶了收款銀行欄位（payeeBankName／payeeBankAccount／payeeBankCode，含帶 null）
+  // ＝自己指定匯款帳戶，與改廠商收款帳號同級：最高風險（後台本人確認）。規則依序比對、第一條符合的生效；
+  // 不帶銀行欄位時：建立仍走 SAFE_WRITES 白名單免確認、修改維持中風險。
+  { method: "POST", path: "/disbursements", tier: "high", label: "建立放款單（含收款銀行帳戶）", when: hasBankKey },
+  { method: "PATCH", path: "/disbursements/:id", tier: "high", label: "修改放款單收款銀行帳戶", when: hasBankKey },
   { method: "PATCH", path: "/disbursements/:id", label: "修改放款單" },
-  // 2026-11-16 付錯人驗收：建立放款單本身在 SAFE_WRITES 免確認，但帶了收款銀行欄位（payeeBankName／payeeBankAccount／
-  // payeeBankCode，含帶 null 覆寫名冊帳戶）＝自己指定匯款帳戶，要二段確認。不帶時仍走白名單。
-  { method: "POST", path: "/disbursements", label: "建立放款單（自行指定收款銀行帳戶）", when: hasBankKey },
   { method: "PUT", path: "/projects/:id/subcontracts", label: "修改複委託" },
   { method: "POST", path: "/projects/:id/subcontracts/:sid/payments/:installmentNo/accept", label: "複委託付款驗收" },
   { method: "POST", path: "/attendance-sheets/:id/approve", label: "核定出勤月表（鎖定）" },

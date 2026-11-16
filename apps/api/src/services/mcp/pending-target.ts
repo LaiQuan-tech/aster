@@ -140,6 +140,13 @@ export async function describeTarget(get: UserGet, method: string, path: string,
         const ids = Array.isArray(b.ids) ? b.ids : Array.isArray(b.disbursementIds) ? b.disbursementIds : []
         return { ok: true, summary: `批次放款／AI 送出的清單 ${ids.length} 張` }
       }
+      if (!seg[1]) {
+        const account = b.payeeBankAccount ?? b.payee_bank_account
+        return {
+          ok: true,
+          summary: `新增放款單／AI 送出的受款人${aiText(b.payeeName ?? b.payee_name)}・金額 ${money(b.amount)}${typeof account === "string" && account ? `・收款帳號 ${maskAccount(account)}` : ""}`,
+        }
+      }
       if (!isUuid(id)) return { ok: true, summary: null }
       const r = await read(`/disbursements/${id}`)
       if (!r.ok) return r

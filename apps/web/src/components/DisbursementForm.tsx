@@ -209,10 +209,11 @@ export default function DisbursementForm({
     setState((s) => ({
       ...s,
       vendorId,
+      // 銀行欄位一律照名冊帶（名冊空就清空，不沿用前一家廠商的帳戶；後端 400 payee_bank_mismatch 為準）。
       payeeName: v ? v.name : s.payeeName,
-      payeeBankName: v?.bankName ?? s.payeeBankName,
-      payeeBankAccount: v?.bankAccount ?? s.payeeBankAccount,
-      payeeBankCode: v?.bankCode ?? s.payeeBankCode,
+      payeeBankName: v ? (v.bankName ?? "") : s.payeeBankName,
+      payeeBankAccount: v ? (v.bankAccount ?? "") : s.payeeBankAccount,
+      payeeBankCode: v ? (v.bankCode ?? "") : s.payeeBankCode,
     }));
   }
 
@@ -250,12 +251,15 @@ export default function DisbursementForm({
   // 付錯人防線（2026-11-16，後端 400 allocation_vendor_mismatch 為準）：收款方是登錄廠商時，
   // 分攤到的期款必須屬於同一家廠商——從乙的應付開單後把廠商改成甲，這裡就標紅並鎖住儲存。
   const selectedVendor = state.payeeKind === "vendor" ? vendors.find((v) => v.id === state.vendorId) : undefined;
+  // 收款方「其他」（非登錄）時，不能分攤到登錄廠商的期款（分攤到非登錄副委託維持原行為）。
   const vendorMismatchKeys = new Set(
-    state.payeeKind === "vendor" && state.vendorId
-      ? state.allocations
-          .filter((r) => r.vendorId !== undefined && (r.vendorId ?? "").toLowerCase() !== state.vendorId.toLowerCase())
-          .map((r) => r.key)
-      : [],
+    state.payeeKind === "vendor"
+      ? state.vendorId
+        ? state.allocations
+            .filter((r) => r.vendorId !== undefined && (r.vendorId ?? "").toLowerCase() !== state.vendorId.toLowerCase())
+            .map((r) => r.key)
+        : []
+      : state.allocations.filter((r) => typeof r.vendorId === "string" && r.vendorId !== "").map((r) => r.key),
   );
   const hasVendorMismatch = vendorMismatchKeys.size > 0;
   // 登錄廠商的收款戶名只能是名冊名稱或名冊上的帳戶戶名（唯讀，後端 400 payee_name_mismatch 為準）。
@@ -393,7 +397,16 @@ export default function DisbursementForm({
                     setState((s) => {
                       // 切回「廠商」時戶名重新帶名冊名稱（避免沿用「其他」時手打的名稱）。
                       const v = k === "vendor" ? vendors.find((x) => x.id === s.vendorId) : undefined;
-                      return { ...s, payeeKind: k, payeeName: v ? v.name : s.payeeName };
+                      return v
+                        ? {
+                            ...s,
+                            payeeKind: k,
+                            payeeName: v.name,
+                            payeeBankName: v.bankName ?? "",
+                            payeeBankAccount: v.bankAccount ?? "",
+                            payeeBankCode: v.bankCode ?? "",
+                          }
+                        : { ...s, payeeKind: k };
                     })
                   }
                 />
@@ -437,20 +450,20 @@ export default function DisbursementForm({
             <input className={inputCls} value={state.payeeName} onChange={(e) => set("payeeName", e.target.value)} />
           )}
           {state.payeeKind === "vendor" && (
-            <p className="mt-1 text-xs text-gray-400">登錄廠商的戶名只能是名冊名稱／帳戶戶名；要付給其他對象請改選「其他」。</p>
+            <p className="mt-1 text-xs text-gray-400">登錄廠商的戶名與收款帳戶一律照名冊；帳戶變更請先到廠商名冊更新（需財務權限），要付給其他對象請改選「其他」。</p>
           )}
         </div>
         <div>
           <label className={labelCls}>收款銀行</label>
-          <input className={inputCls} value={state.payeeBankName} onChange={(e) => set("payeeBankName", e.target.value)} />
+          <input className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`} value={state.payeeBankName} onChange={(e) => set("payeeBankName", e.target.value)} readOnly={state.payeeKind === "vendor"} />
         </div>
         <div>
           <label className={labelCls}>收款銀行代碼</label>
-          <input className={inputCls} value={state.payeeBankCode} onChange={(e) => set("payeeBankCode", e.target.value)} placeholder="選了廠商會自動帶入，可覆寫" />
+          <input className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`} value={state.payeeBankCode} onChange={(e) => set("payeeBankCode", e.target.value)} readOnly={state.payeeKind === "vendor"} placeholder="選了廠商會自動帶入名冊帳戶" />
         </div>
         <div>
           <label className={labelCls}>收款帳號</label>
-          <input className={inputCls} value={state.payeeBankAccount} onChange={(e) => set("payeeBankAccount", e.target.value)} />
+          <input className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`} value={state.payeeBankAccount} onChange={(e) => set("payeeBankAccount", e.target.value)} readOnly={state.payeeKind === "vendor"} />
         </div>
 
         <div>
