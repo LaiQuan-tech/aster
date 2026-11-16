@@ -526,7 +526,12 @@ subcontractsRouter.put(
             billing_basis: p.billingBasis ?? null,
             order_type: p.orderType ?? null,
             contract_id: p.contractId ?? null,
-            withholding_rate: p.withholdingRate ?? DEFAULT_WITHHOLDING_RATE,
+            // 代扣率：有帶就用帶的值；沒帶時——更新保留 DB 既有值（不送這欄），新建才用預設（0＝不代扣）。
+            ...(p.withholdingRate != null
+              ? { withholding_rate: p.withholdingRate }
+              : p.id
+                ? {}
+                : { withholding_rate: DEFAULT_WITHHOLDING_RATE }),
             withholding_threshold: p.withholdingThreshold ?? DEFAULT_WITHHOLDING_THRESHOLD,
             sort_order: p.sortOrder ?? i,
             note: p.note ?? null,

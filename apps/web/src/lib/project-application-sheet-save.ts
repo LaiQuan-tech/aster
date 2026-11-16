@@ -723,7 +723,7 @@ export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDr
       const target = payload.find((p) => p.id === slot.sub?.id);
       if (target) apply(target);
     } else {
-      // 新的一筆：預設值同下方副委託卡的「新增」（下包、扣繳 10%、起扣 20,000）。
+      // 新的一筆：預設下包、不代扣（代扣率 0；2026-11-16 起）、起扣 20,000。
       const row: Subcontract = {
         kind: "subcontract",
         discipline: null,
@@ -734,7 +734,7 @@ export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDr
         amount: 0,
         billingBasis: null,
         orderType: null,
-        withholdingRate: 0.1,
+        withholdingRate: 0,
         withholdingThreshold: 20000,
         sortOrder: nextSort++,
         note: null,

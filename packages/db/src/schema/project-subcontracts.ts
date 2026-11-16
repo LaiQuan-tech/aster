@@ -14,8 +14,8 @@ import { contracts } from "./contracts"
  * 並回填 `vendorId`，兩欄並存不是重複而是「已建檔」與「未建檔」兩態）。
  *
  * `withholdingRate`／`withholdingThreshold`：技師費／執行業務所得依所得稅法
- * §89-1 及各类扣繳率標準需就源扣繳（預設 10%、起扣門檻 20,000，可依個案
- * 覆寫）。`orderType` 記錄下包成立依據是報價單或合約（呼應 `contracts.docType`
+ * §89-1 及各类扣繳率標準需就源扣繳（代扣率預設 0＝不代扣〔2026-11-16 起，原 10%〕、
+ * 起扣門檻 20,000，可依個案覆寫）。`orderType` 記錄下包成立依據是報價單或合約（呼應 `contracts.docType`
  * 的分類理由——印花稅與法遵稽核都要看這個分類），`contractId` 可回連
  * `contracts` 那張實際簽的合約/報價單。
  *
@@ -44,10 +44,10 @@ export const projectSubcontracts = pgTable(
     /** 'quotation' 報價單 | 'contract' 合約，或 null（尚未成立）。 */
     orderType: text("order_type"),
     contractId: uuid("contract_id").references(() => contracts.id),
-    /** 就源扣繳率，預設 10%（所得稅法 §89-1）。 */
+    /** 就源扣繳率（所得稅法 §89-1），預設 0＝不代扣（migration 0101；原為 10%）。 */
     withholdingRate: numeric("withholding_rate", { precision: 5, scale: 4 })
       .notNull()
-      .default("0.10"),
+      .default("0"),
     /** 起扣門檻，預設 20,000。 */
     withholdingThreshold: integer("withholding_threshold").notNull().default(20000),
     /** 代扣日期（只有 kind='firm' 用；其他類型 API 存 null）。migration 0089。 */

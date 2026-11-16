@@ -46,8 +46,12 @@ export const PAYMENT_METHODS = ["transfer", "check"] as const
 
 /** 營業稅 5%。與 project_settings.vat_rate 的 default 對齊。 */
 export const DEFAULT_VAT_RATE = 0.05
-/** 執行業務所得就源扣繳 10%、起扣門檻 20,000（所得稅法 §89-1）。 */
-export const DEFAULT_WITHHOLDING_RATE = 0.1
+/**
+ * 新建副委託沒指定代扣率時的預設：0（不代扣；2026-11-16 業主核准，原為 10%）。
+ * 需要代扣（執行業務所得 §89-1，通常 10%）由使用者在副委託卡自行填寫。與 DB 欄位 default（migration 0101）一致。
+ * 起扣門檻仍為 20,000。
+ */
+export const DEFAULT_WITHHOLDING_RATE = 0
 export const DEFAULT_WITHHOLDING_THRESHOLD = 20000
 
 /** 金額到「元」。 */

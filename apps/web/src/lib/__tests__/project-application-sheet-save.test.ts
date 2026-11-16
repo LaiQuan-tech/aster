@@ -437,10 +437,10 @@ describe("發包單位", () => {
     expect(plan.subcontracts?.[1]).toMatchObject({ id: "s2", vendorId: null, vendorName: "自由輸入", kind: "technician" })
   })
 
-  it("空欄填了 → 新增一筆（預設同副委託卡）；金額格式錯擋下", () => {
+  it("空欄填了 → 新增一筆（預設下包、不代扣 0）；金額格式錯擋下", () => {
     const ctx = ctxOf({ subcontracts: subs })
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { "new-2": { vendorName: "新廠商", item: "空調", amount: "3000", billingBasis: "驗收" } } }))
-    expect(plan.subcontracts?.[2]).toMatchObject({ kind: "subcontract", vendorName: "新廠商", item: "空調", amount: 3000, billingBasis: "驗收", withholdingRate: 0.1, withholdingThreshold: 20000, sortOrder: 2 })
+    expect(plan.subcontracts?.[2]).toMatchObject({ kind: "subcontract", vendorName: "新廠商", item: "空調", amount: 3000, billingBasis: "驗收", withholdingRate: 0, withholdingThreshold: 20000, sortOrder: 2 })
     expect(plan.subcontracts?.[2].id).toBeUndefined()
     expect(applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { amount: "abc" } } })).errors[0].message).toMatch(/發包金額/)
     expect(applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { amount: "abc" } } })).errors[0].field).toBe("sub:s1:amount")
