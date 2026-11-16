@@ -167,6 +167,8 @@ export interface DisbursementInput {
   forceReason?: string | null
   /** HR 勾「未驗收仍要放款」（M5）。 */
   forceAcceptance?: boolean
+  /** 登錄廠商零分攤、廠商仍有未付期款時確認「不是付期款」（後端寫稽核，2026-11-17）。 */
+  confirmNonInstallment?: boolean
 }
 
 /** PATCH：draft 全欄可改（allocations 整批覆蓋，列數變少可能 409
@@ -575,7 +577,10 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   payee_bank_mismatch: "收款帳戶與登錄廠商名冊不同；若帳戶已變更請先到廠商名冊更新（需財務權限）。",
   allocation_vendor_changed: "分攤的副委託廠商已變更，請重新確認放款單。",
   payee_is_registered_vendor: "此收款對象是登錄廠商，請改選登錄廠商；若此對象尚未綁定名冊廠商，請先到專案副委託選擇名冊廠商。",
-  payee_bank_changed: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出。",
+  payee_bank_changed: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出；已核准的單請先撤回簽核再編輯。",
+  invalid_payee_name: "名稱含有不可見字元，請重新輸入。",
+  vendor_has_unpaid_installments: "此廠商仍有未付期款，若要付期款請改用分攤；確定為非期款支出請勾選確認。",
+  cannot_clear_allocations: "已分攤的放款單不能改成零分攤，請作廢後重開。",
   purpose_required: "登錄廠商不分攤期款（非專案支出）時，請填寫用途。",
   payment_already_paid: "選到的期款已由其他匯款標記為已付。",
   invalid_vendor: "選到的廠商不存在或已刪除。",

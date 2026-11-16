@@ -6,6 +6,7 @@ import { buttonClass } from "@/components/ess-ui";
 import { useRosterRoles } from "@/components/roster-detail";
 import { buildRemittanceText, copyText } from "@/lib/remittance";
 import { listVendors, deleteVendor, type Vendor, type VendorRosterKind } from "@/lib/company-api";
+import { humanizeVendorDeleteError } from "@/lib/vendor-name-binding";
 import {
   VENDOR_EXCEL_COLUMNS, VENDOR_ROSTER_KINDS, VENDOR_ROSTER_KIND_LABELS,
   countVendorsByKind, filterVendorsByKind, vendorCellText, vendorRosterKind,
@@ -82,7 +83,7 @@ export default function VendorsPage() {
 
   async function remove(v: Vendor) {
     if (!confirm(`刪除廠商「${v.name}」？（軟刪除，紀錄仍保留）`)) return;
-    try { await deleteVendor(v.id); await load(); } catch (err) { setError(err instanceof Error ? err.message : "刪除失敗"); }
+    try { await deleteVendor(v.id); await load(); } catch (err) { setError(err instanceof Error ? humanizeVendorDeleteError(err.message) : "刪除失敗"); }
   }
 
   const counts = useMemo(() => countVendorsByKind(vendors), [vendors]);

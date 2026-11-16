@@ -27,6 +27,11 @@ describe("humanizeDisbursementError", () => {
     expect(humanizeDisbursementError(apiErr({ error: "payee_is_registered_vendor" }), "x")).toContain("請先到專案副委託選擇名冊廠商")
     expect(humanizeDisbursementError(apiErr({ error: "payee_bank_changed" }), "x")).toContain("重新帶入名冊帳戶")
     expect(humanizeDisbursementError(apiErr({ error: "purpose_required" }), "x")).toContain("請填寫用途")
+    // 第五輪（2026-11-17）
+    expect(humanizeDisbursementError(apiErr({ error: "payee_bank_changed" }), "x")).toContain("已核准的單請先撤回簽核再編輯")
+    expect(humanizeDisbursementError(apiErr({ error: "invalid_payee_name" }), "x")).toContain("名稱含有不可見字元")
+    expect(humanizeDisbursementError(apiErr({ error: "vendor_has_unpaid_installments" }), "x")).toContain("此廠商仍有未付期款")
+    expect(humanizeDisbursementError(apiErr({ error: "cannot_clear_allocations" }), "x")).toContain("已分攤的放款單不能改成零分攤")
   })
   it("批次付款逐筆：manual_check_required 帶 message 時顯示它", () => {
     expect(describeBatchPayError("manual_check_required", { message: "單號 D-115-003 需人工確認" })).toBe("單號 D-115-003 需人工確認")

@@ -48,11 +48,23 @@ export const VENDOR_HAS_OPEN_DISBURSEMENTS_TEXT = "此廠商仍有未匯款的�
 /** 只有未付期款時改收款帳戶要填原因 → 400 change_reason_required。 */
 export const VENDOR_CHANGE_REASON_REQUIRED_TEXT = "此廠商仍有未付期款，更改收款帳戶請填寫變更原因";
 
+/** 名稱／帳戶戶名含不可見字元 → 400 invalid_vendor_name（2026-11-17）。 */
+export const INVALID_VENDOR_NAME_TEXT = "名稱含有不可見字元，請重新輸入";
+/** 刪除仍有未付期款或未匯款放款單的廠商 → 409 vendor_in_use（2026-11-17）。 */
+export const VENDOR_IN_USE_TEXT = "此廠商仍有未付期款或未匯款的放款單，不能刪除";
+
+/** 廠商刪除失敗的錯誤訊息（含 apiFetch 的 `[409]` 前綴）→ 中文，其餘原樣。 */
+export function humanizeVendorDeleteError(message: string): string {
+  if (message.includes("vendor_in_use")) return VENDOR_IN_USE_TEXT;
+  return message;
+}
+
 /** 廠商儲存失敗的錯誤訊息：認得名冊身分／帳戶變更的錯誤碼（含 apiFetch 的 `[409]` 前綴）就換成中文，其餘原樣。 */
 export function humanizeVendorIdentityError(message: string): string {
   if (message.includes("vendor_identity_change")) return VENDOR_IDENTITY_CHANGE_TEXT;
   if (message.includes("vendor_has_open_disbursements")) return VENDOR_HAS_OPEN_DISBURSEMENTS_TEXT;
   if (message.includes("change_reason_required")) return VENDOR_CHANGE_REASON_REQUIRED_TEXT;
+  if (message.includes("invalid_vendor_name")) return INVALID_VENDOR_NAME_TEXT;
   return message;
 }
 

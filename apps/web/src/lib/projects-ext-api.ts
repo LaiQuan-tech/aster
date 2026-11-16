@@ -657,6 +657,7 @@ export function putSubcontractPayments(
 }
 
 export const SUBCONTRACT_ERRORS: Record<string, string> = {
+  must_bind_vendor: "此名稱與名冊廠商相同，請在下拉選擇名冊廠商。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_contract: "選到的合約不屬於本專案或已作廢。",
   invalid_company: "選到的公司主體不存在。",

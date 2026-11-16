@@ -164,3 +164,77 @@ describe("R2：改收款帳戶（2026-11-16 第四輪）", () => {
     expect(audits()).toHaveLength(0)
   })
 })
+
+describe("第五輪（2026-11-17）：嚴格稽核、刪廠商擋、名稱不可見字元", () => {
+  const unpaid = () => [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, amount: "1000", override_amount: null, paid_on: null, paid_amount: null, withheld_amount: "0" }]
+  const hrApp = () => {
+    fake.db.employees!.push({ id: "bbbbbbbb-0000-4000-8000-000000000002", tenant_id: TENANT_ID, user_id: "vendor-hr-tester", role: "hr_admin", dept_id: null })
+    return (req: request.Test) => req.set("Authorization", "Bearer vendor-hr-tester")
+  }
+
+  it("第 6 項：改帳戶的稽核寫在更新之前；稽核寫失敗 → 500、名冊不改", async () => {
+    fake.db.project_subcontract_payments = unpaid()
+    fake.injectError({ table: "audit_logs", action: "insert", error: { message: "測試：稽核寫入失敗" } })
+    const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "測試原因" })
+    expect(res.status).toBe(500)
+    expect(vendorUpdates()).toHaveLength(0)
+    expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000001" })
+    const ok = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "測試原因" })
+    expect(ok.status).toBe(200)
+    const order = fake.writes.filter((w) => w.table === "audit_logs" || (w.table === "vendors" && w.action === "update")).map((w) => w.table)
+    expect(order).toEqual(["audit_logs", "vendors"])
+  })
+
+  it("第 3 項：有未付期款 → DELETE 409 vendor_in_use、0 寫入", async () => {
+    const hr = hrApp()
+    fake.db.project_subcontract_payments = unpaid()
+    const res = await hr(request(app).delete(`/vendors/${VENDOR}`))
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: "vendor_in_use", message: "此廠商仍有未付期款或未匯款的放款單，不能刪除" })
+    expect(vendorUpdates()).toHaveLength(0)
+    expect(fake.db.vendors[0]!.deleted_at).toBeNull()
+  })
+
+  it("第 3 項：有未匯款放款單（draft／pending_approval／approved）→ DELETE 409", async () => {
+    const hr = hrApp()
+    for (const status of ["draft", "pending_approval", "approved"]) {
+      fake.db.disbursements = [{ id: "d1", tenant_id: TENANT_ID, vendor_id: VENDOR, status }]
+      const res = await hr(request(app).delete(`/vendors/${VENDOR}`))
+      expect(res.status, status).toBe(409)
+      expect(res.body.error).toBe("vendor_in_use")
+    }
+  })
+
+  it("第 3 項：期款已付清、放款單已匯款／作廢、副委託已刪 → DELETE 200", async () => {
+    const hr = hrApp()
+    fake.db.project_subcontract_payments = [
+      { ...unpaid()[0], paid_on: "2026-10-01", paid_amount: "1000" },
+      { ...unpaid()[0], id: "pay2", subcontract_id: SUB_DELETED },
+    ]
+    fake.db.disbursements = [
+      { id: "d1", tenant_id: TENANT_ID, vendor_id: VENDOR, status: "paid" },
+      { id: "d2", tenant_id: TENANT_ID, vendor_id: VENDOR, status: "void" },
+    ]
+    const res = await hr(request(app).delete(`/vendors/${VENDOR}`))
+    expect(res.status).toBe(200)
+    expect(fake.db.vendors[0]!.deleted_at).not.toBeNull()
+  })
+
+  it("第 4 項：新建／修改名稱或帳戶戶名含不可見字元 → 400 invalid_vendor_name、0 寫入", async () => {
+    const bad = ["測試甲️工程行", "測試甲工程行ㅤ", "測試⠀甲工程行", "測試͏甲工程行", "測試ᅟ甲工程行", "測試ᅠ甲", "測試ﾠ甲", "測試​甲"]
+    for (const name of bad) {
+      fake.writes.length = 0
+      const post = await authed(request(app).post("/vendors")).send({ name })
+      expect(post.status, name).toBe(400)
+      expect(post.body).toMatchObject({ error: "invalid_vendor_name", message: "名稱含有不可見字元，請重新輸入" })
+      const patch = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ name })
+      expect(patch.status, name).toBe(400)
+      const holder = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ accountHolder: name })
+      expect(holder.status, name).toBe(400)
+      expect(fake.writes.filter((w) => w.table === "vendors")).toHaveLength(0)
+    }
+    // 一般名稱（含標點、重音字母）照常
+    const ok = await authed(request(app).post("/vendors")).send({ name: "測試(股)丙工程行－Café" })
+    expect(ok.status).toBe(201)
+  })
+})

@@ -216,10 +216,23 @@ describe("正常業務回歸 N1–N8", () => {
     expect(pa.status, r(pa)).toBe(200)
     expect(await approveFlow(id)).toBe("submit 200 approve approved")
   })
-  it("登錄廠商零分攤（非專案支出，填用途）→ 送審→核准→付款", async () => {
-    const c = await create({ payeeKind: "vendor", vendorId: VA, payingCompanyId: COMPANY, method: "transfer", amount: 500, withheldAmount: 0, purpose: "測試印刷費", status: "draft", allocations: [] })
+  it("登錄廠商零分攤（非專案支出，填用途；廠商仍有未付期款須勾確認）→ 送審→核准→付款", async () => {
+    const zero = { payeeKind: "vendor", vendorId: VA, payingCompanyId: COMPANY, method: "transfer", amount: 500, withheldAmount: 0, purpose: "測試印刷費", status: "draft", allocations: [] }
+    const unconfirmed = await create(zero)
+    expect(unconfirmed.status).toBe(409)
+    expect(unconfirmed.body.error).toBe("vendor_has_unpaid_installments")
+    const c = await create({ ...zero, confirmNonInstallment: true })
     expect(c.status, r(c)).toBe(201)
     expect(await approveFlow(c.body.disbursement.id)).toBe("submit 200 approve approved")
     expect((await pay(c.body.disbursement.id)).status).toBe(200)
+  })
+  it("名冊沒有未付期款的廠商零分攤 → 不用勾確認；副委託整份原樣存檔照常", async () => {
+    const c = await create({ payeeKind: "vendor", vendorId: VE, payingCompanyId: COMPANY, method: "transfer", amount: 500, withheldAmount: 0, purpose: "測試快遞費", status: "draft", allocations: [] })
+    expect(c.status, r(c)).toBe(201)
+    const subs = (await as(request(app).get(`/projects/${P1}/subcontracts`))).body.subcontracts as Row[]
+    const put = await as(request(app).put(`/projects/${P1}/subcontracts`)).send({
+      subcontracts: subs.map((x) => ({ id: x.id, kind: x.kind, vendorId: x.vendorId ?? null, vendorName: x.vendorName, amount: x.amount })),
+    })
+    expect(put.status, r(put)).toBe(200)
   })
 })

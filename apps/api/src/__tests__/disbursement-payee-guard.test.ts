@@ -56,6 +56,8 @@ const paymentRow = (id: string, subId: string, no = 1): Row => ({
 const subRow = (id: string, vendorId: string | null, vendorName: string): Row => ({
   id, tenant_id: TENANT_ID, project_id: PROJECT, deleted_at: null, kind: "subcontract", amount: "2000",
   withholding_rate: "0", withholding_threshold: 20000, vendor_id: vendorId, vendor_name: vendorName,
+  // 第五輪：#4 只放行截止時間（2026-11-17）前建立的非登錄副委託。
+  created_at: "2026-01-01T00:00:00.000Z",
 })
 
 beforeEach(() => {
@@ -660,7 +662,7 @@ describe("N-1：送簽／核准／付款前重驗收款帳戶快照＝名冊現�
   const changedErr = {
     httpStatus: 409,
     code: "payee_bank_changed",
-    details: expect.objectContaining({ message: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出" }),
+    details: expect.objectContaining({ message: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出；已核准的單請先撤回簽核再編輯" }),
   }
 
   it("名冊改帳號 → 舊草稿送簽 409 payee_bank_changed，不建簽核關卡", async () => {
@@ -823,7 +825,7 @@ describe("R3 第四輪：戶名正規化比對＋#4 非登錄副委託同名放�
 
   it("中間空白、全形空白、零寬、大小寫、全形英數、加（股）／公司後綴、簡稱 → 全部 400", async () => {
     const variants = [
-      "測試 甲工程行", "測試　甲工程行", "測試​甲工程行", "測試甲工程行‍", "測試甲工程行（股）", "測試甲工程行(股)公司",
+      "測試 甲工程行", "測試　甲工程行", "測試甲工程行（股）", "測試甲工程行(股)公司",
       "測試甲工程行股份有限公司", "測甲工", "測試甲工程行 王小明", "TEST ALPHA", "ｔｅｓｔ　ａｌｐｈａ", "test alpha inc.", "Test Alpha Co.,Ltd",
     ]
     for (const name of variants) {
@@ -832,6 +834,12 @@ describe("R3 第四輪：戶名正規化比對＋#4 非登錄副委託同名放�
       expect(res.status, name).toBe(400)
       expect(res.body.error, name).toBe("payee_is_registered_vendor")
       expect(anyWrites()).toHaveLength(0)
+    }
+    // 第五輪：零寬字元改為直接 400 invalid_payee_name（不可見字元一律拒收）。
+    for (const name of ["測試​甲工程行", "測試甲工程行‍"]) {
+      const res = await as(request(app).post("/disbursements")).send(other(name))
+      expect(res.status, name).toBe(400)
+      expect(res.body.error, name).toBe("invalid_payee_name")
     }
   })
 
@@ -868,13 +876,13 @@ describe("第 6 項：登錄廠商零分攤（非專案支出）須填用途", (
     expect(ok.status, JSON.stringify(ok.body)).toBe(201)
   })
 
-  it("草稿 PATCH 拿掉所有分攤又清空用途 → 400；有用途 → 200", async () => {
-    fake.db.disbursements = [draftRow()]
-    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+  it("零分攤草稿 PATCH 清空用途 → 400；有用途 → 200（已分攤的單清成零分攤另見第五輪 cannot_clear_allocations）", async () => {
+    fake.db.disbursements = [draftRow({ purpose: "測試印刷費" })]
+    fake.db.disbursement_allocations = []
     const bad = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: [], purpose: "" })
     expect(bad.status).toBe(400)
     expect(bad.body.error).toBe("purpose_required")
-    const ok = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: [], purpose: "測試印刷費" })
+    const ok = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: [], purpose: "測試快遞費" })
     expect(ok.status, JSON.stringify(ok.body)).toBe(200)
   })
 })
@@ -894,5 +902,199 @@ describe("A2 第四輪：MCP 確認頁顯示銀行代碼／銀行名稱；非數
     expect(maskAccount("ＡＢ１２３４５６")).toBe("****3456")
     expect(maskAccount("ABCDEF 測試戶名")).toBe("****")
     expect(maskAccount("")).toBe("?")
+  })
+})
+
+describe("第五輪（2026-11-17）", () => {
+  const VENDOR_D = "aaaaaaaa-0000-4000-8000-00000000000f"
+  const SUB_FREE2 = "dddddddd-0000-4000-8000-0000000000a9"
+  const PAY_FREE2 = "dddddddd-0000-4000-8000-0000000000b9"
+  const audits = () => writesTo("audit_logs")
+  beforeEach(() => {
+    fake.db.vendors!.push({
+      id: VENDOR_D, tenant_id: TENANT_ID, name: "測試非登錄下包有限公司", short_name: null, bank_name: null, bank_code: null, bank_account: null,
+      account_holder: null, deleted_at: null,
+    })
+    fake.db.project_subcontracts!.push(subRow(SUB_FREE2, null, "測試另一非登錄"))
+    fake.db.project_subcontract_payments!.push(paymentRow(PAY_FREE2, SUB_FREE2))
+  })
+  const other = (name: string, allocations: unknown[] = []) => body({ payeeKind: "other", vendorId: null, payeeName: name, allocations })
+
+  describe("第 1 項 #4 截止時間：副委託建立時間", () => {
+    it("截止前建立的非登錄同名副委託 → 放行 201；截止後建立的 → 400", async () => {
+      const ok = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
+      expect(ok.status, JSON.stringify(ok.body)).toBe(201)
+      fake.db.project_subcontracts = fake.db.project_subcontracts!.map((s) =>
+        s.id === SUB_FREE ? { ...s, created_at: "2026-11-17T00:00:00+08:00" } : s,
+      )
+      const late = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
+      expect(late.status).toBe(400)
+      expect(late.body.error).toBe("payee_is_registered_vendor")
+    })
+  })
+
+  describe("第 2 項：「其他」單改分攤也重驗冒用", () => {
+    const legacyOther = () => {
+      // 舊單：戶名剛好是名冊廠商（乙），分攤到不同名的非登錄副委託（規則上線前建的）。
+      fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試乙工程行", payee_bank_account: "123", payee_bank_code: null, payee_bank_name: null })]
+      fake.db.disbursement_allocations = [allocRow(SUB_FREE, PAY_FREE)]
+    }
+    it("分攤沒變（整份表單回送、只改備註）→ 200（不回溯）", async () => {
+      legacyOther()
+      const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ note: "補備註", allocations: allocTo(SUB_FREE, PAY_FREE) })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+    })
+    it("替換分攤 → 400 payee_is_registered_vendor，單據不動", async () => {
+      legacyOther()
+      const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: allocTo(SUB_FREE2, PAY_FREE2) })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe("payee_is_registered_vendor")
+      expect(anyWrites()).toHaveLength(0)
+    })
+    it("新增分攤 → 400", async () => {
+      legacyOther()
+      fake.db.disbursements = [{ ...fake.db.disbursements![0]!, amount: 2000 }]
+      const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({
+        allocations: [...allocTo(SUB_FREE, PAY_FREE), ...allocTo(SUB_FREE2, PAY_FREE2)],
+      })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe("payee_is_registered_vendor")
+    })
+    it("清成零分攤 → 被擋（400 cannot_clear_allocations），單據不動", async () => {
+      legacyOther()
+      const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: [] })
+      expect(res.status).toBe(400)
+      expect(res.body).toMatchObject({ error: "cannot_clear_allocations", message: "已分攤的放款單不能改成零分攤，請作廢後重開" })
+      expect(anyWrites()).toHaveLength(0)
+    })
+    it("同名非登錄副委託的正常單（戶名＝副委託名稱）替換成同名另一期 → 200", async () => {
+      fake.db.project_subcontract_payments!.push(paymentRow("dddddddd-0000-4000-8000-0000000000ba", SUB_FREE, 2))
+      fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試非登錄下包", payee_bank_account: "123", payee_bank_code: null, payee_bank_name: null })]
+      fake.db.disbursement_allocations = [allocRow(SUB_FREE, PAY_FREE)]
+      const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: allocTo(SUB_FREE, "dddddddd-0000-4000-8000-0000000000ba") })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+    })
+  })
+
+  describe("第 4 項：不可見字元與標點變體", () => {
+    it("驗收變體全部 400（不可見字元 invalid_payee_name；標點／(股) 前綴 payee_is_registered_vendor）", async () => {
+      const invisible = ["測試甲️工程行", "測試甲ㅤ工程行", "ㅤ測試甲工程行", "測試甲⠀工程行", "測試甲͏工程行", "測試甲ᅟ工程行", "測試甲ᅠ工程行", "測試甲ﾠ工程行"]
+      for (const name of invisible) {
+        fake.writes.length = 0
+        const res = await as(request(app).post("/disbursements")).send(other(name))
+        expect(res.status, name).toBe(400)
+        expect(res.body, name).toMatchObject({ error: "invalid_payee_name", message: "名稱含有不可見字元，請重新輸入" })
+        expect(anyWrites()).toHaveLength(0)
+      }
+      for (const name of ["測試甲工程行.", "測試甲-工程行", "測試甲・工程行", "(股)測試甲工程行", "（股）測試甲工程行", "測試甲工程行(股)。"]) {
+        const res = await as(request(app).post("/disbursements")).send(other(name))
+        expect(res.status, name).toBe(400)
+        expect(res.body.error, name).toBe("payee_is_registered_vendor")
+      }
+    })
+    it("登錄廠商單的戶名含不可見字元也 400；PATCH 只改備註的舊單不回溯", async () => {
+      const res = await as(request(app).post("/disbursements")).send(body({ payeeName: "測試甲工程行️" }))
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe("invalid_payee_name")
+      fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試舊單​收款人", payee_bank_account: "123", payee_bank_code: null, payee_bank_name: null })]
+      fake.db.disbursement_allocations = [allocRow(SUB_FREE, PAY_FREE)]
+      const note = await as(request(app).patch(`/disbursements/${DISB}`)).send({ note: "補備註" })
+      expect(note.status, JSON.stringify(note.body)).toBe(200)
+      const bad = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeName: "測試新​收款人" })
+      expect(bad.status).toBe(400)
+      expect(bad.body.error).toBe("invalid_payee_name")
+    })
+    it("簡稱 key 只有 2 字不誤擋；帳戶戶名與名稱不同且只有 2 字也不擋；名稱本身照比", async () => {
+      fake.db.vendors = fake.db.vendors!.map((v) =>
+        v.id === VENDOR_B ? { ...v, short_name: "乙工", account_holder: "王五" } : v,
+      )
+      for (const name of ["乙工", "王五", "乙工(股)"]) {
+        const res = await as(request(app).post("/disbursements")).send(other(name))
+        expect(res.status, name).toBe(201)
+      }
+      const res = await as(request(app).post("/disbursements")).send(other("測試乙工程行"))
+      expect(res.status).toBe(400)
+    })
+  })
+
+  describe("第 5 項：登錄廠商零分攤、廠商仍有未付期款", () => {
+    const zero = (over: Row = {}) => body({ vendorId: VENDOR_B, allocations: [], purpose: "測試印刷費", ...over })
+    it("沒勾確認 → 409 vendor_has_unpaid_installments、零寫入；勾了 → 201 並寫稽核（在建單之前）", async () => {
+      const bad = await as(request(app).post("/disbursements")).send(zero())
+      expect(bad.status).toBe(409)
+      expect(bad.body).toMatchObject({
+        error: "vendor_has_unpaid_installments",
+        message: "此廠商仍有未付期款，若要付期款請改用分攤；確定為非期款支出請勾選確認",
+      })
+      expect(fake.writes).toHaveLength(0)
+      const ok = await as(request(app).post("/disbursements")).send(zero({ confirmNonInstallment: true }))
+      expect(ok.status, JSON.stringify(ok.body)).toBe(201)
+      const order = fake.writes.map((w) => w.table)
+      expect(order.indexOf("audit_logs")).toBeGreaterThanOrEqual(0)
+      expect(order.indexOf("audit_logs")).toBeLessThan(order.indexOf("disbursements"))
+      expect(audits()[0]!.payload).toMatchObject({ table_name: "disbursements", new_row: expect.objectContaining({ confirmNonInstallment: true, vendor_id: VENDOR_B }) })
+    })
+    it("稽核寫失敗 → 500、不建單", async () => {
+      fake.injectError({ table: "audit_logs", action: "insert", error: { message: "測試：稽核寫入失敗" } })
+      const res = await as(request(app).post("/disbursements")).send(zero({ confirmNonInstallment: true }))
+      expect(res.status).toBe(500)
+      expect(writesTo("disbursements")).toHaveLength(0)
+    })
+    it("廠商期款都已付清 → 不用確認，201", async () => {
+      fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) =>
+        p.id === PAY_B ? { ...p, paid_on: "2026-10-01", paid_amount: "1000" } : p,
+      )
+      const res = await as(request(app).post("/disbursements")).send(zero())
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      expect(audits().filter((a) => JSON.stringify(a.payload).includes("confirmNonInstallment"))).toHaveLength(0)
+    })
+    it("PATCH：「其他」零分攤草稿換成有未付期款的登錄廠商 → 409；帶確認 → 200", async () => {
+      fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試任意收款人", purpose: "測試印刷費", payee_bank_account: null, payee_bank_code: null, payee_bank_name: null })]
+      fake.db.disbursement_allocations = []
+      const bad = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeKind: "vendor", vendorId: VENDOR_B, payeeName: null })
+      expect(bad.status).toBe(409)
+      expect(bad.body.error).toBe("vendor_has_unpaid_installments")
+      expect(anyWrites()).toHaveLength(0)
+      const ok = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeKind: "vendor", vendorId: VENDOR_B, payeeName: null, confirmNonInstallment: true })
+      expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+      expect(fake.db.disbursements![0]).toMatchObject({ payee_kind: "vendor", vendor_id: VENDOR_B })
+    })
+    it("PATCH：既有登錄廠商零分攤草稿只改備註（整份回送）→ 不重問，200", async () => {
+      fake.db.disbursements = [draftRow({ vendor_id: VENDOR_B, payee_name: "測試乙工程行", purpose: "測試印刷費", payee_bank_account: "0000222", payee_bank_name: "測試銀行" })]
+      fake.db.disbursement_allocations = []
+      const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ note: "補備註", allocations: [], payeeKind: "vendor", vendorId: VENDOR_B })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+    })
+    it("PATCH：已分攤的登錄廠商單清成零分攤 → 400 cannot_clear_allocations", async () => {
+      fake.db.disbursements = [draftRow({ vendor_id: VENDOR_B, payee_name: "測試乙工程行", purpose: "測試印刷費" })]
+      fake.db.disbursement_allocations = [allocRow(SUB_B, PAY_B)]
+      const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: [], confirmNonInstallment: true })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe("cannot_clear_allocations")
+      expect(anyWrites()).toHaveLength(0)
+    })
+  })
+
+  describe("第 7 項：N-1 也比對銀行名稱", () => {
+    const actor = { empId: HR, role: "hr_admin" }
+    const approved = (over: Row = {}) => draftRow({ status: "approved", approved_at: "2026-11-01T00:00:00.000Z", ...over })
+    it("名冊改銀行名 → 付款 409 payee_bank_changed（訊息含撤回簽核）", async () => {
+      fake.db.disbursements = [approved()]
+      fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+      fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_A ? { ...v, bank_name: "另一家測試銀行" } : v))
+      await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject({
+        code: "payee_bank_changed",
+        details: expect.objectContaining({ message: expect.stringContaining("已核准的單請先撤回簽核再編輯") }),
+      })
+    })
+    it("快照格式寬鬆接受：原始銀行名、「銀行名（代碼）」、半形括號、含空白、空白快照 → 付款照常", async () => {
+      for (const snap of ["測試銀行", "測試銀行（999）", "測試銀行(999)", " 測試銀行 (999) ", null]) {
+        fake.db.disbursements = [approved({ payee_bank_name: snap })]
+        fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+        fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.id === PAY_A ? { ...p, paid_on: null, paid_amount: null, disbursement_id: null } : p))
+        const paid = await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })
+        expect(paid?.status, String(snap)).toBe("paid")
+      }
+    })
   })
 })

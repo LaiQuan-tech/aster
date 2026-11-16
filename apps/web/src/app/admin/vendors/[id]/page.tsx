@@ -20,7 +20,7 @@ import { Button, Card, Empty, ErrorText, Pill, inputCls, labelCls, useToast } fr
 import { RosterDetailHeader, RosterSaveBar, RosterSection, useRosterRoles } from "@/components/roster-detail";
 import { useUnsavedChangesGuard } from "@/components/useUnsavedChangesGuard";
 import { humanizeAffiliateError } from "@/lib/affiliate";
-import { humanizeVendorIdentityError, isChangeReasonRequired } from "@/lib/vendor-name-binding";
+import { humanizeVendorDeleteError, humanizeVendorIdentityError, isChangeReasonRequired } from "@/lib/vendor-name-binding";
 import {
   listVendors, createVendor, updateVendor, deleteVendor, getVendorCardUrl, scanVendorCard,
   type Vendor, type VendorInput, type VendorRosterKind,
@@ -215,7 +215,7 @@ export default function VendorDetailPage() {
       toast.show("已刪除廠商", "success");
       leave(LIST_HREF);
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "刪除失敗");
+      setSaveError(err instanceof Error ? humanizeVendorDeleteError(err.message) : "刪除失敗");
     }
   }
 

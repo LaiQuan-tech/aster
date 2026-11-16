@@ -102,6 +102,8 @@ const createBody = z.object({
   forceReason: z.string().trim().max(500).nullish(),
   /** HR 勾「未驗收仍要放款」（M5）。 */
   forceAcceptance: z.boolean().optional(),
+  /** 登錄廠商零分攤、廠商仍有未付期款時確認「不是付期款」（第五輪，寫稽核）。 */
+  confirmNonInstallment: z.boolean().optional(),
 })
 
 const patchBody = createBody.omit({ status: true }).partial()

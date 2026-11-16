@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { engineerForTypedName, humanizeVendorIdentityError, isChangeReasonRequired, vendorIdForTypedName } from "../vendor-name-binding";
+import { engineerForTypedName, humanizeVendorDeleteError, humanizeVendorIdentityError, isChangeReasonRequired, vendorIdForTypedName } from "../vendor-name-binding";
+import { humanizeSubcontractError } from "../projects-ext-api";
 
 /**
  * VendorCombo 手改名稱欄時 vendorId 的綁定規則（2026-11-16）。
@@ -80,5 +81,14 @@ describe("humanizeVendorIdentityError — 名冊同時改名稱與帳戶被 409 
     expect(isChangeReasonRequired("[400] change_reason_required")).toBe(true);
     expect(isChangeReasonRequired("[409] vendor_has_open_disbursements")).toBe(false);
     expect(humanizeVendorIdentityError("[500] boom")).toBe("[500] boom");
+  });
+});
+
+describe("第五輪（2026-11-17）中文訊息", () => {
+  it("名稱不可見字元、刪除仍有往來的廠商、副委託須綁名冊廠商", () => {
+    expect(humanizeVendorIdentityError("[400] invalid_vendor_name")).toBe("名稱含有不可見字元，請重新輸入");
+    expect(humanizeVendorDeleteError("[409] vendor_in_use")).toBe("此廠商仍有未付期款或未匯款的放款單，不能刪除");
+    expect(humanizeVendorDeleteError("[500] boom")).toBe("[500] boom");
+    expect(humanizeSubcontractError(new Error("[409] must_bind_vendor"), "x")).toBe("此名稱與名冊廠商相同，請在下拉選擇名冊廠商。");
   });
 });

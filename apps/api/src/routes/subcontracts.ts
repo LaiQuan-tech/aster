@@ -23,6 +23,8 @@ import {
   type PaymentRow,
 } from "../services/project-application-store.js"
 import { loadPaymentAcceptance, paymentsHaveAcceptance } from "../services/disbursements.js"
+import { payeeNameKey } from "../lib/payee-name.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { firstNewlyPickedInactive } from "../services/company-lifecycle.js"
 import { writeAuditLog } from "../services/audit.js"
 import { columnsExist } from "../lib/schema-compat.js"
@@ -495,6 +497,42 @@ subcontractsRouter.put(
             })
             return
           }
+        }
+      }
+
+      // 第五輪 #4（2026-11-17）：新建列、或既有列改名／解除綁定成非登錄（vendorId null），而名稱 key 等於同租戶未刪名冊廠商的
+      // 名稱 key（只比 name，不比簡稱／戶名）→ 409 must_bind_vendor。不然「其他」收款能用同名非登錄副委託繞過名冊帳戶。
+      // 既有列未改名、原樣存檔不擋。
+      const unboundCandidates = payload.filter((p) => {
+        const prev = p.id ? existingById.get(p.id) : undefined
+        const prevVendorId = prev?.vendor_id ? prev.vendor_id.toLowerCase() : null
+        const finalVendorId = p.vendorId !== undefined ? (p.vendorId ?? null) : prevVendorId
+        if (finalVendorId) return false
+        const finalName = p.vendorName !== undefined ? p.vendorName : (prev?.vendor_name ?? null)
+        if (!(finalName ?? "").trim()) return false
+        if (!prev) return true
+        const renamed = p.vendorName !== undefined && (p.vendorName ?? "").trim() !== (prev.vendor_name ?? "").trim()
+        return renamed || prevVendorId !== null
+      })
+      if (unboundCandidates.length > 0) {
+        const roster = await selectAllPages<{ id: string; name: string | null }>(
+          (from, to) =>
+            supabaseAdmin.from("vendors").select("id, name").eq("tenant_id", tenantId).is("deleted_at", null).order("id").range(from, to),
+          `PUT /projects/${projectId}/subcontracts (roster names)`,
+        )
+        const rosterKeys = new Set(roster.map((v) => ((v.name ?? "").trim() ? payeeNameKey(v.name) : "")).filter(Boolean))
+        const hit = unboundCandidates.find((p) => {
+          const prev = p.id ? existingById.get(p.id) : undefined
+          const finalName = p.vendorName !== undefined ? p.vendorName : (prev?.vendor_name ?? null)
+          return rosterKeys.has(payeeNameKey(finalName))
+        })
+        if (hit) {
+          res.status(409).json({
+            error: "must_bind_vendor",
+            id: hit.id ?? null,
+            message: "此名稱與名冊廠商相同，請在下拉選擇名冊廠商",
+          })
+          return
         }
       }
 

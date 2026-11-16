@@ -4,7 +4,9 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { writeAuditLog } from "../services/audit.js"
+import { writeAuditLogStrict } from "../services/audit.js"
+import { vendorHasOpenDisbursements, vendorHasUnpaidInstallments } from "../services/vendor-unpaid.js"
+import { hasInvisibleNameChars, INVISIBLE_NAME_MESSAGE } from "../lib/payee-name.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
@@ -254,6 +256,10 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
     res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
     return
   }
+  if (invisibleVendorName(parsed.data)) {
+    res.status(400).json(INVALID_VENDOR_NAME)
+    return
+  }
   try {
     const self = userId ? await resolveSelf(tenantId, userId) : null
     if (parsed.data.isAffiliate === true && !isHrRole(self?.role)) {
@@ -287,7 +293,12 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
 const BANK_FIELDS: Array<[keyof z.infer<typeof vendorBody>, string]> = [
   ["bankCode", "bank_code"], ["bankName", "bank_name"], ["bankAccount", "bank_account"], ["accountHolder", "account_holder"],
 ]
-const UNSETTLED_DISBURSEMENT_STATUSES = ["draft", "pending_approval", "approved"]
+
+/** R3 第五輪（2026-11-17）：名冊名稱／帳戶戶名不可含不可見字元（零寬、變體選擇符、組合符號、韓文填充字…）。 */
+function invisibleVendorName(body: Partial<z.infer<typeof vendorBody>>): boolean {
+  return hasInvisibleNameChars(body.name) || hasInvisibleNameChars(body.accountHolder)
+}
+const INVALID_VENDOR_NAME = { error: "invalid_vendor_name", message: INVISIBLE_NAME_MESSAGE }
 
 type BankChangeCheck = {
   /** 名稱（trim 後不同）與收款帳戶同時改、且有未付款項 → 409 vendor_identity_change。 */
@@ -327,40 +338,8 @@ async function checkBankChange(tenantId: string, vendorId: string, body: Partial
   if (!bankChanged) return none
   const nameChanged = body.name !== undefined && norm(body.name) !== norm(cur.name)
 
-  const { data: open, error: disErr } = await supabaseAdmin
-    .from("disbursements")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("vendor_id", vendorId)
-    .in("status", UNSETTLED_DISBURSEMENT_STATUSES)
-    .limit(1)
-  if (disErr) throw new Error(`PATCH /vendors/${vendorId} (load disbursements): ${disErr.message}`)
-  const hasOpen = (open ?? []).length > 0
-
-  let hasUnpaid = false
-  const { data: subs, error: subErr } = await supabaseAdmin
-    .from("project_subcontracts")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("vendor_id", vendorId)
-    .is("deleted_at", null)
-  if (subErr) throw new Error(`PATCH /vendors/${vendorId} (load subcontracts): ${subErr.message}`)
-  const subIds = (subs ?? []).map((r) => (r as { id: string }).id)
-  for (let i = 0; i < subIds.length && !hasUnpaid; i += 100) {
-    const { data: pays, error: payErr } = await supabaseAdmin
-      .from("project_subcontract_payments")
-      .select("id, amount, override_amount, paid_on, paid_amount, withheld_amount")
-      .eq("tenant_id", tenantId)
-      .in("subcontract_id", subIds.slice(i, i + 100))
-    if (payErr) throw new Error(`PATCH /vendors/${vendorId} (load payments): ${payErr.message}`)
-    const n = (v: unknown) => (v === null || v === undefined || v === "" ? null : Number(v))
-    hasUnpaid = ((pays ?? []) as Array<Record<string, unknown>>).some((p) => {
-      if (!p.paid_on) return true
-      const due = n(p.override_amount) ?? n(p.amount) ?? 0
-      const paid = (n(p.paid_amount) ?? 0) + (n(p.withheld_amount) ?? 0)
-      return paid < due - 0.01
-    })
-  }
+  const hasOpen = await vendorHasOpenDisbursements(tenantId, vendorId, `PATCH /vendors/${vendorId}`)
+  const hasUnpaid = await vendorHasUnpaidInstallments(tenantId, vendorId, `PATCH /vendors/${vendorId}`)
 
   const before = Object.fromEntries(BANK_FIELDS.map(([, col]) => [col, cur[col] ?? null]))
   return {
@@ -383,6 +362,10 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
   }
   if (Object.keys(toRow(parsed.data as z.infer<typeof vendorBody>)).length === 0) {
     res.status(400).json({ error: "no_fields" })
+    return
+  }
+  if (invisibleVendorName(parsed.data)) {
+    res.status(400).json(INVALID_VENDOR_NAME)
     return
   }
   try {
@@ -439,6 +422,28 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
       })
       return
     }
+    if (bankCheck.needsReason) {
+      // 第五輪（2026-11-17）：稽核改嚴格且寫在 update 之前——稽核寫不進去就不改帳戶（500）。
+      const actor = userId ? await resolveSelf(tenantId, userId) : null
+      const norm = (v: unknown) => {
+        const t = typeof v === "string" ? v.trim() : ""
+        return t === "" ? null : t
+      }
+      const body = parsed.data as Partial<z.infer<typeof vendorBody>>
+      await writeAuditLogStrict({
+        tenantId,
+        tableName: "vendors",
+        recordId: id,
+        action: "UPDATE",
+        oldRow: bankCheck.before,
+        newRow: {
+          ...Object.fromEntries(BANK_FIELDS.map(([k, col]) => [col, body[k] !== undefined ? norm(body[k]) : (bankCheck.before?.[col] ?? null)])),
+          changeReason,
+        },
+        actorEmpId: actor?.id ?? null,
+        context: "PATCH /vendors/:id 更改收款帳戶（有未付期款）",
+      })
+    }
     const { data, error } = await withVendorCols((cols, roster) => {
       if (!roster && present.length > 0) return migrationBlocked()
       const row = toRow(parsed.data as z.infer<typeof vendorBody>, roster)
@@ -464,20 +469,6 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
       res.status(404).json({ error: "not_found" })
       return
     }
-    if (bankCheck.needsReason) {
-      const after = data as unknown as Record<string, unknown>
-      const actor = userId ? await resolveSelf(tenantId, userId) : null
-      await writeAuditLog({
-        tenantId,
-        tableName: "vendors",
-        recordId: id,
-        action: "UPDATE",
-        oldRow: bankCheck.before,
-        newRow: { ...Object.fromEntries(BANK_FIELDS.map(([, col]) => [col, after[col] ?? null])), changeReason },
-        actorEmpId: actor?.id ?? null,
-        context: "PATCH /vendors/:id 更改收款帳戶（有未付期款）",
-      })
-    }
     res.status(200).json({ vendor: serialize(data as unknown as Record<string, unknown>) })
   } catch (err) {
     next(err)
@@ -489,6 +480,13 @@ vendorsRouter.delete("/vendors/:id", requireAuth, requireTenant, requireHrAdmin,
   const tenantId = res.locals.tenantId as string
   const id = req.params.id as string
   try {
+    // 第五輪（2026-11-17）：還有未付期款或未匯款放款單的廠商不能刪——刪了之後名冊帶不出帳戶、
+    // 同名「其他」收款也不再被擋，期款就可能匯給冒名帳戶。
+    const label = `DELETE /vendors/${id}`
+    if ((await vendorHasUnpaidInstallments(tenantId, id, label)) || (await vendorHasOpenDisbursements(tenantId, id, label))) {
+      res.status(409).json({ error: "vendor_in_use", message: "此廠商仍有未付期款或未匯款的放款單，不能刪除" })
+      return
+    }
     const { data, error } = await supabaseAdmin
       .from("vendors")
       .update({ deleted_at: new Date().toISOString() })

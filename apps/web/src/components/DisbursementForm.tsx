@@ -212,6 +212,8 @@ export default function DisbursementForm({
   // M5：HR 勾「未驗收仍要放款」＋理由（只在被 acceptance_required 擋下來時出現）。
   const [forceAcceptance, setForceAcceptance] = useState(false);
   const [forceReason, setForceReason] = useState("");
+  // 第五輪第 5 項：登錄廠商零分攤、廠商仍有未付期款 → 勾選「確定為非期款支出」才送（後端 409 vendor_has_unpaid_installments 為準）。
+  const [confirmNonInstallment, setConfirmNonInstallment] = useState(false);
 
   const set = <K extends keyof typeof state>(k: K, v: (typeof state)[K]) => setState((s) => ({ ...s, [k]: v }));
 
@@ -299,6 +301,13 @@ export default function DisbursementForm({
     }));
   }
   // 零分攤＝非專案支出：「其他」直接可存；登錄廠商要填用途（後端 400 purpose_required，2026-11-16）。
+  const zeroAllocVendorHasUnpaid =
+    !restrictedFields &&
+    state.payeeKind === "vendor" &&
+    !!state.vendorId &&
+    state.allocations.length === 0 &&
+    (payables.some((p) => (p.vendorId ?? "").toLowerCase() === state.vendorId.toLowerCase()) ||
+      !!error?.includes("此廠商仍有未付期款"));
   const allowsZeroAlloc =
     state.allocations.length === 0 && (state.payeeKind === "other" || (state.payeeKind === "vendor" && !!state.purpose.trim()));
   const centsEqual = (a: number, b: number) => Math.round(a * 100) === Math.round(b * 100);
@@ -349,6 +358,7 @@ export default function DisbursementForm({
       status: state.status,
       allocations,
       ...(forceAcceptance ? { forceAcceptance: true, forceReason: forceReason.trim() } : {}),
+      ...(zeroAllocVendorHasUnpaid && confirmNonInstallment ? { confirmNonInstallment: true } : {}),
     };
   }
 
@@ -594,7 +604,20 @@ export default function DisbursementForm({
       <div className="border-t pt-3">
         <h3 className="mb-2 text-sm font-semibold text-gray-700">分攤（對應到哪些專案／期款）</h3>
         {state.allocations.length === 0 ? (
-          <p className="mb-2 text-sm text-gray-400">尚無分攤列。{state.payeeKind === "other" ? "「其他」收款方可以不分攤直接存檔。" : "登錄廠商的非專案支出（例如印刷費）可以不分攤，但必須填寫用途。"}</p>
+          <>
+            <p className="mb-2 text-sm text-gray-400">尚無分攤列。{state.payeeKind === "other" ? "「其他」收款方可以不分攤直接存檔。" : "登錄廠商的非專案支出（例如印刷費）可以不分攤，但必須填寫用途。"}</p>
+            {zeroAllocVendorHasUnpaid && (
+              <label className="mb-2 flex items-start gap-2 rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-800">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={confirmNonInstallment}
+                  onChange={(e) => setConfirmNonInstallment(e.target.checked)}
+                />
+                <span>此廠商仍有未付期款，若要付期款請改用分攤。確定這筆是非期款支出（例如印刷費），請勾選確認（會留下稽核紀錄）。</span>
+              </label>
+            )}
+          </>
         ) : (
           <div className="mb-2 overflow-x-auto">
             <table className="w-full text-sm">
