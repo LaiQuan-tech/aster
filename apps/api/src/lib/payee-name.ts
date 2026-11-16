@@ -38,12 +38,18 @@ const SPACING_MARK_KEEP: Map<string, string> = (() => {
 })()
 
 /**
- * 私用區字元（\p{Co}）：輸入一律拒收（invalidNameMessage）；已存在的舊資料在 exact key 前面加跳脫字元 U+F8FF，
- * 不會與上面的佔位字元（™ → U+E122…、獨立附加符號 → U+E200…）撞在一起；相近級別直接去掉。
+ * 私用區字元（\p{Co}，造字姓名／戶名）：2026-11-17 起不再拒收；exact 與相近兩級一律在每個私用區字元前面加跳脫字元 U+F8FF
+ *（U+F8FF 本身也是私用區字元，同樣被跳脫）再參與比對。跳脫後的序列（U+F8FF＋原字元）與上面的佔位字元
+ *（™ → U+E122…、獨立附加符號 → U+E200…，前面不會有 U+F8FF）不會撞在一起。
  */
 const PRIVATE_USE_RE = /\p{Co}/gu
 const PRIVATE_USE_CHAR_RE = /^\p{Co}$/u
 const PRIVATE_USE_ESCAPE = "\uF8FF"
+
+/** 私用區字元一律加跳脫（相近級別用；exact 級別在 protectForExact 裡一起處理）。 */
+function escapePrivateUse(s: string): string {
+  return s.replace(PRIVATE_USE_RE, (ch) => PRIVATE_USE_ESCAPE + ch)
+}
 
 /** exact key 的 NFKC 前處理：私用區字元加跳脫、™ ℠ ℡ 與獨立附加符號換成佔位字元。 */
 function protectForExact(s: string): string {
@@ -62,7 +68,7 @@ function protectForExact(s: string): string {
  */
 function normalizeRaw(name: string | null | undefined, annotations: boolean): string {
   let s = String(name ?? "")
-  s = annotations ? s.replace(PRIVATE_USE_RE, "").replace(ANNOTATION_STRIP_RE, "") : protectForExact(s)
+  s = annotations ? escapePrivateUse(s).replace(ANNOTATION_STRIP_RE, "") : protectForExact(s)
   s = s.normalize("NFKC").toLowerCase().replace(/臺/g, "台")
   return annotations ? s.replace(ANNOTATION_STRIP_RE, "") : s
 }
@@ -86,18 +92,23 @@ function baseNormalize(name: string | null | undefined, annotations = true): str
   return prepared(name, annotations).replace(STRIP_RE, "")
 }
 
+/** 2026-11-17：格式字元（\p{Cf}）全部拒收——含不在預設可忽略字元裡的 U+0600–0605、06DD、070F、0890、0891、08E2、FFF9–FFFB 等。 */
+const FORMAT_CHAR_RE = /\p{Cf}/u
+
 /**
- * 名稱含不可見字元（先 NFC 組字，可組合的重音字母不算）→ true。
+ * 名稱含不可見字元或格式字元（先 NFC 組字，可組合的重音字母不算）→ true。
  * 呼叫端回 400 invalid_payee_name／invalid_vendor_name「名稱含有不可見字元，請重新輸入」。
+ * 只用於新輸入（名冊 PATCH 只檢查這次值有變的欄位；舊資料不回溯，比對 key 照樣去掉這些字元）。
  */
 export function hasInvisibleNameChars(name: string | null | undefined): boolean {
   if (name == null) return false
-  return INVISIBLE_RE.test(String(name).normalize("NFC"))
+  const s = String(name).normalize("NFC")
+  return INVISIBLE_RE.test(s) || FORMAT_CHAR_RE.test(s)
 }
 
 export const INVISIBLE_NAME_MESSAGE = "名稱含有不可見字元，請重新輸入"
 
-/** 最後收尾輪：名稱含私用區字元（\p{Co}，各字型顯示不一、可冒充佔位字元）→ true。 */
+/** 名稱含私用區字元（\p{Co}）→ true。2026-11-17 起只供查詢，不再拒收（造字姓名可登錄；比對時加跳脫）。 */
 export function hasPrivateUseChars(name: string | null | undefined): boolean {
   if (name == null) return false
   return /\p{Co}/u.test(String(name))
@@ -269,10 +280,12 @@ export function hasConfusableScripts(name: string | null | undefined): boolean {
 
 export const CONFUSABLE_SCRIPT_NAME_MESSAGE = "名稱含有西里爾或希臘字母，請改用中文或英文字母重新輸入"
 
-/** 名稱不合法的訊息（不可見字元優先）；合法回 null。放款單戶名、名冊名稱／帳戶戶名、副委託名稱共用。 */
+/**
+ * 名稱不合法的訊息（不可見／格式字元優先）；合法回 null。放款單戶名、名冊名稱／帳戶戶名、副委託名稱共用。
+ * 2026-11-17：私用區字元（造字）不再拒收。
+ */
 export function invalidNameMessage(name: string | null | undefined): string | null {
   if (hasInvisibleNameChars(name)) return INVISIBLE_NAME_MESSAGE
-  if (hasPrivateUseChars(name)) return PRIVATE_USE_NAME_MESSAGE
   if (hasConfusableScripts(name)) return CONFUSABLE_SCRIPT_NAME_MESSAGE
   return null
 }
@@ -447,6 +460,11 @@ export type RosterKeySets = {
   patterns?: string[]
   /** 收尾輪 F4：名稱以行／社／號結尾且去後綴後只剩 2 字 → 該後綴字（「行銷」「社區」「號碼」這類常見詞不算包含）。 */
   f4Suffix?: string | null
+  /**
+   * 2026-11-17 英文中間字複數：名稱裡每個英文字去掉複數 s／es 的各種組合（「Glasses Co」→「glass co」）再算的 key；
+   * 只在至少一個字有複數變化時才有，兩方交集（或與對方 similar 交集）→ 相近。
+   */
+  plural?: string[]
 }
 
 /**
@@ -465,7 +483,59 @@ export function rosterVendorKeys(v: Omit<RosterKeyVendor, "id"> & { id?: string 
   for (const k of exact) similar.add(k)
   const fullHay = dedupeHays([v.name, v.short_name, v.account_holder].flatMap((f) => fullHays(f)))
   const patterns = [...new Set([...corePatterns(v.name), ...corePatterns(v.short_name)])]
-  return { exact: [...exact], similar: [...similar], full: fullHay.map((h) => h.key), fullHay, ...nameContainKeys(v.name), patterns }
+  const plural = [...new Set([...pluralKeys(v.name), ...pluralKeys(v.short_name)])]
+  return { exact: [...exact], similar: [...similar], full: fullHay.map((h) => h.key), fullHay, ...nameContainKeys(v.name), patterns, plural }
+}
+
+/** 一個名稱最多產生幾組複數變化（防病態輸入）。 */
+const PLURAL_MAX_VARIANTS = 32
+const LATIN_WORD_RE = /[\p{Script=Latin}]+/gu
+
+/**
+ * 2026-11-17 英文中間字複數：名稱（相近級別前處理後）每個 ≥4 字母的英文字可去結尾 s（不含 ss）、≥5 字母可去結尾 es，
+ * 各種組合（不含全不變）各算 payeeNameKeys 與去符號 key，過 meetsFloor 才收。
+ * 「Glasses Co」→「glass co」「glasse co」、「Deltas Design」→「delta design」、「Boxes Studio」→「box studio」「boxe studio」。
+ */
+function pluralKeys(field: string | null | undefined): string[] {
+  if (!exactNameKey(field)) return []
+  const prep = prepared(field, true)
+  const words: Array<{ index: number; word: string; options: string[] }> = []
+  for (const m of prep.matchAll(LATIN_WORD_RE)) {
+    const w = m[0]
+    const options: string[] = []
+    if (w.length >= 5 && w.endsWith("es")) options.push(w.slice(0, -2))
+    if (w.length >= 4 && w.endsWith("s") && !w.endsWith("ss")) options.push(w.slice(0, -1))
+    if (options.length > 0) words.push({ index: m.index!, word: w, options: [w, ...options] })
+  }
+  if (words.length === 0) return []
+  let variants: string[][] = [[]]
+  for (const w of words) {
+    variants = variants.flatMap((v) => w.options.map((o) => [...v, o])).slice(0, PLURAL_MAX_VARIANTS)
+  }
+  const out = new Set<string>()
+  for (const choice of variants) {
+    if (choice.every((o, i) => o === words[i]!.word)) continue
+    let text = ""
+    let pos = 0
+    choice.forEach((o, i) => {
+      text += prep.slice(pos, words[i]!.index) + o
+      pos = words[i]!.index + words[i]!.word.length
+    })
+    text += prep.slice(pos)
+    for (const k of [...payeeNameKeys(text), text.replace(STRIP_RE, "").replace(PUNCT_OR_SYMBOL_RE, "")]) if (k && meetsFloor(k)) out.add(k)
+  }
+  return [...out]
+}
+
+/** 複數變化 key 與對方 key 有交集（mine.plural ∩ other.plural／other.similar，或反過來）。 */
+function pluralOverlap(a: Pick<RosterKeySets, "similar" | "plural">, b: Pick<RosterKeySets, "similar" | "plural">): boolean {
+  const ap = a.plural ?? []
+  const bp = b.plural ?? []
+  if (ap.length === 0 && bp.length === 0) return false
+  const bAll = new Set([...b.similar, ...bp])
+  if (ap.some((k) => bAll.has(k))) return true
+  const aSim = new Set(a.similar)
+  return bp.some((k) => aSim.has(k))
 }
 
 function dedupeHays(hays: KeyHay[]): KeyHay[] {
@@ -495,7 +565,20 @@ const INDUSTRY_HAN_WORDS = [
   // 最後收尾輪：營建工種與常見服務業詞（「材料」刻意不加）
   "水電", "機電", "空調", "冷氣", "消防", "室內裝修", "裝修", "裝潢", "土木", "土木包工業", "包工業", "油漆", "木作", "鐵工", "鋁窗",
   "環保", "清潔", "資訊", "數位", "通訊", "印刷", "廣告", "系統", "維修", "服務中心",
+  // 2026-11-17 補充工種詞
+  "電機", "防水", "木工", "泥作", "搬家", "保全", "景觀", "玻璃", "磁磚", "鷹架", "拆除", "系統櫥櫃", "櫥櫃", "衛浴", "照明",
 ]
+/**
+ * 2026-11-17：泛用詞（行業別本身，不是公司辨識名）。核心剝除後只剩這些（可夾地名／型態字／產業詞）就不收成核心：
+ * 名冊「台灣電力」剝掉「台灣」剩「電力」，不可讓收款「電力公司」相近。它們不是允許的附加字（「中華電信」≠「中華」）。
+ */
+const GENERIC_HAN_WORDS = [
+  "電力", "電信", "銀行", "商業銀行", "保險", "人壽", "產物", "產險", "證券", "投信", "投顧", "郵局", "郵政", "醫院", "診所", "藥局",
+  "瓦斯", "天然氣", "自來水", "電話", "電視", "網路", "超商", "便利商店", "商店", "超市", "量販", "百貨", "汽車", "機車", "運輸", "客運",
+  "物流", "貨運", "快遞", "航空", "鐵路", "高鐵", "捷運", "石油", "加油站", "水利", "農會", "漁會", "合作社", "信用合作社", "協會", "學會",
+  "基金會", "公會", "政府", "法院", "國稅局", "稅務", "學校", "大學", "醫療", "餐飲", "餐廳", "旅行社", "飯店", "酒店",
+]
+const GENERIC_LATIN_WORDS = ["bank", "insurance", "telecom", "power", "electric", "securities", "airlines", "airline", "hospital", "post"]
 const INDUSTRY_LATIN_WORDS = [
   "international", "intl", "group", "technology", "technologies", "tech", "design", "designs", "engineering", "consulting", "consultants",
   "trading", "industrial", "industries", "industry", "holdings", "holding", "electronics", "electronic", "computers", "computer",
@@ -517,6 +600,8 @@ function meetsPatternFloor(p: string): boolean {
  */
 function corePatterns(field: string | null | undefined): string[] {
   if (!exactNameKey(field)) return []
+  // 2026-11-17：整個名稱只由地名／型態字／產業詞／泛用詞組成（「有限公司」「台灣工程」「電力公司」）→ 沒有核心。
+  if (isOnlyAllowedExtras(strippedNameKey(field), NON_CORE_TOKENS_BY_FIRST)) return []
   const out = new Set<string>()
   const bases = [strippedNameKey(field), ...payeeNameKeys(field).map((k) => k.replace(PUNCT_OR_SYMBOL_RE, ""))]
   for (const b of bases) {
@@ -541,7 +626,9 @@ function corePatterns(field: string | null | undefined): string[] {
   //（「台中宏碁股份有限公司」→「台中宏碁」→「宏碁」、「Acer Taiwan Inc.」→「acertaiwan」→「acer」）。
   const hays = [buildHay(prepared(field, true), PUNCT_OR_SYMBOL_CHAR_RE), ...bases.filter(Boolean).map(plainHay)]
   for (const h of hays) for (const p of peelExtras(h)) out.add(p)
-  return [...out]
+  // 2026-11-17：整段只剩地名／型態字／產業詞／泛用詞（「台灣」「電力」「台灣電力」）的不是核心——兩個方向都不拿來比
+  //（2 字鄉鎮市區簡稱「大同」「永和」「信義」不在剝除表，仍可當核心）。
+  return [...out].filter((p) => !isOnlyAllowedExtras(p, NON_CORE_TOKENS_BY_FIRST))
 }
 
 /** 剝除時的狀態上限（防病態輸入）。 */
@@ -567,8 +654,8 @@ function peelExtras(hay: KeyHay): string[] {
       const rest = k.slice(a, b)
       if (!meetsPatternFloor(rest)) return
       seen.add(id)
-      // 剩下的整段都是地名／型態字／產業詞（「台灣」「工程」）→ 不是核心，不收（仍可繼續剝）
-      if (!isOnlyAllowedExtras(rest, PEEL_TOKENS_BY_FIRST)) out.add(rest)
+      // 剩下的整段都是地名／型態字／產業詞／泛用詞（「台灣」「工程」「電力」）→ 不是核心，不收（仍可繼續剝）
+      if (!isOnlyAllowedExtras(rest, NON_CORE_TOKENS_BY_FIRST)) out.add(rest)
       queue.push([a, b])
     }
     for (const t of PEEL_TOKENS) {
@@ -602,6 +689,8 @@ function nameContainKeys(name: string | null | undefined): Pick<RosterKeySets, "
  */
 function meetsInsideExactFloor(key: string): boolean {
   if ([...key].length < 3) return false
+  // 2026-11-17：整串只是地名／型態字／產業詞／泛用詞（「有限公司」「台灣銀行」）不拿來做包含（雙向比對後新名稱也走這裡）。
+  if (isOnlyAllowedExtras(key.replace(PUNCT_OR_SYMBOL_RE, ""), NON_CORE_TOKENS_BY_FIRST)) return false
   const core = stripCoreSuffixes(key.replace(PUNCT_OR_SYMBOL_RE, ""))
   const han = (core.match(HAN_RE) ?? []).length
   if (han >= 2) return true
@@ -653,12 +742,14 @@ const TOWNSHIP_BASES: ReadonlySet<string> = new Set(
   TW_TOWNSHIPS.map((t) => [...t].slice(0, -1).join("")).filter((b) => [...b].length >= 2 && !TW_COUNTIES.includes(b) && !PLACE_NAMES.includes(b)),
 )
 const PEEL_TOKENS = [...EXTRA_TOKENS].filter((t) => !TOWNSHIP_BASES.has(t)).sort((a, b) => b.length - a.length)
-const PEEL_TOKENS_BY_FIRST: Map<string, string[]> = (() => {
+/** 2026-11-17：「不是核心」的判斷表＝剝除表＋泛用詞（長的先試）。 */
+const NON_CORE_TOKENS_BY_FIRST: Map<string, string[]> = (() => {
   const map = new Map<string, string[]>()
-  for (const t of PEEL_TOKENS) {
+  for (const t of [...PEEL_TOKENS, ...GENERIC_HAN_WORDS, ...GENERIC_LATIN_WORDS]) {
     const first = [...t][0]!
     map.set(first, [...(map.get(first) ?? []), t])
   }
+  for (const list of map.values()) list.sort((a, b) => b.length - a.length)
   return map
 })()
 /** 最後收尾輪：可黏在拉丁核心後面的英文附加詞（英文產業詞＋英文地名，≥4 字母；tw／roc／co／inc 這類短詞不算）。 */
@@ -741,7 +832,10 @@ export function rosterNameInside(
       for (const i of occurrences(paren, p)) {
         const after = paren.key.slice(i + p.length)
         if (F4_WORDS.some((w) => after.startsWith(w))) continue
-        if (isOnlyAllowedExtras(paren.key.slice(0, i)) && isOnlyAllowedExtras(after)) return true
+        if (!isOnlyAllowedExtras(paren.key.slice(0, i))) continue
+        if (isOnlyAllowedExtras(after)) return true
+        // 2026-11-17：拉丁核心後接英文複數 s／es（「Deltas Design」對核心「delta」）→ 去掉複數再看後段。
+        if (/\p{Script=Latin}$/u.test(p) && ["es", "s"].some((pl) => after.startsWith(pl) && isOnlyAllowedExtras(after.slice(pl.length)))) return true
       }
     }
   }
@@ -769,7 +863,16 @@ function nameKeySets(name: string | null | undefined): RosterKeySets {
   const exact = exactNameKey(name)
   if (!exact) return { exact: [], similar: [], full: [] }
   const fullHay = fullHays(name)
-  return { exact: [exact], similar: similarNameKeys(name), full: fullHay.map((h) => h.key), fullHay, ...nameContainKeys(name) }
+  return {
+    exact: [exact],
+    similar: similarNameKeys(name),
+    full: fullHay.map((h) => h.key),
+    fullHay,
+    ...nameContainKeys(name),
+    // 2026-11-17 R1：新名稱自己的核心也算（雙向「名稱包含」，與名冊入口 compareRosterKeySets 同一套）。
+    patterns: corePatterns(name),
+    plural: pluralKeys(name),
+  }
 }
 
 /** 名冊 → 兩級 key 索引（key → 撞到的廠商，同一家只列一次）；entries 供「包含」判斷逐家比。 */
@@ -810,7 +913,8 @@ export function rosterKeyMatches<T>(index: RosterKeyIndex<T>, name: string | nul
   }
   for (const { vendor, keys } of index.entries) {
     if (exact.includes(vendor) || similar.includes(vendor)) continue
-    if (containsEither(mine, keys) || rosterNameInside(keys, mine)) similar.push(vendor)
+    // 2026-11-17 R1：與名冊入口 compareRosterKeySets 同一套——雙向「名稱包含」＋英文中間字複數。
+    if (containsEither(mine, keys) || rosterNameInside(keys, mine) || rosterNameInside(mine, keys) || pluralOverlap(mine, keys)) similar.push(vendor)
   }
   return { exact, similar }
 }
@@ -827,6 +931,7 @@ export function compareRosterKeySets(mine: RosterKeySets, other: RosterKeySets):
   if (containsEither(mine, other)) return "similar"
   // 第十輪：名冊兩家互比（新增／改名的一方 mine 與既有 other），任一方名稱被另一方名稱包含 → 相近（收尾輪：含核心／簡稱＋附加字）。
   if (rosterNameInside(other, mine) || rosterNameInside(mine, other)) return "similar"
+  if (pluralOverlap(mine, other)) return "similar"
   return null
 }
 

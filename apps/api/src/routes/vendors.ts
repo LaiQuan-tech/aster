@@ -322,12 +322,25 @@ const BANK_FIELDS: Array<[keyof z.infer<typeof vendorBody>, string]> = [
 ]
 
 /**
- * R3 第五輪（2026-11-17）：名冊名稱／帳戶戶名不可含不可見字元（零寬、變體選擇符、組合符號、韓文填充字…）；
+ * R3 第五輪（2026-11-17）：名冊名稱／帳戶戶名不可含不可見字元（零寬、變體選擇符、組合符號、韓文填充字、格式字元…）；
  * 第六輪 F2：也不可拉丁字母混用西里爾／希臘字母。合法回 null，否則回 400 本文。
+ * stored（PATCH）：只檢查這次值有變的欄位（與現值相同＝原樣存檔，不回溯舊資料）。
  */
-function invalidVendorName(body: Partial<z.infer<typeof vendorBody>>): { error: "invalid_vendor_name"; message: string } | null {
-  const message = invalidNameMessage(body.name) ?? invalidNameMessage(body.shortName) ?? invalidNameMessage(body.accountHolder)
-  return message ? { error: "invalid_vendor_name", message } : null
+function invalidVendorName(
+  body: Partial<z.infer<typeof vendorBody>>,
+  stored?: { name: string | null; short_name: string | null; account_holder: string | null } | null,
+): { error: "invalid_vendor_name"; message: string } | null {
+  const changed = (v: string | null | undefined, cur: string | null | undefined) =>
+    v !== undefined && (stored == null || (v === "" ? null : v) !== (cur ?? null))
+  const fields: Array<[string | null | undefined, string | null | undefined]> = [
+    [body.name, stored?.name], [body.shortName, stored?.short_name], [body.accountHolder, stored?.account_holder],
+  ]
+  for (const [v, cur] of fields) {
+    if (!changed(v, cur)) continue
+    const message = invalidNameMessage(v)
+    if (message) return { error: "invalid_vendor_name", message }
+  }
+  return null
 }
 
 /**
@@ -357,8 +370,13 @@ async function duplicateVendorName(tenantId: string, next: RosterIdentity, selfI
       : { name: [], nameHay: [], nameParen: null, f4Suffix: null }),
     // 收尾輪 F1／F2：名稱／簡稱的核心——只拿這次新增的（只改簡稱時就是新簡稱的核心）。
     patterns: (nextKeys.patterns ?? []).filter((p) => !(prevKeys.patterns ?? []).includes(p)),
+    // 2026-11-17 英文中間字複數：只拿這次新增的複數變化 key。
+    plural: (nextKeys.plural ?? []).filter((p) => !(prevKeys.plural ?? []).includes(p)),
   }
-  if (mine.exact.length === 0 && mine.similar.length === 0 && mine.full.length === 0 && (mine.name ?? []).length === 0 && (mine.patterns ?? []).length === 0) return null
+  if (
+    mine.exact.length === 0 && mine.similar.length === 0 && mine.full.length === 0 && (mine.name ?? []).length === 0 &&
+    (mine.patterns ?? []).length === 0 && (mine.plural ?? []).length === 0
+  ) return null
   const roster = await selectAllPages<{ id: string; name: string | null; short_name: string | null; account_holder: string | null }>(
     (from, to) =>
       supabaseAdmin
@@ -466,11 +484,6 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     res.status(400).json({ error: "no_fields" })
     return
   }
-  const invalidName = invalidVendorName(parsed.data)
-  if (invalidName) {
-    res.status(400).json(invalidName)
-    return
-  }
   try {
     const present = rosterFieldsPresent(parsed.data)
     // 關係企業標記只有 HR 能「變更」：非 HR 帶了這個欄位就比對現值，不同 → 403；一樣＝沒變更，放行，
@@ -514,6 +527,12 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
         .maybeSingle()
       if (storedErr) {
         next(new Error(`PATCH /vendors/${id} (load names): ${storedErr.message}`))
+        return
+      }
+      // 2026-11-17：名稱類驗證只對這次值有變的欄位（未變的原樣存檔不擋）；查無廠商（stored 為 null）整組檢查。
+      const invalidName = invalidVendorName(nameBody, (stored as RosterIdentity | null) ?? null)
+      if (invalidName) {
+        res.status(400).json(invalidName)
         return
       }
       // 查無這個廠商就往下走，由下面的 update 回 404。

@@ -1957,7 +1957,10 @@ async function resolveHeader(
   }
   // R3 第五輪（2026-11-17）：戶名含不可見字元 → 400（PATCH 只在戶名／收款方有改時查，不回溯舊單）。
   // 第六輪 F2：拉丁字母混用西里爾／希臘字母也擋。
-  const badName = opts.checkPayeeName !== false ? invalidNameMessage(input.payeeName) : null
+  // 2026-11-17：收款方是名冊廠商、戶名等於該廠商名冊名稱或帳戶戶名 → 已在名冊驗過，不再跑 invalidNameMessage（舊資料不回溯）。
+  const trimmedPayee = (input.payeeName ?? "").trim()
+  const sameAsRoster = !!vendor && trimmedPayee !== "" && (trimmedPayee === (vendor.name ?? "").trim() || trimmedPayee === (vendor.account_holder ?? "").trim())
+  const badName = opts.checkPayeeName !== false && !sameAsRoster ? invalidNameMessage(input.payeeName) : null
   if (badName) throw new DisbursementError(400, "invalid_payee_name", { message: badName })
   const payeeName = (input.payeeName ?? "").trim() || vendor?.name || ""
   if (!payeeName) throw new DisbursementError(400, "payee_name_required")

@@ -135,7 +135,7 @@ describe("收尾輪 6：F4 行／社／號＋常見詞", () => {
   })
 })
 
-describe("最後收尾輪 1：獨立附加符號不進 exact；私用區字元拒收", () => {
+describe("最後收尾輪 1：獨立附加符號不進 exact；私用區字元跳脫", () => {
   it("˙ ゛ ゜ ´ ¨ ¯ ¸ ˘ ˚ ˛ ˜ ˝ 不同的名稱不得為 exact（相近可）", () => {
     const pairs: Array<[string, string]> = [
       ["測試˙行", "測試行"], ["王˙明", "王明"], ["カ゛", "カ"], ["さ゜", "さ"], ["Cafe´", "Cafe"],
@@ -156,9 +156,9 @@ describe("最後收尾輪 1：獨立附加符號不進 exact；私用區字元�
     expect(relation("測試˙行", "測試˙行")).toBe("exact")
     expect(relation("Cafe´", " cafe´ ")).toBe("exact")
   })
-  it("名稱含私用區字元 → invalidNameMessage 拒收；佔位字元不會與附加符號／™ 撞在一起", () => {
-    expect(invalidNameMessage("測試\uE200行")).not.toBeNull()
-    expect(invalidNameMessage("測試\uE122")).not.toBeNull()
+  it("名稱含私用區字元（2026-11-17 起不拒收，見 r12）；佔位字元不會與附加符號／™ 撞在一起", () => {
+    expect(invalidNameMessage("測試\uE200行")).toBeNull()
+    expect(invalidNameMessage("測試\uE122")).toBeNull()
     expect(invalidNameMessage("測試行")).toBeNull()
     // 舊資料若已含私用區字元：exact key 加跳脫，不與附加符號佔位字元相同
     expect(exactNameKey("測試\uE200行")).not.toBe(exactNameKey("測試\u00A8行"))
