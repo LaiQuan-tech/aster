@@ -1,3 +1,4 @@
+import { loadRosterNameKeyIndex, rosterMatchesOf } from "./roster-name-keys.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { writeAuditLog } from "./audit.js"
@@ -96,6 +97,8 @@ export type DuplicateProjectError =
   | "root_code_missing"
   | "code_generation_failed"
 
+export type SubcontractVendorWarning = { vendorName: string; candidates: number }
+
 export type DuplicateProjectResult =
   | {
       ok: true
@@ -109,6 +112,8 @@ export type DuplicateProjectResult =
         rootCode: string
       }
       archived: { id: string; code: string | null } | null
+      /** 複製出的非登錄副委託名稱撞到多家名冊廠商（無法自動綁定，保留非登錄）。 */
+      subcontractWarnings: SubcontractVendorWarning[]
     }
   | { ok: false; status: number; error: DuplicateProjectError }
 
@@ -341,6 +346,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
   await recomputeBillings(tenantId, newId)
 
   // ── 4. 副委託：結構（科別／廠商／kind／金額），不帶付款事件與合約參照 ──
+  const subcontractWarnings: SubcontractVendorWarning[] = []
   if (copy.subcontracts) {
     const { data: subs, error } = await supabaseAdmin
       .from("project_subcontracts")
@@ -370,12 +376,26 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
         if (vendorErr) throw new Error(`project-duplicate subcontracts(vendors): ${vendorErr.message}`)
         for (const v of (vendors ?? []) as Array<{ id: string; name: string | null }>) rosterNames.set(v.id.toLowerCase(), v.name ?? "")
       }
-      const vendorOf = (s: { vendor_id: string | null; vendor_name: string | null }) => {
+      const vendorOfRaw = (s: { vendor_id: string | null; vendor_name: string | null }) => {
         if (!s.vendor_id) return { vendor_id: null, vendor_name: s.vendor_name }
         const rosterName = rosterNames.get(s.vendor_id.toLowerCase())
         if (rosterName === undefined) return { vendor_id: null, vendor_name: s.vendor_name }
         const same = (s.vendor_name ?? "").trim() === rosterName.trim()
         return { vendor_id: s.vendor_id, vendor_name: same ? s.vendor_name : rosterName }
+      }
+      // 第五輪 #4（2026-11-17）：複製出的非登錄列名稱 key 撞名冊廠商名稱 → 名冊恰好一家就自動綁定（名稱改用名冊名稱）；
+      // 多家無法判斷 → 保留非登錄並在回應附警告（不擋複製）。新案副委託的 created_at 晚於截止時間，不綁的話之後無法付款。
+      const unbound = subs.map((s) => vendorOfRaw(s as { vendor_id: string | null; vendor_name: string | null })).filter((v) => !v.vendor_id)
+      const nameIndex = unbound.some((v) => (v.vendor_name ?? "").trim())
+        ? await loadRosterNameKeyIndex(tenantId, "project-duplicate subcontracts")
+        : null
+      const vendorOf = (s: { vendor_id: string | null; vendor_name: string | null }) => {
+        const v = vendorOfRaw(s)
+        if (v.vendor_id || !nameIndex) return v
+        const matches = rosterMatchesOf(nameIndex, v.vendor_name)
+        if (matches.length === 1) return { vendor_id: matches[0]!.id, vendor_name: matches[0]!.name }
+        if (matches.length > 1) subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: matches.length })
+        return v
       }
       const { error: insErr } = await supabaseAdmin.from("project_subcontracts").insert(
         subs.map((s) => ({
@@ -486,6 +506,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
       rootCode,
     },
     archived,
+    subcontractWarnings,
   }
 }
 

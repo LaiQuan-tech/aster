@@ -1025,6 +1025,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   // 母案是選填（業主 2026-09-30 會議），後端不再回 parent_required；有帶母案才驗 invalid_parent。
   if (msg.includes("invalid_parent")) return "母案不合法：必須是同租戶的主案、不能是自己；主案本身也不能再掛母案。"
   if (msg.includes("has_child_projects")) return "這個主案底下還有追加／變更／代墊案，不能改成其他案型。請先把那些案的母案移走或清空。"
+  if (msg.includes("must_bind_vendor")) return "協力廠商名稱與名冊廠商相同，請在下拉選擇名冊廠商。"
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
   if (msg.includes("invalid_company")) return "選到的承接公司不存在或不屬於本租戶，請重新選擇。"
   if (msg.includes("company_inactive")) return "選到的承接公司已停用，請改選其他公司。"
@@ -1287,6 +1288,15 @@ export interface DuplicateProjectResponse {
     rootCode: string
   }
   archived: { id: string; code: string | null } | null
+  /** 複製出的非登錄副委託撞到多家同名名冊廠商、未自動綁定（2026-11-17）。 */
+  subcontractWarnings?: Array<{ vendorName: string; candidates: number; message: string }>
+}
+
+/** 複製完成後要提醒的副委託警告文字（沒有＝null）。 */
+export function duplicateSubcontractWarningText(res: Pick<DuplicateProjectResponse, "subcontractWarnings">): string | null {
+  const list = res.subcontractWarnings ?? []
+  if (list.length === 0) return null
+  return list.map((w) => w.message).join("\n")
 }
 
 export function duplicateProject(id: string, body: DuplicateProjectBody) {

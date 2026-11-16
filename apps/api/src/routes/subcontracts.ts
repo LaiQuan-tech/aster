@@ -23,8 +23,7 @@ import {
   type PaymentRow,
 } from "../services/project-application-store.js"
 import { loadPaymentAcceptance, paymentsHaveAcceptance } from "../services/disbursements.js"
-import { payeeNameKey } from "../lib/payee-name.js"
-import { selectAllPages } from "../lib/select-all-pages.js"
+import { loadRosterNameKeyIndex, MUST_BIND_VENDOR, rosterMatchesOf } from "../services/roster-name-keys.js"
 import { firstNewlyPickedInactive } from "../services/company-lifecycle.js"
 import { writeAuditLog } from "../services/audit.js"
 import { columnsExist } from "../lib/schema-compat.js"
@@ -515,23 +514,14 @@ subcontractsRouter.put(
         return renamed || prevVendorId !== null
       })
       if (unboundCandidates.length > 0) {
-        const roster = await selectAllPages<{ id: string; name: string | null }>(
-          (from, to) =>
-            supabaseAdmin.from("vendors").select("id, name").eq("tenant_id", tenantId).is("deleted_at", null).order("id").range(from, to),
-          `PUT /projects/${projectId}/subcontracts (roster names)`,
-        )
-        const rosterKeys = new Set(roster.map((v) => ((v.name ?? "").trim() ? payeeNameKey(v.name) : "")).filter(Boolean))
+        const index = await loadRosterNameKeyIndex(tenantId, `PUT /projects/${projectId}/subcontracts`)
         const hit = unboundCandidates.find((p) => {
           const prev = p.id ? existingById.get(p.id) : undefined
           const finalName = p.vendorName !== undefined ? p.vendorName : (prev?.vendor_name ?? null)
-          return rosterKeys.has(payeeNameKey(finalName))
+          return rosterMatchesOf(index, finalName).length > 0
         })
         if (hit) {
-          res.status(409).json({
-            error: "must_bind_vendor",
-            id: hit.id ?? null,
-            message: "此名稱與名冊廠商相同，請在下拉選擇名冊廠商",
-          })
+          res.status(409).json({ ...MUST_BIND_VENDOR, id: hit.id ?? null })
           return
         }
       }

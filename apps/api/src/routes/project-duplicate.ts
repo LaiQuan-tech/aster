@@ -248,7 +248,17 @@ projectDuplicateRouter.post(
         [result.project.id, scope.project.id, result.project.parentProjectId],
         "POST /projects/:id/duplicate",
       )
-      res.status(201).json({ project: result.project, archived: result.archived, warnings })
+      const subcontractWarnings = result.subcontractWarnings ?? []
+      if (subcontractWarnings.length > 0) warnings.push("subcontract_vendor_ambiguous")
+      res.status(201).json({
+        project: result.project,
+        archived: result.archived,
+        warnings,
+        subcontractWarnings: subcontractWarnings.map((w) => ({
+          ...w,
+          message: `副委託「${w.vendorName}」與 ${w.candidates} 家名冊廠商同名，未自動綁定；請到新案副委託在下拉選擇正確的名冊廠商`,
+        })),
+      })
     } catch (err) {
       next(err)
     }

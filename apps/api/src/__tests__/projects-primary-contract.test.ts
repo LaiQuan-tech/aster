@@ -17,6 +17,7 @@ const h = vi.hoisted(() => {
     const predicates: Array<(row: Row) => boolean> = []
     let action: "select" | "insert" | "update" | "delete" = "select"
     let payload: Row | Row[] | null = null
+    let window: [number, number] | null = null
     const filtered = () => (db[table] ?? []).filter((row) => predicates.every((predicate) => predicate(row)))
     const execute = async (single: boolean) => {
       if (action === "insert") {
@@ -55,7 +56,8 @@ const h = vi.hoisted(() => {
         db[table] = (db[table] ?? []).filter((row) => !doomed.has(row))
         return { data: null, error: null }
       }
-      const rows = filtered()
+      const all = filtered()
+      const rows = window ? all.slice(window[0], window[1] + 1) : all
       return { data: single ? rows[0] ?? null : rows, error: null }
     }
     const builder: any = {
@@ -68,6 +70,7 @@ const h = vi.hoisted(() => {
       in: (column: string, values: unknown[]) => (predicates.push((row) => values.includes(row[column])), builder),
       order: () => builder,
       limit: () => builder,
+      range: (from: number, to: number) => ((window = [from, to]), builder),
       maybeSingle: () => execute(true),
       single: () => execute(true),
       then: (resolve: any, reject: any) => execute(false).then(resolve, reject),
@@ -523,6 +526,21 @@ describe("POST /projects primary contract", () => {
       expect(response.status).toBe(201)
       const stored = await loadSubcontracts(h.tenantId, response.body.id)
       expect(stored[0]).toMatchObject({ vendor_id: VENDOR_ID, vendor_name: "合格廠商" })
+    })
+
+    it("第五輪 #4：{vendorId: null／沒帶, 名稱 key＝名冊廠商名稱} → 409 must_bind_vendor，未呼叫 RPC", async () => {
+      for (const [i, row] of [
+        { vendorId: null, vendorName: "合格廠商", amount: 10_000 },
+        { vendorName: "合格廠商股份有限公司", amount: 10_000 },
+        { vendorName: "(股)合格-廠商.", amount: 10_000 },
+      ].entries()) {
+        h.operations.length = 0
+        const response = await post([{ vendorId: null, vendorName: "測試名冊外廠商", amount: 5_000 }, row], `VN-BIND-${i}`)
+        expect(response.status, JSON.stringify(row)).toBe(409)
+        expect(response.body).toMatchObject({ error: "must_bind_vendor", message: "此名稱與名冊廠商相同，請在下拉選擇名冊廠商", index: 1 })
+        expect(rpcCalls()).toEqual([])
+        expect(h.db.project_subcontracts).toEqual([])
+      }
     })
 
     it("{vendorId: null, 任意名稱} → 201，不比對", async () => {

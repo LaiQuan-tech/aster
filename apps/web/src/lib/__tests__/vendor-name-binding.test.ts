@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { engineerForTypedName, humanizeVendorDeleteError, humanizeVendorIdentityError, isChangeReasonRequired, vendorIdForTypedName } from "../vendor-name-binding";
-import { humanizeSubcontractError } from "../projects-ext-api";
+import { duplicateSubcontractWarningText, humanizeProjectExtError, humanizeSubcontractError } from "../projects-ext-api";
 
 /**
  * VendorCombo 手改名稱欄時 vendorId 的綁定規則（2026-11-16）。
@@ -90,5 +90,11 @@ describe("第五輪（2026-11-17）中文訊息", () => {
     expect(humanizeVendorDeleteError("[409] vendor_in_use")).toBe("此廠商仍有未付期款或未匯款的放款單，不能刪除");
     expect(humanizeVendorDeleteError("[500] boom")).toBe("[500] boom");
     expect(humanizeSubcontractError(new Error("[409] must_bind_vendor"), "x")).toBe("此名稱與名冊廠商相同，請在下拉選擇名冊廠商。");
+    // 新建專案表單（POST /projects initialSubcontracts）
+    expect(humanizeProjectExtError(new Error("[409] must_bind_vendor"), "x")).toContain("請在下拉選擇名冊廠商");
+  });
+  it("複製專案：副委託撞多家同名名冊廠商的警告", () => {
+    expect(duplicateSubcontractWarningText({})).toBeNull();
+    expect(duplicateSubcontractWarningText({ subcontractWarnings: [{ vendorName: "測試重名", candidates: 2, message: "副委託「測試重名」與 2 家名冊廠商同名" }] })).toContain("測試重名");
   });
 });

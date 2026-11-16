@@ -47,6 +47,7 @@ import {
   createApplicationVersion,
   loadContractsForProjectAccess,
   engineerDisciplinesOf,
+  duplicateSubcontractWarningText,
   PROJECT_KIND_LABELS,
   type ProjectDetail,
   type ProjectAccess,
@@ -460,6 +461,8 @@ export default function AdminProjectDetailPage() {
         onClose={() => setDupOpen(false)}
         onDone={(res) => {
           setDupOpen(false);
+          const warn = duplicateSubcontractWarningText(res);
+          if (warn) window.alert(`已複製新案。\n${warn}`);
           router.push(`/admin/projects/${res.project.id}`);
         }}
       />

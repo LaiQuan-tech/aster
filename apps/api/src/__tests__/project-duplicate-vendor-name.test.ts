@@ -93,9 +93,45 @@ describe("複製專案 — 副委託不帶舊的廠商名稱錯配（2026-11-16�
     ])
   })
 
-  it("名冊只查一次（批次）", async () => {
+  it("名冊批次查（不逐列查）：id 查一次＋同名比對分頁讀完（第五輪，含讀到空頁共 2 次）", async () => {
     fake.db.project_subcontracts = [sub({ vendor_id: V_A, vendor_name: "x" }), sub({ vendor_id: V_A, vendor_name: "y" }), sub({ vendor_id: V_DELETED, vendor_name: "z" })]
     await duplicate()
+    expect(fake.reads.filter((t) => t === "vendors")).toHaveLength(3)
+    // 全部都是登錄廠商 → 不必查同名
+    fake.reads.length = 0
+    fake.db.project_subcontracts = [sub({ vendor_id: V_A, vendor_name: "x" }), sub({ vendor_id: V_A, vendor_name: "y" })]
+    await duplicate()
     expect(fake.reads.filter((t) => t === "vendors")).toHaveLength(1)
+  })
+})
+
+describe("複製專案 — 非登錄副委託撞名冊廠商名稱（2026-11-17 第五輪 #4）", () => {
+  const V_B1 = "aaaaaaaa-0000-4000-8000-0000000000b1"
+  const V_B2 = "aaaaaaaa-0000-4000-8000-0000000000b2"
+  it("名冊恰好一家同 key → 自動綁定、名稱改用名冊名稱；不撞名 → 保留非登錄；無警告", async () => {
+    fake.db.project_subcontracts = [
+      sub({ vendor_id: null, vendor_name: "測試名冊甲廠商有限公司" }),
+      sub({ vendor_id: V_DELETED, vendor_name: "(股)測試名冊甲廠商" }),
+      sub({ vendor_id: null, vendor_name: "測試自由輸入廠商" }),
+    ]
+    const result = await duplicate()
+    expect(result.ok).toBe(true)
+    expect(insertedSubs().map((s) => [s.vendor_id, s.vendor_name])).toEqual([
+      [V_A, "測試名冊甲廠商"],
+      [V_A, "測試名冊甲廠商"],
+      [null, "測試自由輸入廠商"],
+    ])
+    expect(result.ok && result.subcontractWarnings).toEqual([])
+  })
+  it("名冊多家同 key → 保留非登錄、回警告，不擋複製", async () => {
+    fake.db.vendors!.push(
+      { id: V_B1, tenant_id: TENANT_ID, name: "測試重名工程行", deleted_at: null },
+      { id: V_B2, tenant_id: TENANT_ID, name: "測試重名工程行股份有限公司", deleted_at: null },
+    )
+    fake.db.project_subcontracts = [sub({ vendor_id: null, vendor_name: "測試重名工程行" })]
+    const result = await duplicate()
+    expect(result.ok).toBe(true)
+    expect(insertedSubs()[0]).toMatchObject({ vendor_id: null, vendor_name: "測試重名工程行" })
+    expect(result.ok && result.subcontractWarnings).toEqual([{ vendorName: "測試重名工程行", candidates: 2 }])
   })
 })
