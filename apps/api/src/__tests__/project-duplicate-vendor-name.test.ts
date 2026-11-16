@@ -94,7 +94,7 @@ describe("複製專案 — 副委託不帶舊的廠商名稱錯配（2026-11-16�
   })
 
   it("名冊批次查（不逐列查）：id 查一次＋同名比對分頁讀完（第五輪，含讀到空頁共 2 次）", async () => {
-    fake.db.project_subcontracts = [sub({ vendor_id: V_A, vendor_name: "x" }), sub({ vendor_id: V_A, vendor_name: "y" }), sub({ vendor_id: V_DELETED, vendor_name: "z" })]
+    fake.db.project_subcontracts = [sub({ vendor_id: V_A, vendor_name: "x" }), sub({ vendor_id: V_A, vendor_name: "y" }), sub({ vendor_id: null, vendor_name: "z" })]
     await duplicate()
     expect(fake.reads.filter((t) => t === "vendors")).toHaveLength(3)
     // 全部都是登錄廠商 → 不必查同名
@@ -108,20 +108,27 @@ describe("複製專案 — 副委託不帶舊的廠商名稱錯配（2026-11-16�
 describe("複製專案 — 非登錄副委託撞名冊廠商名稱（2026-11-17 第五輪 #4）", () => {
   const V_B1 = "aaaaaaaa-0000-4000-8000-0000000000b1"
   const V_B2 = "aaaaaaaa-0000-4000-8000-0000000000b2"
-  it("名冊恰好一家同 key → 自動綁定、名稱改用名冊名稱；不撞名 → 保留非登錄；無警告", async () => {
+  it("名冊恰好一家同 key → 自動綁定、名稱改用名冊名稱並回 autobound 通知；不撞名 → 保留非登錄", async () => {
     fake.db.project_subcontracts = [
       sub({ vendor_id: null, vendor_name: "測試名冊甲廠商有限公司" }),
-      sub({ vendor_id: V_DELETED, vendor_name: "(股)測試名冊甲廠商" }),
       sub({ vendor_id: null, vendor_name: "測試自由輸入廠商" }),
     ]
     const result = await duplicate()
     expect(result.ok).toBe(true)
     expect(insertedSubs().map((s) => [s.vendor_id, s.vendor_name])).toEqual([
       [V_A, "測試名冊甲廠商"],
-      [V_A, "測試名冊甲廠商"],
       [null, "測試自由輸入廠商"],
     ])
-    expect(result.ok && result.subcontractWarnings).toEqual([])
+    expect(result.ok && result.subcontractWarnings).toEqual([
+      { vendorName: "測試名冊甲廠商有限公司", candidates: 1, kind: "autobound", boundVendorName: "測試名冊甲廠商" },
+    ])
+  })
+  it("第六輪：來源綁的是已刪除廠商、名冊有同名新廠商 → 不自動綁定，保留非登錄並回 deleted_vendor 警告", async () => {
+    fake.db.project_subcontracts = [sub({ vendor_id: V_DELETED, vendor_name: "(股)測試名冊甲廠商" })]
+    const result = await duplicate()
+    expect(result.ok).toBe(true)
+    expect(insertedSubs().map((s) => [s.vendor_id, s.vendor_name])).toEqual([[null, "(股)測試名冊甲廠商"]])
+    expect(result.ok && result.subcontractWarnings).toEqual([{ vendorName: "(股)測試名冊甲廠商", candidates: 0, kind: "deleted_vendor" }])
   })
   it("名冊多家同 key → 保留非登錄、回警告，不擋複製", async () => {
     fake.db.vendors!.push(
@@ -132,6 +139,6 @@ describe("複製專案 — 非登錄副委託撞名冊廠商名稱（2026-11-17 
     const result = await duplicate()
     expect(result.ok).toBe(true)
     expect(insertedSubs()[0]).toMatchObject({ vendor_id: null, vendor_name: "測試重名工程行" })
-    expect(result.ok && result.subcontractWarnings).toEqual([{ vendorName: "測試重名工程行", candidates: 2 }])
+    expect(result.ok && result.subcontractWarnings).toEqual([{ vendorName: "測試重名工程行", candidates: 2, kind: "ambiguous" }])
   })
 })

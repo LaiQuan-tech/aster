@@ -537,7 +537,8 @@ describe("POST /projects primary contract", () => {
         h.operations.length = 0
         const response = await post([{ vendorId: null, vendorName: "測試名冊外廠商", amount: 5_000 }, row], `VN-BIND-${i}`)
         expect(response.status, JSON.stringify(row)).toBe(409)
-        expect(response.body).toMatchObject({ error: "must_bind_vendor", message: "此名稱與名冊廠商相同，請在下拉選擇名冊廠商", index: 1 })
+        expect(response.body).toMatchObject({ error: "must_bind_vendor", matchedVendorName: "合格廠商", index: 1 })
+        expect(response.body.message).toBe(`「${row.vendorName}」與名冊廠商「合格廠商」視為同一家，請在下拉選擇該廠商`)
         expect(rpcCalls()).toEqual([])
         expect(h.db.project_subcontracts).toEqual([])
       }

@@ -598,6 +598,8 @@ export interface Subcontract {
   invoiceNo?: string | null
   invoiceDate?: string | null
   sortOrder?: number
+  /** 第六輪：既有列改綁另一家名冊廠商且有未付期款時的改綁原因（只在 PUT 帶）。 */
+  rebindReason?: string
   note: string | null
   createdAt?: string
   updatedAt?: string
@@ -656,8 +658,45 @@ export function putSubcontractPayments(
   )
 }
 
+/**
+ * 第六輪：副委託整批 PUT 遇 400 rebind_reason_required（既有列從名冊廠商 A 改綁 B 且有未付期款）→
+ * 用 ask 問改綁原因、帶在該列 rebindReason 重送；使用者取消（空白）就把原錯誤丟出去。
+ */
+export async function putProjectSubcontractsWithRebind(
+  projectId: string,
+  body: { subcontracts: Subcontract[]; deleteReason?: string },
+  ask: (message: string) => string | null,
+) {
+  let rows = body.subcontracts
+  for (let attempt = 0; attempt <= rows.length; attempt++) {
+    try {
+      return await putProjectSubcontracts(projectId, { ...body, subcontracts: rows })
+    } catch (err) {
+      const errBody = (err as { body?: { error?: unknown; id?: unknown; message?: unknown } } | null)?.body
+      if (errBody?.error !== "rebind_reason_required" || typeof errBody.id !== "string") throw err
+      const prompt = typeof errBody.message === "string" && errBody.message.trim() ? errBody.message : SUBCONTRACT_ERRORS.rebind_reason_required
+      const reason = ask(`${prompt}\n（會留存稽核紀錄）`)?.trim()
+      if (!reason) throw err
+      const id = errBody.id
+      rows = rows.map((r) => (r.id === id ? { ...r, rebindReason: reason } : r))
+    }
+  }
+  return putProjectSubcontracts(projectId, { ...body, subcontracts: rows })
+}
+
+/** 409 must_bind_vendor：後端帶了副委託名稱與撞到的名冊廠商名稱 → 「『X』與名冊廠商『Y』視為同一家，請在下拉選擇該廠商」。 */
+export function mustBindVendorText(err: unknown): string | null {
+  const body = (err as { body?: { error?: unknown; vendorName?: unknown; matchedVendorName?: unknown } } | null)?.body
+  if (body?.error !== "must_bind_vendor") return null
+  const x = typeof body.vendorName === "string" ? body.vendorName.trim() : ""
+  const y = typeof body.matchedVendorName === "string" ? body.matchedVendorName.trim() : ""
+  if (!x || !y) return null
+  return `「${x}」與名冊廠商「${y}」視為同一家，請在下拉選擇該廠商。`
+}
+
 export const SUBCONTRACT_ERRORS: Record<string, string> = {
-  must_bind_vendor: "此名稱與名冊廠商相同，請在下拉選擇名冊廠商。",
+  must_bind_vendor: "此名稱與名冊廠商視為同一家，請在下拉選擇名冊廠商。",
+  rebind_reason_required: "副委託改綁另一家名冊廠商且仍有未付期款，請填寫改綁原因。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_contract: "選到的合約不屬於本專案或已作廢。",
   invalid_company: "選到的公司主體不存在。",
@@ -682,6 +721,9 @@ export function humanizeSubcontractError(err: unknown, fallback: string): string
   // 中途發現某筆已被刪除（404）：後端訊息說明「前面 N 筆已儲存、其餘未儲存」，直接顯示。
   const server = (err as { serverMessage?: unknown } | null)?.serverMessage
   if (msg.includes("not_found") && typeof server === "string" && server.trim()) return server
+  const bind = mustBindVendorText(err)
+  if (bind) return bind
+  if (msg.includes("rebind_reason_required") && typeof server === "string" && server.trim()) return server
   for (const [code, text] of Object.entries(SUBCONTRACT_ERRORS)) {
     if (msg.includes(code)) return text
   }
@@ -1025,7 +1067,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   // 母案是選填（業主 2026-09-30 會議），後端不再回 parent_required；有帶母案才驗 invalid_parent。
   if (msg.includes("invalid_parent")) return "母案不合法：必須是同租戶的主案、不能是自己；主案本身也不能再掛母案。"
   if (msg.includes("has_child_projects")) return "這個主案底下還有追加／變更／代墊案，不能改成其他案型。請先把那些案的母案移走或清空。"
-  if (msg.includes("must_bind_vendor")) return "協力廠商名稱與名冊廠商相同，請在下拉選擇名冊廠商。"
+  if (msg.includes("must_bind_vendor")) return mustBindVendorText(err) ?? "協力廠商名稱與名冊廠商視為同一家，請在下拉選擇名冊廠商。"
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
   if (msg.includes("invalid_company")) return "選到的承接公司不存在或不屬於本租戶，請重新選擇。"
   if (msg.includes("company_inactive")) return "選到的承接公司已停用，請改選其他公司。"
@@ -1288,8 +1330,17 @@ export interface DuplicateProjectResponse {
     rootCode: string
   }
   archived: { id: string; code: string | null } | null
-  /** 複製出的非登錄副委託撞到多家同名名冊廠商、未自動綁定（2026-11-17）。 */
-  subcontractWarnings?: Array<{ vendorName: string; candidates: number; message: string }>
+  /**
+   * 複製副委託的廠商綁定提示（2026-11-17）：ambiguous＝撞多家同名未綁定；deleted_vendor＝原綁廠商已刪、改未綁定；
+   * autobound＝自動綁定唯一同名名冊廠商（請確認）。舊後端沒有 kind（＝ambiguous）。
+   */
+  subcontractWarnings?: Array<{
+    vendorName: string
+    candidates: number
+    kind?: "ambiguous" | "deleted_vendor" | "autobound"
+    boundVendorName?: string
+    message: string
+  }>
 }
 
 /** 複製完成後要提醒的副委託警告文字（沒有＝null）。 */

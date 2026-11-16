@@ -42,6 +42,8 @@ import {
   loadAllocations,
   assertAllocationVendorsStillMatch,
   assertPayeeBankStillMatchesVendor,
+  assertOtherPayeeStillNotRegisteredVendor,
+  nonInstallmentConfirmedIds,
   loadDisbursement,
   serializeMany,
   type Actor,
@@ -378,6 +380,8 @@ export async function submitDisbursement(
   await assertAllocationVendorsStillMatch(tenantId, current, allocations)
   // N-1：送簽前重驗收款帳戶快照仍等於名冊現值。
   await assertPayeeBankStillMatchesVendor(tenantId, current)
+  // F4（第六輪）：「其他」收款單送簽前重驗戶名不是名冊廠商（開單後名冊才新增同名廠商）。
+  await assertOtherPayeeStillNotRegisteredVendor(tenantId, current)
   await assertPaymentsAccepted(
     tenantId,
     actor,
@@ -581,6 +585,8 @@ export async function decideDisbursement(params: {
     await assertAllocationVendorsStillMatch(tenantId, current, await loadAllocations(tenantId, [id]))
     // N-1：核准前重驗收款帳戶快照仍等於名冊現值（駁回不擋）。
     await assertPayeeBankStillMatchesVendor(tenantId, current)
+    // F4（第六輪）：「其他」收款單核准前重驗戶名不是名冊廠商（駁回不擋）。
+    await assertOtherPayeeStillNotRegisteredVendor(tenantId, current)
   }
 
   const actedAt = new Date().toISOString()
@@ -960,6 +966,12 @@ export async function listPendingDisbursementApprovals(
     picked.map((p) => p.row),
   )
   const byId = new Map(serialized.map((s) => [s.id, s]))
+  // 第六輪：登錄廠商零分攤單標示「已確認為非期款支出」（核准畫面）。
+  const zeroAllocVendorIds = serialized.filter((s) => s.payeeKind === "vendor" && s.allocations.length === 0).map((s) => s.id)
+  if (zeroAllocVendorIds.length > 0) {
+    const confirmed = await nonInstallmentConfirmedIds(tenantId, zeroAllocVendorIds)
+    for (const id of zeroAllocVendorIds) byId.set(id, { ...byId.get(id)!, nonInstallmentConfirmed: confirmed.has(id) })
+  }
   const names = await employeeNames(
     tenantId,
     picked.flatMap((p) => [p.row.created_by_emp_id, p.row.submitted_by_emp_id ?? null, ...stepCandidates(p.step)]),

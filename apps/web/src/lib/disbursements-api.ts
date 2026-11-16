@@ -107,6 +107,8 @@ export interface Disbursement {
   allocationLabel?: string
   allocations: Allocation[]
   attachments?: Attachment[]
+  /** 第六輪：登錄廠商零分攤單曾確認「非期款支出」（只在單筆 GET 帶；核准頁標示用）。 */
+  nonInstallmentConfirmed?: boolean
 }
 
 /** 一關簽核（disbursement_approval_steps）。 */
@@ -388,7 +390,9 @@ export function describeBatchPayError(code: string, details?: Record<string, unk
   }
   if (code === "approval_required") return "放款單尚未簽核完成（草稿或送簽中），核准後才能放款。"
   // 需人工確認：後端附了含單號的中文說明（2026-11-12）。
-  if (code === "manual_check_required" && typeof details?.message === "string" && details.message.trim()) return details.message
+  if ((code === "manual_check_required" || code === "payee_is_registered_vendor") && typeof details?.message === "string" && details.message.trim()) {
+    return details.message
+  }
   return DISBURSEMENT_ERRORS[code] ?? code
 }
 
@@ -576,9 +580,10 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   payee_name_mismatch: "收款戶名與登錄廠商名稱不同；若要付給其他對象請改為非登錄收款方。",
   payee_bank_mismatch: "收款帳戶與登錄廠商名冊不同；若帳戶已變更請先到廠商名冊更新（需財務權限）。",
   allocation_vendor_changed: "分攤的副委託廠商已變更，請重新確認放款單。",
-  payee_is_registered_vendor: "此收款對象是登錄廠商，請改選登錄廠商；若此對象尚未綁定名冊廠商，請先到專案副委託選擇名冊廠商。",
+  vendor_bank_missing: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶。",
+  payee_is_registered_vendor: "收款對象與名冊廠商視為同一家，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
   payee_bank_changed: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出；已核准的單請先撤回簽核再編輯。",
-  invalid_payee_name: "名稱含有不可見字元，請重新輸入。",
+  invalid_payee_name: "名稱含有不可見字元，或混用拉丁與西里爾／希臘字母，請重新輸入。",
   vendor_has_unpaid_installments: "此廠商仍有未付期款，若要付期款請改用分攤；確定為非期款支出請勾選確認。",
   cannot_clear_allocations: "已分攤的放款單不能改成零分攤，請作廢後重開。",
   purpose_required: "登錄廠商不分攤期款（非專案支出）時，請填寫用途。",
@@ -617,6 +622,8 @@ export function humanizeDisbursementError(err: unknown, fallback: string): strin
   const body = (err as { body?: { autoVoided?: unknown; error?: unknown } } | null)?.body
   const server = (err as { serverMessage?: unknown } | null)?.serverMessage
   if (typeof server === "string" && server.trim() && (body?.autoVoided === true || msg.includes("manual_check_required"))) return server
+  // 第六輪：撞名冊廠商、名稱不合法 → 後端訊息帶廠商名稱／具體原因，直接顯示。
+  if (typeof server === "string" && server.trim() && (msg.includes("payee_is_registered_vendor") || msg.includes("invalid_payee_name"))) return server
   for (const [code, text] of Object.entries(DISBURSEMENT_ERRORS)) {
     if (msg.includes(code)) return text
   }

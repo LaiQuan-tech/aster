@@ -472,7 +472,14 @@ export default function DisbursementDetailPage() {
                 <div><p className="text-xs text-gray-500">毛額</p><p className="font-medium text-gray-900">{fmtMoney(d.grossAmount)}</p></div>
                 <div><p className="text-xs text-gray-500">收據抬頭</p><p className="font-medium text-gray-800">{companies.find((c) => c.id === d.receiptIssuerCompanyId)?.name ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">收據編號</p><p className="font-medium text-gray-800">{d.receiptRef ?? "—"}</p></div>
-                <div><p className="text-xs text-gray-500">用途</p><p className="font-medium text-gray-800">{d.purpose ?? "—"}</p></div>
+                <div>
+                  <p className="text-xs text-gray-500">用途</p>
+                  <p className="font-medium text-gray-800">{d.purpose ?? "—"}</p>
+                  {/* 第六輪：登錄廠商零分攤、建單／改單時已勾確認（廠商仍有未付期款）。 */}
+                  {d.nonInstallmentConfirmed && (
+                    <span className="mt-1 inline-block rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">已確認為非期款支出</span>
+                  )}
+                </div>
                 <div><p className="text-xs text-gray-500">發票</p><p className="font-medium text-gray-800">{d.hasInvoice ? `已開立${d.invoiceNo ? "・" + d.invoiceNo : ""}` : "未開立"}</p></div>
               </div>
               {d.note && <p className="mt-3 text-sm text-gray-600">備註：{d.note}</p>}

@@ -4,7 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { loadRosterNameKeyIndex, MUST_BIND_VENDOR, rosterMatchesOf } from "../services/roster-name-keys.js"
+import { loadRosterNameKeyIndex, mustBindVendorBody, rosterMatchesOf } from "../services/roster-name-keys.js"
 import {
   nextProjectCode,
   isUniqueViolation,
@@ -1141,14 +1141,15 @@ projectsRouter.post(
         }
       }
 
-      // 第五輪 #4（2026-11-17，同副委託整批 PUT）：非登錄副委託（vendorId 空）名稱 key 等於名冊廠商名稱 → 409 must_bind_vendor。
+      // 第五輪 #4（2026-11-17，同副委託整批 PUT）：非登錄副委託（vendorId 空）名稱 key 撞名冊廠商（第六輪：名稱／簡稱／帳戶戶名，同放款端）→ 409 must_bind_vendor。
       // create_project_application_atomic 不比對，只靠這裡在呼叫 RPC 前擋。
       const unboundInitial = initialSubcontracts.filter((item) => !item.vendorId && (item.vendorName ?? "").trim() !== "")
       if (unboundInitial.length > 0) {
         const index = await loadRosterNameKeyIndex(tenantId, "POST /projects")
         const hitIndex = initialSubcontracts.findIndex((item) => !item.vendorId && rosterMatchesOf(index, item.vendorName).length > 0)
         if (hitIndex >= 0) {
-          res.status(409).json({ ...MUST_BIND_VENDOR, id: null, index: hitIndex })
+          const hitName = initialSubcontracts[hitIndex]!.vendorName
+          res.status(409).json(mustBindVendorBody(hitName, rosterMatchesOf(index, hitName), { id: null, index: hitIndex }))
           return
         }
       }

@@ -56,7 +56,6 @@ const paymentRow = (id: string, subId: string, no = 1): Row => ({
 const subRow = (id: string, vendorId: string | null, vendorName: string): Row => ({
   id, tenant_id: TENANT_ID, project_id: PROJECT, deleted_at: null, kind: "subcontract", amount: "2000",
   withholding_rate: "0", withholding_threshold: 20000, vendor_id: vendorId, vendor_name: vendorName,
-  // 第五輪：#4 只放行截止時間（2026-11-17）前建立的非登錄副委託。
   created_at: "2026-01-01T00:00:00.000Z",
 })
 
@@ -571,7 +570,8 @@ describe("R3：收款「其他」不可用登錄廠商的名稱／帳戶戶名",
       expect(res.status, name).toBe(400)
       expect(res.body).toMatchObject({
         error: "payee_is_registered_vendor",
-        message: "此收款對象是登錄廠商，請改選登錄廠商；若此對象尚未綁定名冊廠商，請先到專案副委託選擇名冊廠商",
+        matchedVendorName: "測試甲工程行",
+        message: "收款對象與名冊廠商「測試甲工程行」視為同一家，請改選登錄廠商「測試甲工程行」；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商",
       })
       expect(anyWrites()).toHaveLength(0)
     }
@@ -810,7 +810,7 @@ describe("銀行三欄一致：有送／改到任一欄就整組照名冊帶入�
   })
 })
 
-describe("R3 第四輪：戶名正規化比對＋#4 非登錄副委託同名放行", () => {
+describe("R3 第四輪：戶名正規化比對（第六輪起 #4 非登錄副委託同名不再放行）", () => {
   const VENDOR_C = "aaaaaaaa-0000-4000-8000-00000000000e"
   const VENDOR_D = "aaaaaaaa-0000-4000-8000-00000000000f"
   beforeEach(() => {
@@ -850,13 +850,14 @@ describe("R3 第四輪：戶名正規化比對＋#4 非登錄副委託同名放�
     }
   })
 
-  it("#4：分攤全是非登錄副委託且戶名＝該副委託名稱 → 201；零分攤冒用 → 400", async () => {
-    const ok = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
-    expect(ok.status, JSON.stringify(ok.body)).toBe(201)
+  it("第六輪：分攤全是非登錄副委託且戶名＝該副委託名稱（撞名冊）→ 也 400（請改綁名冊廠商）；零分攤冒用 → 400", async () => {
+    const unbound = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
+    expect(unbound.status).toBe(400)
+    expect(unbound.body).toMatchObject({ error: "payee_is_registered_vendor", matchedVendorName: "測試非登錄下包有限公司" })
+    expect(unbound.body.message).toContain("請先在副委託下拉選擇該廠商")
     const zero = await as(request(app).post("/disbursements")).send(other("測試非登錄下包"))
     expect(zero.status).toBe(400)
     expect(zero.body.error).toBe("payee_is_registered_vendor")
-    expect(zero.body.message).toContain("若此對象尚未綁定名冊廠商，請先到專案副委託選擇名冊廠商")
   })
 
   it("#4 不適用：戶名與非登錄副委託名稱不同（冒用甲）→ 400", async () => {
@@ -920,16 +921,16 @@ describe("第五輪（2026-11-17）", () => {
   })
   const other = (name: string, allocations: unknown[] = []) => body({ payeeKind: "other", vendorId: null, payeeName: name, allocations })
 
-  describe("第 1 項 #4 截止時間：副委託建立時間", () => {
-    it("截止前建立的非登錄同名副委託 → 放行 201；截止後建立的 → 400", async () => {
-      const ok = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
-      expect(ok.status, JSON.stringify(ok.body)).toBe(201)
-      fake.db.project_subcontracts = fake.db.project_subcontracts!.map((s) =>
-        s.id === SUB_FREE ? { ...s, created_at: "2026-11-17T00:00:00+08:00" } : s,
-      )
-      const late = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
-      expect(late.status).toBe(400)
-      expect(late.body.error).toBe("payee_is_registered_vendor")
+  describe("第六輪第 1 項：拿掉截止時間放行", () => {
+    it("非登錄同名副委託不論建立時間（截止前／後）一律 400 payee_is_registered_vendor", async () => {
+      for (const createdAt of ["2026-01-01T00:00:00.000Z", "2026-11-17T00:00:00+08:00"]) {
+        fake.db.project_subcontracts = fake.db.project_subcontracts!.map((s) => (s.id === SUB_FREE ? { ...s, created_at: createdAt } : s))
+        fake.writes.length = 0
+        const res = await as(request(app).post("/disbursements")).send(other("測試非登錄下包", allocTo(SUB_FREE, PAY_FREE)))
+        expect(res.status, createdAt).toBe(400)
+        expect(res.body.error).toBe("payee_is_registered_vendor")
+        expect(anyWrites()).toHaveLength(0)
+      }
     })
   })
 
@@ -967,12 +968,13 @@ describe("第五輪（2026-11-17）", () => {
       expect(res.body).toMatchObject({ error: "cannot_clear_allocations", message: "已分攤的放款單不能改成零分攤，請作廢後重開" })
       expect(anyWrites()).toHaveLength(0)
     })
-    it("同名非登錄副委託的正常單（戶名＝副委託名稱）替換成同名另一期 → 200", async () => {
+    it("第六輪：同名非登錄副委託的舊單（戶名＝副委託名稱、撞名冊）替換成同名另一期 → 400（請改綁名冊廠商）", async () => {
       fake.db.project_subcontract_payments!.push(paymentRow("dddddddd-0000-4000-8000-0000000000ba", SUB_FREE, 2))
       fake.db.disbursements = [draftRow({ payee_kind: "other", vendor_id: null, payee_name: "測試非登錄下包", payee_bank_account: "123", payee_bank_code: null, payee_bank_name: null })]
       fake.db.disbursement_allocations = [allocRow(SUB_FREE, PAY_FREE)]
       const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ allocations: allocTo(SUB_FREE, "dddddddd-0000-4000-8000-0000000000ba") })
-      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe("payee_is_registered_vendor")
     })
   })
 

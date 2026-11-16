@@ -6,7 +6,8 @@ import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLogStrict } from "../services/audit.js"
 import { vendorHasOpenDisbursements, vendorHasUnpaidInstallments } from "../services/vendor-unpaid.js"
-import { hasInvisibleNameChars, INVISIBLE_NAME_MESSAGE } from "../lib/payee-name.js"
+import { invalidNameMessage, payeeNameKey } from "../lib/payee-name.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
@@ -256,14 +257,20 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
     res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
     return
   }
-  if (invisibleVendorName(parsed.data)) {
-    res.status(400).json(INVALID_VENDOR_NAME)
+  const invalidName = invalidVendorName(parsed.data)
+  if (invalidName) {
+    res.status(400).json(invalidName)
     return
   }
   try {
     const self = userId ? await resolveSelf(tenantId, userId) : null
     if (parsed.data.isAffiliate === true && !isHrRole(self?.role)) {
       res.status(403).json(AFFILIATE_HR_ONLY)
+      return
+    }
+    const dupName = await duplicateVendorName(tenantId, parsed.data.name, null)
+    if (dupName !== null) {
+      res.status(409).json(vendorNameDuplicateBody(dupName))
       return
     }
     const present = rosterFieldsPresent(parsed.data)
@@ -294,11 +301,38 @@ const BANK_FIELDS: Array<[keyof z.infer<typeof vendorBody>, string]> = [
   ["bankCode", "bank_code"], ["bankName", "bank_name"], ["bankAccount", "bank_account"], ["accountHolder", "account_holder"],
 ]
 
-/** R3 第五輪（2026-11-17）：名冊名稱／帳戶戶名不可含不可見字元（零寬、變體選擇符、組合符號、韓文填充字…）。 */
-function invisibleVendorName(body: Partial<z.infer<typeof vendorBody>>): boolean {
-  return hasInvisibleNameChars(body.name) || hasInvisibleNameChars(body.accountHolder)
+/**
+ * R3 第五輪（2026-11-17）：名冊名稱／帳戶戶名不可含不可見字元（零寬、變體選擇符、組合符號、韓文填充字…）；
+ * 第六輪 F2：也不可拉丁字母混用西里爾／希臘字母。合法回 null，否則回 400 本文。
+ */
+function invalidVendorName(body: Partial<z.infer<typeof vendorBody>>): { error: "invalid_vendor_name"; message: string } | null {
+  const message = invalidNameMessage(body.name) ?? invalidNameMessage(body.accountHolder)
+  return message ? { error: "invalid_vendor_name", message } : null
 }
-const INVALID_VENDOR_NAME = { error: "invalid_vendor_name", message: INVISIBLE_NAME_MESSAGE }
+
+/**
+ * 第六輪 F1（2026-11-17）：名冊重名——新名稱 key（payeeNameKey）等於同租戶另一家未刪廠商的名稱 key → 回那一家的名稱；
+ * 沒撞到回 null。POST 與 PATCH（改名）用，呼叫端回 409 vendor_name_duplicate。
+ */
+async function duplicateVendorName(tenantId: string, name: string, selfId: string | null): Promise<string | null> {
+  const key = payeeNameKey(name)
+  if (!key) return null
+  const roster = await selectAllPages<{ id: string; name: string | null }>(
+    (from, to) => supabaseAdmin.from("vendors").select("id, name").eq("tenant_id", tenantId).is("deleted_at", null).order("id").range(from, to),
+    "vendors (duplicate name)",
+  )
+  const isSelf = (v: { id: string }) => !!selfId && v.id.toLowerCase() === selfId.toLowerCase()
+  // PATCH 名稱 key 沒變（只改大小寫、空白、後綴）不算改名，不回溯既有重名。
+  const self = roster.find(isSelf)
+  if (self && payeeNameKey(self.name) === key) return null
+  const hit = roster.find((v) => !isSelf(v) && (v.name ?? "").trim() !== "" && payeeNameKey(v.name) === key)
+  return hit ? (hit.name ?? "") : null
+}
+const vendorNameDuplicateBody = (existing: string) => ({
+  error: "vendor_name_duplicate",
+  matchedVendorName: existing,
+  message: `名冊已有同名廠商「${existing}」`,
+})
 
 type BankChangeCheck = {
   /** 名稱（trim 後不同）與收款帳戶同時改、且有未付款項 → 409 vendor_identity_change。 */
@@ -313,7 +347,7 @@ type BankChangeCheck = {
 
 /**
  * 名冊 PATCH 改收款帳戶的防線（2026-11-16 R2 第四輪）。只在任一收款帳戶欄位（代碼／銀行名／帳號／戶名）值有變時才查。
- * 未付期款：未刪除副委託（vendor_id＝本廠商）底下 paid_on 為空、或已付金額（實付＋代扣）小於應付（override_amount ?? amount）。
+ * 未付期款：見 services/vendor-unpaid.ts（第六輪起與應付清單一致：有付款日＝已付、排除歸檔專案與金額 0 的期款）。
  * 開單：未作廢未匯款（draft／pending_approval／approved）的放款單。查無廠商回全 false（交給後面的 update 回 404）。
  */
 async function checkBankChange(tenantId: string, vendorId: string, body: Partial<z.infer<typeof vendorBody>>): Promise<BankChangeCheck> {
@@ -342,10 +376,12 @@ async function checkBankChange(tenantId: string, vendorId: string, body: Partial
   const hasUnpaid = await vendorHasUnpaidInstallments(tenantId, vendorId, `PATCH /vendors/${vendorId}`)
 
   const before = Object.fromEntries(BANK_FIELDS.map(([, col]) => [col, cur[col] ?? null]))
+  // 第六輪 U1：名冊第一次補帳戶（原本代碼／銀行名／帳號三欄皆空）不需要變更原因。
+  const firstFill = ["bank_code", "bank_name", "bank_account"].every((col) => norm(cur[col]) === null)
   return {
     identityBlocked: nameChanged && (hasOpen || hasUnpaid),
     openDisbursements: hasOpen,
-    needsReason: !hasOpen && hasUnpaid,
+    needsReason: !hasOpen && hasUnpaid && !firstFill,
     before,
   }
 }
@@ -364,8 +400,9 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     res.status(400).json({ error: "no_fields" })
     return
   }
-  if (invisibleVendorName(parsed.data)) {
-    res.status(400).json(INVALID_VENDOR_NAME)
+  const invalidName = invalidVendorName(parsed.data)
+  if (invalidName) {
+    res.status(400).json(invalidName)
     return
   }
   try {
@@ -398,6 +435,13 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     // 名冊把廠商整筆改成另一家（2026-11-16）：同一次同時改名稱與收款帳戶，等於把這筆 vendor_id 換成另一家公司；
     // 掛在這個 vendor_id 上的未付期款／未匯款的放款單會跟著匯到新帳戶 → 有未付款項時 409 vendor_identity_change。
     // R2 第四輪：只改帳戶也要擋——有未匯款放款單 → 409；只有未付期款 → 須填變更原因（寫稽核）。
+    if (parsed.data.name !== undefined) {
+      const dupName = await duplicateVendorName(tenantId, parsed.data.name, id)
+      if (dupName !== null) {
+        res.status(409).json(vendorNameDuplicateBody(dupName))
+        return
+      }
+    }
     const bankCheck = await checkBankChange(tenantId, id, parsed.data)
     if (bankCheck.identityBlocked) {
       res.status(409).json({

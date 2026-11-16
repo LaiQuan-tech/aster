@@ -1,5 +1,5 @@
 import { selectAllPages } from "../lib/select-all-pages.js"
-import { hasInvisibleNameChars, INVISIBLE_NAME_MESSAGE, keyLength, payeeNameKey } from "../lib/payee-name.js"
+import { invalidNameMessage, payeeNameKey, rosterVendorKeys } from "../lib/payee-name.js"
 import { vendorHasUnpaidInstallments } from "./vendor-unpaid.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isProjectDeletedError, isRetryableConflictError, isRowDeletedError } from "../middleware/project-deleted.js"
@@ -575,6 +575,11 @@ export type SerializedDisbursement = {
   allocations: SerializedAllocation[]
   allocationLabel: string
   attachments?: SerializedAttachment[]
+  /**
+   * 第六輪（核准頁標示）：登錄廠商零分攤單曾確認「非期款支出」（confirmNonInstallment，由稽核紀錄查出）。
+   * 只有單筆 GET 帶；列表不帶。
+   */
+  nonInstallmentConfirmed?: boolean
   /** 簽核軌跡（只有 GET /disbursements/:id 帶；services/disbursement-approval.ts 填）。 */
   approvalSteps?: SerializedApprovalStep[]
 }
@@ -790,7 +795,34 @@ export async function getDisbursement(tenantId: string, id: string): Promise<Ser
   const row = await loadDisbursement(tenantId, id)
   if (!row) return null
   const [serialized, attachments] = await Promise.all([serializeMany(tenantId, [row]), loadAttachments(tenantId, id, true)])
-  return { ...serialized[0], attachments }
+  const out: SerializedDisbursement = { ...serialized[0], attachments }
+  if (row.payee_kind === "vendor" && out.allocations.length === 0) {
+    out.nonInstallmentConfirmed = (await nonInstallmentConfirmedIds(tenantId, [id])).has(id)
+  }
+  return out
+}
+
+/**
+ * 第六輪（核准頁標示）：這些單中有「確認非期款支出」稽核的 id（建單 INSERT 稽核或改單嚴格稽核的
+ * new_row.confirmNonInstallment＝true）。查稽核表失敗不擋顯示，回空集合並記 log。
+ */
+export async function nonInstallmentConfirmedIds(tenantId: string, ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>()
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await supabaseAdmin
+      .from("audit_logs")
+      .select("record_id")
+      .eq("tenant_id", tenantId)
+      .eq("table_name", "disbursements")
+      .in("record_id", ids.slice(i, i + 100))
+      .contains("new_row", { confirmNonInstallment: true })
+    if (error) {
+      logger.warn({ err: error.message }, "nonInstallmentConfirmedIds: audit lookup failed")
+      return out
+    }
+    for (const r of (data ?? []) as Array<{ record_id: string | null }>) if (r.record_id) out.add(r.record_id)
+  }
+  return out
 }
 
 export { loadAttachments as listAttachments }
@@ -1447,6 +1479,13 @@ export function assertPayeeBankMatchesVendor(
     const sent = input[field]
     if (sent === undefined) continue
     if (vendorBankRawMatches(vendor, field, sent)) continue
+    // 第六輪 U1：名冊這欄沒有資料、卻手填了值 → 請先到名冊補帳戶（不是「與名冊不同」）。
+    if (normBankText(vendorBankDefault(vendor, field)) === "" && normBankText(sent) !== "") {
+      throw new DisbursementError(400, "vendor_bank_missing", {
+        field,
+        message: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶",
+      })
+    }
     // 快照格式只在「與 DB 上這張單現有快照完全相同（未改動）」且該快照就是名冊快照時放行（舊單整份表單回送）。
     const storedVal = stored?.[field]
     const unchangedSnapshot =
@@ -1465,24 +1504,12 @@ export function assertPayeeBankMatchesVendor(
 export { payeeNameKey } from "../lib/payee-name.js"
 
 /**
- * #4 放行條件的截止時間（2026-11-17 第五輪）：副委託整批 PUT 從這次部署起不准新建／改名成與名冊廠商同名的非登錄副委託
- * （409 must_bind_vendor），所以只有這之前建立的非登錄同名副委託才放行「其他」收款；之後建立的一律要綁名冊廠商。
+ * R3：收款「其他」但戶名（key 比對）與同租戶未刪名冊廠商視為同一家（名稱／簡稱 key≥3／帳戶戶名，
+ * lib/payee-name.ts rosterVendorKeys，副委託 must_bind_vendor 同一套）→ payee_is_registered_vendor。
+ * 第六輪（2026-11-17）：拿掉 #4「非登錄副委託同名放行」與截止時間——prod 已確認非登錄副委託撞名冊 0 筆，
+ * 同名一律擋，請改選登錄廠商（副委託請先綁名冊廠商）。建單／改單回 400；送審／核准／付款守門回 409（F4）。
  */
-export const UNBOUND_SAME_NAME_CUTOFF = "2026-11-17T00:00:00+08:00"
-const UNBOUND_SAME_NAME_CUTOFF_MS = Date.parse(UNBOUND_SAME_NAME_CUTOFF)
-
-/**
- * R3：收款「其他」但戶名（key 比對）是同租戶未刪名冊廠商的名稱／簡稱／帳戶戶名 → 400 payee_is_registered_vendor。
- * #4 例外：有分攤、且每一列都是非登錄副委託（vendor_id null）而戶名 key 等於該副委託的廠商名稱 key → 放行
- * （副委託還沒綁名冊的正常付款）。零分攤不例外（登錄廠商的非專案支出請選登錄廠商、填用途）。
- */
-export async function assertPayeeNotRegisteredVendor(
-  tenantId: string,
-  payeeName: string,
-  allocations: ReadonlyArray<
-    Pick<ResolvedAllocation, "subcontractId" | "subcontractVendorId" | "subcontractVendorName" | "subcontractCreatedAt">
-  > = [],
-): Promise<void> {
+export async function assertPayeeNotRegisteredVendor(tenantId: string, payeeName: string, status: 400 | 409 = 400): Promise<void> {
   const key = payeeNameKey(payeeName)
   if (!key) return
   const vendors = await selectAllPages<{ id: string; name: string | null; short_name?: string | null; account_holder: string | null }>(
@@ -1496,36 +1523,26 @@ export async function assertPayeeNotRegisteredVendor(
         .range(from, to),
     "assertPayeeNotRegisteredVendor",
   )
-  // 第五輪：簡稱 key 少於 3 字不比（避免「大同」之類誤擋）；帳戶戶名 key 與名稱 key 不同且少於 3 字也不比。
-  const keyOf = (n: string | null | undefined) => ((n ?? "").trim() !== "" ? payeeNameKey(n) : "")
-  const hit = vendors.some((v) => {
-    const nameKey = keyOf(v.name)
-    if (nameKey && nameKey === key) return true
-    const shortKey = keyOf(v.short_name)
-    if (shortKey && keyLength(shortKey) >= 3 && shortKey === key) return true
-    const holderKey = keyOf(v.account_holder)
-    if (holderKey && (holderKey === nameKey || keyLength(holderKey) >= 3) && holderKey === key) return true
-    return false
-  })
+  const hit = vendors.find((v) => rosterVendorKeys(v).includes(key))
   if (!hit) return
-  // #4 放行只限截止時間前建立的非登錄副委託（之後建立的副委託 PUT 已不准同名不綁，見 UNBOUND_SAME_NAME_CUTOFF）。
-  const createdBeforeCutoff = (at: string | null | undefined) => {
-    const ms = at ? Date.parse(at) : NaN
-    return Number.isFinite(ms) && ms < UNBOUND_SAME_NAME_CUTOFF_MS
-  }
-  const unboundSameName =
-    allocations.length > 0 &&
-    allocations.every(
-      (a) =>
-        !!a.subcontractId &&
-        a.subcontractVendorId === null &&
-        payeeNameKey(a.subcontractVendorName) === key &&
-        createdBeforeCutoff(a.subcontractCreatedAt),
-    )
-  if (unboundSameName) return
-  throw new DisbursementError(400, "payee_is_registered_vendor", {
-    message: "此收款對象是登錄廠商，請改選登錄廠商；若此對象尚未綁定名冊廠商，請先到專案副委託選擇名冊廠商",
+  const matchedVendorName = hit.name ?? ""
+  throw new DisbursementError(status, "payee_is_registered_vendor", {
+    matchedVendorName,
+    matchedVendorId: hit.id,
+    message: `收款對象與名冊廠商「${matchedVendorName}」視為同一家，請改選登錄廠商「${matchedVendorName}」；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商`,
   })
+}
+
+/**
+ * F4（第六輪）：送審、核准、付款（含批次）前，「其他」收款單重驗戶名不是名冊廠商——開單後名冊才新增同名廠商時擋（409）。
+ * 駁回、作廢不呼叫。
+ */
+export async function assertOtherPayeeStillNotRegisteredVendor(
+  tenantId: string,
+  current: Pick<DisbursementRow, "payee_kind" | "payee_name">,
+): Promise<void> {
+  if (current.payee_kind !== "other") return
+  await assertPayeeNotRegisteredVendor(tenantId, current.payee_name ?? "", 409)
 }
 
 /**
@@ -1709,9 +1726,9 @@ async function resolveHeader(
     vendor = data as unknown as VendorLite
   }
   // R3 第五輪（2026-11-17）：戶名含不可見字元 → 400（PATCH 只在戶名／收款方有改時查，不回溯舊單）。
-  if (opts.checkPayeeName !== false && hasInvisibleNameChars(input.payeeName)) {
-    throw new DisbursementError(400, "invalid_payee_name", { message: INVISIBLE_NAME_MESSAGE })
-  }
+  // 第六輪 F2：拉丁字母混用西里爾／希臘字母也擋。
+  const badName = opts.checkPayeeName !== false ? invalidNameMessage(input.payeeName) : null
+  if (badName) throw new DisbursementError(400, "invalid_payee_name", { message: badName })
   const payeeName = (input.payeeName ?? "").trim() || vendor?.name || ""
   if (!payeeName) throw new DisbursementError(400, "payee_name_required")
   if (vendor && opts.checkPayeeName !== false) assertPayeeNameMatchesVendor(payeeName, vendor)
@@ -2335,8 +2352,8 @@ export type Actor = { empId: string | null; role?: string | null; active?: boole
 export async function createDisbursement(tenantId: string, actor: Actor, input: DisbursementInput): Promise<SerializedDisbursement> {
   const header = await resolveHeader(tenantId, input)
   const allocations = await resolveAllocations(tenantId, input.allocations)
-  // R3：收款「其他」但戶名（正規化後）是登錄廠商 → 400（#4 非登錄副委託同名放行）。
-  if (header.payee_kind === "other") await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, allocations)
+  // R3：收款「其他」但戶名（正規化後）與名冊廠商視為同一家 → 400（第六輪起非登錄副委託同名也不放行）。
+  if (header.payee_kind === "other") await assertPayeeNotRegisteredVendor(tenantId, header.payee_name)
   assertAllocationVendors(header.vendor_id, allocations)
   assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
   assertVendorPurpose(header, allocations)
@@ -2394,6 +2411,8 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
         ...row,
         allocations: input.allocations,
         ...(forcedPayReason ? { forcedPaid: true, forceReason: forcedPayReason } : {}),
+        // 第六輪：核准頁「已確認為非期款支出」標示從這裡查（建單前的嚴格稽核還沒有單號 id）。
+        ...(nonInstallmentConfirmed ? { confirmNonInstallment: true } : {}),
       },
       actorEmpId: actor.empId,
       context: "POST /disbursements",
@@ -2695,7 +2714,7 @@ export async function updateDisbursement(
         refKeys(allocations.map((a) => ({ sub: a.subcontractId, pay: a.subcontractPaymentId })))
     // R3：PATCH 只在收款方、戶名或分攤有改時檢查（不回溯）。
     if (header.payee_kind === "other" && (payeeChanged || payeeNameChanged || allocationsChanged)) {
-      await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, allocations)
+      await assertPayeeNotRegisteredVendor(tenantId, header.payee_name)
     }
     if (payeeChanged) {
       assertAllocationVendors(header.vendor_id, allocations)
@@ -2712,8 +2731,13 @@ export async function updateDisbursement(
     assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
     if (payeeChanged || patch.allocations !== undefined || patch.purpose !== undefined) assertVendorPurpose(header, allocations)
     // 第 5 項：換成登錄廠商零分攤時，廠商仍有未付期款要確認（整份表單回送、分攤沒變不重問）。
+    // 第六輪 F3：零分攤登錄廠商單只要金額（含代扣）或用途有改，也重跑（開單後廠商才新增期款、再改金額的情況）。
+    const amountOrPurposeChanged =
+      roundMoney(header.amount) !== roundMoney(num(current.amount) ?? 0) ||
+      roundMoney(header.withheld_amount) !== roundMoney(num(current.withheld_amount) ?? 0) ||
+      (header.purpose ?? "") !== (current.purpose ?? "").trim()
     const nonInstallmentConfirmed =
-      payeeChanged || allocationsChanged
+      payeeChanged || allocationsChanged || amountOrPurposeChanged
         ? await assertZeroAllocVendorConfirmed(tenantId, header, allocations, patch.confirmNonInstallment)
         : false
     if (patch.allocations !== undefined) {
@@ -2803,6 +2827,8 @@ export async function payDisbursement(
   await assertAllocationVendorsStillMatch(tenantId, current, allocations)
   // N-1：付款前重驗收款帳戶快照仍等於名冊現值。
   await assertPayeeBankStillMatchesVendor(tenantId, current)
+  // F4（第六輪）：「其他」收款單付款前（含批次付款）重驗戶名不是名冊廠商。
+  await assertOtherPayeeStillNotRegisteredVendor(tenantId, current)
   // M5：付款前再確認一次期款都已驗收（建單之後才被取消驗收的情況）。
   await assertPaymentsAccepted(
     tenantId,

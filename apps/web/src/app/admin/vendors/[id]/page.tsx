@@ -201,7 +201,8 @@ export default function VendorDetailPage() {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "儲存失敗";
-      setSaveError(msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : humanizeVendorIdentityError(humanizeAffiliateError(msg)));
+      const server = (err as { serverMessage?: string } | null)?.serverMessage;
+      setSaveError(msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : humanizeVendorIdentityError(humanizeAffiliateError(msg), server));
     } finally {
       setSaving(false);
     }

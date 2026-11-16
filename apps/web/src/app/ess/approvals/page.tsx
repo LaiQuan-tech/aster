@@ -814,6 +814,9 @@ export default function ApprovalsPage() {
                       <dt className="text-gray-400">用途</dt>
                       <dd className="whitespace-pre-wrap break-words">
                         {d.purpose ? d.purpose : <span className="text-gray-400">（未填）</span>}
+                        {d.nonInstallmentConfirmed && (
+                          <span className="ml-1 inline-block rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">已確認為非期款支出</span>
+                        )}
                       </dd>
                       {d.allocationLabel && (
                         <>

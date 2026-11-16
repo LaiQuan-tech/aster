@@ -31,6 +31,10 @@ export interface Danger {
 const hasAnyKey = (keys: string[]) => (body: unknown) =>
   !!body && typeof body === "object" && keys.some((k) => Object.prototype.hasOwnProperty.call(body, k))
 
+/** 放款單 body 帶 confirmNonInstallment: true（確認登錄廠商零分攤為非期款支出）。 */
+const confirmsNonInstallment = (body: unknown): boolean =>
+  !!body && typeof body === "object" && !Array.isArray(body) && (body as Record<string, unknown>).confirmNonInstallment === true
+
 /** body 任何一層含銀行相關鍵（bankCode／bank_name／bankAccount／accountHolder／account_holder／任何 bank* 鍵）。 */
 function hasBankKey(body: unknown): boolean {
   if (Array.isArray(body)) return body.some(hasBankKey)
@@ -166,6 +170,9 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   // 2026-11-16 付錯人驗收：放款單帶了收款銀行欄位（payeeBankName／payeeBankAccount／payeeBankCode，含帶 null）
   // ＝自己指定匯款帳戶，與改廠商收款帳號同級：最高風險（後台本人確認）。規則依序比對、第一條符合的生效；
   // 不帶銀行欄位時：建立仍走 SAFE_WRITES 白名單免確認、修改維持中風險。
+  // 第六輪：帶 confirmNonInstallment: true（確認登錄廠商零分攤為非期款支出，廠商仍有未付期款）＝可能重複付款，最高風險。
+  { method: "POST", path: "/disbursements", tier: "high", label: "建立放款單（確認非期款支出）", when: confirmsNonInstallment },
+  { method: "PATCH", path: "/disbursements/:id", tier: "high", label: "修改放款單（確認非期款支出）", when: confirmsNonInstallment },
   { method: "POST", path: "/disbursements", tier: "high", label: "建立放款單（含收款銀行帳戶）", when: hasBankKey },
   { method: "PATCH", path: "/disbursements/:id", tier: "high", label: "修改放款單收款銀行帳戶", when: hasBankKey },
   { method: "PATCH", path: "/disbursements/:id", label: "修改放款單" },

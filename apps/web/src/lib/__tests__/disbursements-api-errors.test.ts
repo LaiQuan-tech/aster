@@ -24,7 +24,7 @@ describe("humanizeDisbursementError", () => {
     expect(humanizeDisbursementError(apiErr({ error: "payee_bank_mismatch" }), "x")).toContain("收款帳戶與登錄廠商名冊不同")
     expect(humanizeDisbursementError(apiErr({ error: "allocation_vendor_changed" }), "x")).toContain("分攤的副委託廠商已變更")
     expect(humanizeDisbursementError(apiErr({ error: "payee_is_registered_vendor" }), "x")).toContain("請改選登錄廠商")
-    expect(humanizeDisbursementError(apiErr({ error: "payee_is_registered_vendor" }), "x")).toContain("請先到專案副委託選擇名冊廠商")
+    expect(humanizeDisbursementError(apiErr({ error: "payee_is_registered_vendor" }), "x")).toContain("請先在副委託下拉選擇該廠商")
     expect(humanizeDisbursementError(apiErr({ error: "payee_bank_changed" }), "x")).toContain("重新帶入名冊帳戶")
     expect(humanizeDisbursementError(apiErr({ error: "purpose_required" }), "x")).toContain("請填寫用途")
     // 第五輪（2026-11-17）
@@ -32,6 +32,12 @@ describe("humanizeDisbursementError", () => {
     expect(humanizeDisbursementError(apiErr({ error: "invalid_payee_name" }), "x")).toContain("名稱含有不可見字元")
     expect(humanizeDisbursementError(apiErr({ error: "vendor_has_unpaid_installments" }), "x")).toContain("此廠商仍有未付期款")
     expect(humanizeDisbursementError(apiErr({ error: "cannot_clear_allocations" }), "x")).toContain("已分攤的放款單不能改成零分攤")
+  })
+  it("第六輪：撞名冊帶廠商名稱的後端訊息直接顯示；名冊沒帳戶有中文", () => {
+    const msg = "收款對象與名冊廠商「測試甲工程行」視為同一家，請改選登錄廠商「測試甲工程行」；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商"
+    expect(humanizeDisbursementError(apiErr({ error: "payee_is_registered_vendor", message: msg }), "x")).toBe(msg)
+    expect(describeBatchPayError("payee_is_registered_vendor", { message: msg })).toBe(msg)
+    expect(humanizeDisbursementError(apiErr({ error: "vendor_bank_missing" }), "x")).toBe("名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶。")
   })
   it("批次付款逐筆：manual_check_required 帶 message 時顯示它", () => {
     expect(describeBatchPayError("manual_check_required", { message: "單號 D-115-003 需人工確認" })).toBe("單號 D-115-003 需人工確認")

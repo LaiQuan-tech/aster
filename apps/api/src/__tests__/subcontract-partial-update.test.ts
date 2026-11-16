@@ -562,10 +562,10 @@ describe("R1a：副委託已有放款單分攤時不可換廠商（2026-11-16）
 describe("第五輪 #4（2026-11-17）：非登錄副委託不可與名冊廠商同名", () => {
   const VENDOR_SAME = "dddddddd-0000-4000-8000-0000000000f9"
   beforeEach(() => {
-    // 名冊有一家與既有非登錄列「測試廠商」同名（加公司後綴）的廠商；簡稱不參與比對。
+    // 名冊有一家與既有非登錄列「測試廠商」同名（加公司後綴）的廠商；第六輪起簡稱（key≥3）也參與比對。
     fake.db.vendors!.push({ id: VENDOR_SAME, tenant_id: TENANT_ID, name: "測試廠商股份有限公司", short_name: "測試簡稱行", deleted_at: null })
   })
-  const mustBind = { error: "must_bind_vendor", message: "此名稱與名冊廠商相同，請在下拉選擇名冊廠商" }
+  const mustBind = { error: "must_bind_vendor" }
 
   it("新建非登錄列名稱＝名冊廠商名稱（含後綴／標點變體）→ 409 must_bind_vendor、0 寫入", async () => {
     for (const vendorName of ["測試事務所", "測試事務所.", "(股)測試事務所", "測試廠商", "測試-廠商"]) {
@@ -576,7 +576,9 @@ describe("第五輪 #4（2026-11-17）：非登錄副委託不可與名冊廠商
         { amount: 5000, vendorId: null, vendorName },
       ])
       expect(res.status, vendorName).toBe(409)
-      expect(res.body, vendorName).toMatchObject({ ...mustBind, id: null })
+      expect(res.body, vendorName).toMatchObject({ ...mustBind, id: null, index: 2, vendorName })
+      expect(typeof res.body.matchedVendorName).toBe("string")
+      expect(res.body.message).toBe(`「${vendorName}」與名冊廠商「${res.body.matchedVendorName}」視為同一家，請在下拉選擇該廠商`)
       expect(fake.writes).toHaveLength(0)
     }
     // 沒送 vendorId 的新建列一樣算非登錄
@@ -603,14 +605,26 @@ describe("第五輪 #4（2026-11-17）：非登錄副委託不可與名冊廠商
     expect(rowOf(SUB_PLAIN)).toMatchObject({ vendor_id: null, vendor_name: "測試廠商", amount: 35000 })
   })
 
-  it("選名冊廠商（綁 vendorId）、不同名稱、只與簡稱相同 → 200", async () => {
+  it("選名冊廠商（綁 vendorId）、不同名稱 → 200", async () => {
     const res = await put([
       { id: SUB_FIRM, amount: 100000 },
       { id: SUB_PLAIN, amount: 30000 },
       { amount: 5000, vendorId: VENDOR_SAME, vendorName: "測試廠商股份有限公司" },
       { amount: 6000, vendorId: null, vendorName: "測試全新臨時廠商" },
-      { amount: 7000, vendorId: null, vendorName: "測試簡稱行" },
     ])
     expect(res.status, JSON.stringify(res.body)).toBe(200)
+  })
+
+  it("第六輪第 2 項：比對範圍同放款端——簡稱（key≥3）、帳戶戶名也算；回 matchedVendorName", async () => {
+    fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_SAME ? { ...v, account_holder: "測試戶名王小明" } : v))
+    for (const vendorName of ["測試簡稱行", "測試戶名王小明"]) {
+      const res = await put([{ id: SUB_FIRM, amount: 100000 }, { id: SUB_PLAIN, amount: 30000 }, { amount: 7000, vendorId: null, vendorName }])
+      expect(res.status, vendorName).toBe(409)
+      expect(res.body).toMatchObject({ error: "must_bind_vendor", matchedVendorName: "測試廠商股份有限公司", vendorName, index: 2 })
+    }
+    // 簡稱 key < 3 字不比
+    fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_SAME ? { ...v, short_name: "測簡" } : v))
+    const short = await put([{ id: SUB_FIRM, amount: 100000 }, { id: SUB_PLAIN, amount: 30000 }, { amount: 7000, vendorId: null, vendorName: "測簡" }])
+    expect(short.status).toBe(200)
   })
 })

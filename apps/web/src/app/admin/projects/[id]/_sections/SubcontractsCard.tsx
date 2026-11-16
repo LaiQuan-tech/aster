@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls } from "@/components/admin-ui";
 import { companyOptions } from "@/lib/company-options";
 import {
-  putProjectSubcontracts,
+  putProjectSubcontractsWithRebind,
   putSubcontractPayments,
   humanizeSubcontractError,
   type Subcontract,
@@ -133,7 +133,8 @@ export function SubcontractsCard({
         ...subcontractExtraPayload(r),
         note: r.note?.trim() || null,
       }));
-      const res = await putProjectSubcontracts(projectId, { subcontracts: body, deleteReason });
+      // 第六輪：改綁另一家名冊廠商且有未付期款 → 跳輸入框問原因後重送。
+      const res = await putProjectSubcontractsWithRebind(projectId, { subcontracts: body, deleteReason }, (m) => window.prompt(m));
       const rows = toSubRows(res.subcontracts);
       setSubDraft(rows);
       setOriginalSubIds(rows.map((r) => r.id).filter((x): x is string => !!x));

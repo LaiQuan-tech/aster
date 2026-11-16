@@ -24,7 +24,7 @@ import {
   invoiceBilling,
   listClients,
   putBillingShares,
-  putProjectSubcontracts,
+  putProjectSubcontractsWithRebind,
   receiveBilling,
   saveBillingSchedule,
   updateClient,
@@ -411,7 +411,9 @@ export function ApplicationSheet({
     saveBillingSchedule: (installments) => saveBillingSchedule(project.id, installments),
     invoiceBilling: (id, invoiceNo, invoicedOn) => invoiceBilling(id, invoicedOn ? { invoiceNo, invoicedOn } : { invoiceNo }),
     receiveBilling: (id, receivedOn) => receiveBilling(id, { receivedOn }),
-    putSubcontracts: (list, deleteReason) => putProjectSubcontracts(project.id, deleteReason ? { subcontracts: list, deleteReason } : { subcontracts: list }),
+    // 第六輪：改綁另一家名冊廠商且有未付期款 → 跳輸入框問原因後重送。
+    putSubcontracts: (list, deleteReason) =>
+      putProjectSubcontractsWithRebind(project.id, deleteReason ? { subcontracts: list, deleteReason } : { subcontracts: list }, (m) => window.prompt(m)),
     fetchBillings: async () => (await getBillingSchedule(project.id)).installments,
     fetchSubcontracts: async () => (await getProjectSubcontracts(project.id)).subcontracts,
     saveBillingShares: (list) => putBillingShares(project.id, list),

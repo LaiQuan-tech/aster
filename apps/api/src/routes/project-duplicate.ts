@@ -249,14 +249,26 @@ projectDuplicateRouter.post(
         "POST /projects/:id/duplicate",
       )
       const subcontractWarnings = result.subcontractWarnings ?? []
-      if (subcontractWarnings.length > 0) warnings.push("subcontract_vendor_ambiguous")
+      const kindOf = (w: (typeof subcontractWarnings)[number]) => w.kind ?? "ambiguous"
+      const WARNING_CODES = {
+        ambiguous: "subcontract_vendor_ambiguous",
+        deleted_vendor: "subcontract_vendor_deleted",
+        autobound: "subcontract_vendor_autobound",
+      } as const
+      for (const code of new Set(subcontractWarnings.map((w) => WARNING_CODES[kindOf(w)]))) warnings.push(code)
       res.status(201).json({
         project: result.project,
         archived: result.archived,
         warnings,
         subcontractWarnings: subcontractWarnings.map((w) => ({
           ...w,
-          message: `副委託「${w.vendorName}」與 ${w.candidates} 家名冊廠商同名，未自動綁定；請到新案副委託在下拉選擇正確的名冊廠商`,
+          kind: kindOf(w),
+          message:
+            kindOf(w) === "deleted_vendor"
+              ? `副委託「${w.vendorName}」原綁定的名冊廠商已刪除，新案改為未綁定；付款前請到新案副委託在下拉選擇正確的名冊廠商`
+              : kindOf(w) === "autobound"
+                ? `副委託「${w.vendorName}」已自動綁定名冊廠商「${w.boundVendorName ?? ""}」，請到新案副委託確認是否正確`
+                : `副委託「${w.vendorName}」與 ${w.candidates} 家名冊廠商同名，未自動綁定；請到新案副委託在下拉選擇正確的名冊廠商`,
         })),
       })
     } catch (err) {

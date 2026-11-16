@@ -174,7 +174,12 @@ export default function DisbursementApprovalsPage() {
                   </div>
                   <div>
                     <dt className="text-xs text-gray-400">用途</dt>
-                    <dd>{d.purpose ?? "—"}</dd>
+                    <dd>
+                      {d.purpose ?? "—"}
+                      {d.nonInstallmentConfirmed && (
+                        <span className="ml-1 inline-block rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">已確認為非期款支出</span>
+                      )}
+                    </dd>
                   </div>
                   <div>
                     <dt className="text-xs text-gray-400">建單／送簽</dt>

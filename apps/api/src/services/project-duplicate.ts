@@ -97,7 +97,18 @@ export type DuplicateProjectError =
   | "root_code_missing"
   | "code_generation_failed"
 
-export type SubcontractVendorWarning = { vendorName: string; candidates: number }
+/**
+ * 複製副委託的廠商綁定提示（第六輪）：
+ * - ambiguous：非登錄列撞多家名冊廠商，未自動綁定；
+ * - deleted_vendor：來源綁的廠商已刪除，保留非登錄（不自動綁同名新廠商）；
+ * - autobound：非登錄列只撞一家名冊廠商，已自動綁定（boundVendorName）。
+ */
+export type SubcontractVendorWarning = {
+  vendorName: string
+  candidates: number
+  kind?: "ambiguous" | "deleted_vendor" | "autobound"
+  boundVendorName?: string
+}
 
 export type DuplicateProjectResult =
   | {
@@ -379,22 +390,34 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
       const vendorOfRaw = (s: { vendor_id: string | null; vendor_name: string | null }) => {
         if (!s.vendor_id) return { vendor_id: null, vendor_name: s.vendor_name }
         const rosterName = rosterNames.get(s.vendor_id.toLowerCase())
-        if (rosterName === undefined) return { vendor_id: null, vendor_name: s.vendor_name }
+        if (rosterName === undefined) return { vendor_id: null, vendor_name: s.vendor_name, deletedVendor: true as const }
         const same = (s.vendor_name ?? "").trim() === rosterName.trim()
         return { vendor_id: s.vendor_id, vendor_name: same ? s.vendor_name : rosterName }
       }
       // 第五輪 #4（2026-11-17）：複製出的非登錄列名稱 key 撞名冊廠商名稱 → 名冊恰好一家就自動綁定（名稱改用名冊名稱）；
       // 多家無法判斷 → 保留非登錄並在回應附警告（不擋複製）。新案副委託的 created_at 晚於截止時間，不綁的話之後無法付款。
-      const unbound = subs.map((s) => vendorOfRaw(s as { vendor_id: string | null; vendor_name: string | null })).filter((v) => !v.vendor_id)
+      const unbound = subs
+        .map((s) => vendorOfRaw(s as { vendor_id: string | null; vendor_name: string | null }))
+        .filter((v) => !v.vendor_id && !("deletedVendor" in v))
       const nameIndex = unbound.some((v) => (v.vendor_name ?? "").trim())
         ? await loadRosterNameKeyIndex(tenantId, "project-duplicate subcontracts")
         : null
+      // 第六輪（2026-11-17）：來源綁的是已刪除廠商 → 不自動綁同名新廠商（可能是另一家），保留非登錄並回警告；
+      // 單一同名自動綁定也回通知 subcontract_vendor_autobound，讓使用者確認。
       const vendorOf = (s: { vendor_id: string | null; vendor_name: string | null }) => {
-        const v = vendorOfRaw(s)
+        const raw = vendorOfRaw(s)
+        const v = { vendor_id: raw.vendor_id, vendor_name: raw.vendor_name }
+        if ("deletedVendor" in raw) {
+          subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: 0, kind: "deleted_vendor" })
+          return v
+        }
         if (v.vendor_id || !nameIndex) return v
         const matches = rosterMatchesOf(nameIndex, v.vendor_name)
-        if (matches.length === 1) return { vendor_id: matches[0]!.id, vendor_name: matches[0]!.name }
-        if (matches.length > 1) subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: matches.length })
+        if (matches.length === 1) {
+          subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: 1, kind: "autobound", boundVendorName: matches[0]!.name })
+          return { vendor_id: matches[0]!.id, vendor_name: matches[0]!.name }
+        }
+        if (matches.length > 1) subcontractWarnings.push({ vendorName: v.vendor_name ?? "", candidates: matches.length, kind: "ambiguous" })
         return v
       }
       const { error: insErr } = await supabaseAdmin.from("project_subcontracts").insert(

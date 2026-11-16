@@ -38,6 +38,7 @@ beforeEach(() => {
     { id: SUB, tenant_id: TENANT_ID, project_id: "p1", vendor_id: VENDOR, vendor_name: "測試甲廠商", deleted_at: null },
     { id: SUB_DELETED, tenant_id: TENANT_ID, project_id: "p1", vendor_id: VENDOR, vendor_name: "測試甲廠商", deleted_at: "2026-10-01T00:00:00Z" },
   ]
+  fake.db.projects = [{ id: "p1", tenant_id: TENANT_ID, deleted_at: null, archived_at: null }]
   fake.db.project_subcontract_payments = []
   fake.db.disbursements = []
 })
@@ -47,7 +48,7 @@ const swap = { name: "測試乙廠商", bankAccount: "0000000000002", accountHol
 
 describe("PATCH /vendors/:id — 同時改名稱與帳戶", () => {
   it("有未付的副委託期款 → 409 vendor_identity_change、中文訊息、0 寫入", async () => {
-    fake.db.project_subcontract_payments = [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, paid_on: null }]
+    fake.db.project_subcontract_payments = [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, amount: "1000", override_amount: null, paid_on: null }]
     const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send(swap)
     expect(res.status).toBe(409)
     expect(res.body.error).toBe("vendor_identity_change")
@@ -64,7 +65,7 @@ describe("PATCH /vendors/:id — 同時改名稱與帳戶", () => {
   })
 
   it("409 訊息不再教「分兩次改」", async () => {
-    fake.db.project_subcontract_payments = [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, paid_on: null }]
+    fake.db.project_subcontract_payments = [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, amount: "1000", override_amount: null, paid_on: null }]
     const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send(swap)
     expect(res.body.message).toBe("同時更改廠商名稱與帳戶，且仍有未付款項。若是換成另一家公司，請新增廠商")
     expect(res.body.message).not.toMatch(/分兩次/)
@@ -154,14 +155,33 @@ describe("R2：改收款帳戶（2026-11-16 第四輪）", () => {
     })
   })
 
-  it("部分付款（實付＋代扣 < 應付）仍算未付期款；已付清 → 不需原因", async () => {
+  it("U3 第六輪：未付定義同應付清單——有付款日＝已付（部分付款也算）、歸檔專案與金額 0 的期款不算", async () => {
     fake.db.project_subcontract_payments = [{ ...unpaid()[0], paid_on: "2026-10-01", paid_amount: "500", withheld_amount: "0" }]
     const partial = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002" })
-    expect(partial.status).toBe(400)
-    fake.db.project_subcontract_payments = [{ ...unpaid()[0], paid_on: "2026-10-01", paid_amount: "900", withheld_amount: "100" }]
-    const settled = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002" })
-    expect(settled.status).toBe(200)
+    expect(partial.status).toBe(200)
+    fake.db.vendors![0]!.bank_account = "0000000000001"
+    fake.db.project_subcontract_payments = [{ ...unpaid()[0], amount: "0" }]
+    expect((await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000003" })).status).toBe(200)
+    fake.db.project_subcontract_payments = unpaid()
+    fake.db.projects = [{ id: "p1", tenant_id: TENANT_ID, deleted_at: null, archived_at: "2026-10-01T00:00:00Z" }]
+    expect((await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000004" })).status).toBe(200)
     expect(audits()).toHaveLength(0)
+    // 對照：未歸檔、未付、金額 > 0 → 仍要原因。
+    fake.db.projects = [{ id: "p1", tenant_id: TENANT_ID, deleted_at: null, archived_at: null }]
+    const need = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000005" })
+    expect(need.status).toBe(400)
+    expect(need.body.error).toBe("change_reason_required")
+  })
+
+  it("U1 第六輪：名冊第一次補帳戶（原本代碼／銀行名／帳號皆空）不需要變更原因", async () => {
+    fake.db.vendors![0] = { ...fake.db.vendors![0]!, bank_code: null, bank_name: null, bank_account: null }
+    fake.db.project_subcontract_payments = [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, amount: "1000", override_amount: null, paid_on: null }]
+    const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankCode: "000", bankName: "測試銀行", bankAccount: "0000000000009" })
+    expect(res.status).toBe(200)
+    // 已有帳戶再改 → 要原因（對照）。
+    const again = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000008" })
+    expect(again.status).toBe(400)
+    expect(again.body.error).toBe("change_reason_required")
   })
 })
 
