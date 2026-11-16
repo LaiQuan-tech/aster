@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { vendorIdForTypedName } from "../vendor-name-binding";
+import { engineerForTypedName, humanizeVendorIdentityError, vendorIdForTypedName } from "../vendor-name-binding";
 
 /**
  * VendorCombo 手改名稱欄時 vendorId 的綁定規則（2026-11-16）。
@@ -53,5 +53,27 @@ describe("vendorIdForTypedName — VendorCombo 手改名稱時的 vendorId", () 
 
   it("已選 id 不在名冊清單（例如已刪）且名稱無相符 → null", () => {
     expect(vendorIdForTypedName(vendors, "aaaaaaaa-0000-4000-8000-0000000000ff", "測試已刪廠商")).toBeNull();
+  });
+});
+
+describe("engineerForTypedName — 申請單協力技師欄手打名稱（同 vendorIdForTypedName 規則）", () => {
+  it("名冊同名兩筆：不自動綁第一筆，當自由輸入", () => {
+    expect(engineerForTypedName(vendors, null, "測試同名廠商")).toEqual({ vendorId: null, name: "測試同名廠商" });
+  });
+
+  it("原本已綁定 DUP2、名稱未變：保留 DUP2，不換成名冊第一筆 DUP1", () => {
+    expect(engineerForTypedName(vendors, DUP2, "測試同名廠商")).toEqual({ vendorId: DUP2, name: "測試同名廠商 " });
+  });
+
+  it("名冊剛好一筆相符 → 綁該筆、名稱用名冊名稱；沒有相符 → 自由輸入且不 trim", () => {
+    expect(engineerForTypedName(vendors, null, "測試甲廠商")).toEqual({ vendorId: A, name: "測試甲廠商" });
+    expect(engineerForTypedName(vendors, A, "測試自由 ")).toEqual({ vendorId: null, name: "測試自由 " });
+  });
+});
+
+describe("humanizeVendorIdentityError — 名冊同時改名稱與帳戶被 409 擋下", () => {
+  it("[409] vendor_identity_change → 中文說明；其他訊息原樣", () => {
+    expect(humanizeVendorIdentityError("[409] vendor_identity_change")).toMatch(/請新增廠商.*分兩次修改/);
+    expect(humanizeVendorIdentityError("[500] boom")).toBe("[500] boom");
   });
 });

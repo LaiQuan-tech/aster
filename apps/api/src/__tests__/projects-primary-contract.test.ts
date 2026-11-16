@@ -506,11 +506,16 @@ describe("POST /projects primary contract", () => {
       expect(rpcCalls()).toEqual([])
     })
 
-    it("vendorId 有值但沒帶名稱 → 400 vendor_name_mismatch", async () => {
-      const response = await post([{ vendorId: VENDOR_ID, amount: 10_000 }], "VN-NONAME")
-      expect(response.status).toBe(400)
-      expect(response.body.error).toBe("vendor_name_mismatch")
-      expect(rpcCalls()).toEqual([])
+    it("只帶 vendorId（名稱沒帶／null／空白）→ 201，名稱用名冊名稱補上（2026-11-16）", async () => {
+      const response = await post([
+        { vendorId: VENDOR_ID, amount: 10_000 },
+        { vendorId: VENDOR_ID, vendorName: null, amount: 20_000 },
+        { vendorId: VENDOR_ID, vendorName: "   ", amount: 30_000 },
+      ], "VN-NONAME")
+      expect(response.status).toBe(201)
+      const stored = await loadSubcontracts(h.tenantId, response.body.id)
+      expect(stored).toHaveLength(3)
+      for (const row of stored) expect(row).toMatchObject({ vendor_id: VENDOR_ID, vendor_name: "合格廠商" })
     })
 
     it("{甲的 id, 名稱甲}（前後空白不計）→ 201", async () => {

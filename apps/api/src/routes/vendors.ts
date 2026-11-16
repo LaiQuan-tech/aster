@@ -283,6 +283,72 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
   }
 })
 
+const BANK_FIELDS: Array<[keyof z.infer<typeof vendorBody>, string]> = [
+  ["bankCode", "bank_code"], ["bankName", "bank_name"], ["bankAccount", "bank_account"], ["accountHolder", "account_holder"],
+]
+const UNSETTLED_DISBURSEMENT_STATUSES = ["draft", "pending_approval", "approved"]
+
+/**
+ * PATCH 同時改了名稱（trim 後不同）與任一收款帳戶欄位（值有變），且該廠商仍有未付款項 → true。
+ * 未付款項：未刪除副委託（vendor_id＝本廠商）底下 paid_on 為 null 的期款，或未作廢未匯款
+ * （draft／pending_approval／approved）的放款單。查無廠商回 false（交給後面的 update 回 404）。
+ */
+async function identityChangeBlocked(
+  tenantId: string,
+  vendorId: string,
+  body: Partial<z.infer<typeof vendorBody>>,
+): Promise<boolean> {
+  if (body.name === undefined) return false
+  if (!BANK_FIELDS.some(([k]) => body[k] !== undefined)) return false
+  if (bankColsMissing) return false
+  const { data: stored, error } = await supabaseAdmin
+    .from("vendors")
+    .select("name, bank_code, bank_name, bank_account, account_holder")
+    .eq("tenant_id", tenantId)
+    .eq("id", vendorId)
+    .is("deleted_at", null)
+    .maybeSingle()
+  if (error) throw new Error(`PATCH /vendors/${vendorId} (load identity): ${error.message}`)
+  if (!stored) return false
+  const cur = stored as Record<string, string | null>
+  const norm = (v: unknown) => {
+    const t = typeof v === "string" ? v.trim() : ""
+    return t === "" ? null : t
+  }
+  if (norm(body.name) === norm(cur.name)) return false
+  const bankChanged = BANK_FIELDS.some(([k, col]) => body[k] !== undefined && norm(body[k]) !== norm(cur[col]))
+  if (!bankChanged) return false
+
+  const { data: subs, error: subErr } = await supabaseAdmin
+    .from("project_subcontracts")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("vendor_id", vendorId)
+    .is("deleted_at", null)
+  if (subErr) throw new Error(`PATCH /vendors/${vendorId} (load subcontracts): ${subErr.message}`)
+  const subIds = (subs ?? []).map((r) => (r as { id: string }).id)
+  if (subIds.length > 0) {
+    const { data: unpaid, error: payErr } = await supabaseAdmin
+      .from("project_subcontract_payments")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .in("subcontract_id", subIds)
+      .is("paid_on", null)
+      .limit(1)
+    if (payErr) throw new Error(`PATCH /vendors/${vendorId} (load payments): ${payErr.message}`)
+    if ((unpaid ?? []).length > 0) return true
+  }
+  const { data: open, error: disErr } = await supabaseAdmin
+    .from("disbursements")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("vendor_id", vendorId)
+    .in("status", UNSETTLED_DISBURSEMENT_STATUSES)
+    .limit(1)
+  if (disErr) throw new Error(`PATCH /vendors/${vendorId} (load disbursements): ${disErr.message}`)
+  return (open ?? []).length > 0
+}
+
 // ── PATCH /vendors/:id ─────────────────────────────────────────────────
 vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
@@ -323,6 +389,17 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
         }
         dropAffiliate = true
       }
+    }
+    // 名冊把廠商整筆改成另一家（2026-11-16）：同一次同時改名稱與收款帳戶，等於把這筆 vendor_id 換成另一家公司；
+    // 掛在這個 vendor_id 上的未付期款／未匯款的放款單會跟著匯到新帳戶 → 有未付款項時 409 vendor_identity_change。
+    // 只改名稱或只改帳戶維持現行（同一家公司改名、換帳戶）。
+    const blocked = await identityChangeBlocked(tenantId, id, parsed.data)
+    if (blocked) {
+      res.status(409).json({
+        error: "vendor_identity_change",
+        message: "同時更改廠商名稱與帳戶，且仍有未付款項。若是換成另一家公司，請新增廠商；若確為同一家公司改名換帳戶，請分兩次修改",
+      })
+      return
     }
     const { data, error } = await withVendorCols((cols, roster) => {
       if (!roster && present.length > 0) return migrationBlocked()

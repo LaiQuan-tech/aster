@@ -446,6 +446,27 @@ describe("發包單位", () => {
     expect(applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { amount: "abc" } } })).errors[0].field).toBe("sub:s1:amount")
   })
 
+  it("名冊同名兩筆：改單位名稱不自動綁第一筆（vendorId null，避免匯錯人）", () => {
+    const ctx = ctxOf({ subcontracts: subs, vendors: [{ id: "v2", name: "測試同名廠商" }, { id: "v3", name: "測試同名廠商" }] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { vendorName: "測試同名廠商" }, "new-2": { vendorName: "測試同名廠商", amount: "100" } } }))
+    expect(plan.subcontracts?.[0]).toMatchObject({ id: "s1", vendorId: null, vendorName: "測試同名廠商" })
+    expect(plan.subcontracts?.[2]).toMatchObject({ vendorId: null, vendorName: "測試同名廠商" })
+  })
+
+  it("既有綁定：名冊有同名另一筆排在前面，名稱改成該廠商名冊名稱時保留原 vendorId", () => {
+    // s1 綁 v1、存的名稱是舊名；名冊 v1 已改名，且另有同名 v4 排在前面
+    const ctx = ctxOf({ subcontracts: subs, vendors: [{ id: "v4", name: "測試改名後廠商" }, { id: "v1", name: "測試改名後廠商" }] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { vendorName: "測試改名後廠商" } } }))
+    expect(plan.subcontracts?.[0]).toMatchObject({ id: "s1", vendorId: "v1", vendorName: "測試改名後廠商" })
+  })
+
+  it("既有列原樣存檔（只改別的格子）不會改掉原本的 vendorId，即使名冊沒有那筆", () => {
+    const ctx = ctxOf({ subcontracts: subs, vendors: [{ id: "v2", name: "測試工程行" }] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { amount: "25000" } } }))
+    expect(plan.subcontracts?.[0]).toMatchObject({ id: "s1", vendorId: "v1", vendorName: "測試工程行", amount: 25000 })
+    expect(plan.subcontracts?.[1]).toMatchObject({ id: "s2", vendorId: "v1", vendorName: "測試技師事務所" })
+  })
+
   it("填回原值不算變更", () => {
     const ctx = ctxOf({ subcontracts: subs })
     expect(applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { vendorName: "測試工程行 ", amount: "20000" } } })).dirtyCount).toBe(0)

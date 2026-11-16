@@ -22,6 +22,7 @@
  */
 import { isOurContract, type Contract } from "./projects-api";
 import { formatMoney } from "./money";
+import { vendorIdForTypedName } from "./vendor-name-binding";
 import { amountFromPct, formatStagePct, pctFromAmount, savedOverrideOf, stageAmountDisplay, stageScheduleSummary } from "./project-application-stage-amounts";
 import {
   currentBonusPaidOn,
@@ -710,9 +711,10 @@ export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDr
     const apply = (row: Subcontract) => {
       if (diff.vendorName !== undefined) {
         const name = textOrNull(diff.vendorName);
-        const match = name ? ctx.vendors.find((v) => v.name === name) : undefined;
+        // 依名稱配廠商同 VendorCombo（vendorIdForTypedName，2026-11-16）：原本已綁定且名稱仍等於該廠商名冊名稱
+        // → 保留原 id；否則名冊剛好一筆同名才綁；同名多筆／沒有相符 → null（不可隨便取第一筆而匯錯人）。
         row.vendorName = name;
-        row.vendorId = match?.id ?? null;
+        row.vendorId = name ? vendorIdForTypedName(ctx.vendors, row.vendorId, name) : null;
       }
       if (diff.contact !== undefined) row.contact = textOrNull(diff.contact);
       if (diff.item !== undefined) row.item = textOrNull(diff.item);

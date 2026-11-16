@@ -354,14 +354,36 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
       .order("created_at", { ascending: true })
     if (error) throw new Error(`project-duplicate subcontracts(load): ${error.message}`)
     if (subs && subs.length > 0) {
+      // 不把舊錯配帶到新案（2026-11-16）：放款單名稱帶副委託存的 vendor_name、銀行帳號依 vendor_id 從名冊帶，
+      // 原案若是 {vendor_id: 甲, vendor_name: 乙} 照抄會繼續「顯示乙、匯給甲」。名冊（同租戶、未刪）一次批次查：
+      //   - vendor_id 在名冊 → vendor_name 一律用名冊名稱（trim 後已相同就保留原字串）。
+      //   - vendor_id 指向已刪或不存在的廠商 → vendor_id 設 null、保留名稱（當非登錄廠商）。
+      const vendorIds = [...new Set(subs.map((s) => (s.vendor_id as string | null)?.toLowerCase()).filter((id): id is string => !!id))]
+      const rosterNames = new Map<string, string>()
+      if (vendorIds.length > 0) {
+        const { data: vendors, error: vendorErr } = await supabaseAdmin
+          .from("vendors")
+          .select("id, name")
+          .eq("tenant_id", tenantId)
+          .in("id", vendorIds)
+          .is("deleted_at", null)
+        if (vendorErr) throw new Error(`project-duplicate subcontracts(vendors): ${vendorErr.message}`)
+        for (const v of (vendors ?? []) as Array<{ id: string; name: string | null }>) rosterNames.set(v.id.toLowerCase(), v.name ?? "")
+      }
+      const vendorOf = (s: { vendor_id: string | null; vendor_name: string | null }) => {
+        if (!s.vendor_id) return { vendor_id: null, vendor_name: s.vendor_name }
+        const rosterName = rosterNames.get(s.vendor_id.toLowerCase())
+        if (rosterName === undefined) return { vendor_id: null, vendor_name: s.vendor_name }
+        const same = (s.vendor_name ?? "").trim() === rosterName.trim()
+        return { vendor_id: s.vendor_id, vendor_name: same ? s.vendor_name : rosterName }
+      }
       const { error: insErr } = await supabaseAdmin.from("project_subcontracts").insert(
         subs.map((s) => ({
           tenant_id: tenantId,
           project_id: newId,
           kind: s.kind,
           discipline: s.discipline,
-          vendor_id: s.vendor_id,
-          vendor_name: s.vendor_name,
+          ...vendorOf(s as { vendor_id: string | null; vendor_name: string | null }),
           contact: s.contact,
           item: s.item,
           amount: s.amount,

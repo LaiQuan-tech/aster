@@ -101,6 +101,7 @@ import {
 } from "@/lib/project-billing-shares";
 import { employeeOptionsOf, type EmployeeOption } from "@/lib/employee-combobox";
 import { formatMoney } from "@/lib/money";
+import { engineerForTypedName } from "@/lib/vendor-name-binding";
 import { sheet } from "@/lib/sheet-styles";
 import { selectedCompanyId } from "../../_components/project-application-form";
 import { fmtMoney, humanError } from "./shared";
@@ -686,10 +687,11 @@ export function ApplicationSheet({
                       placeholder="廠商名冊或自由輸入"
                       value={name}
                       onChange={(e) => {
-                        // 打的字剛好是名冊廠商就連到該廠商（同 VendorCombo 選取）；否則當自由輸入、不掛廠商。
+                        // 打的字剛好是名冊廠商就連到該廠商（同 VendorCombo：vendorIdForTypedName）；原本已綁定且名稱未變
+                        // → 保留原 id；同名多筆無法判斷是哪一家 → 當自由輸入、不掛廠商。
                         const text = e.target.value;
-                        const match = vendors.find((x) => x.name === text.trim());
-                        setDraft((f) => ({ ...f, engineers: { ...f.engineers, [d]: match ? { vendorId: match.id, name: match.name } : { vendorId: null, name: text } } }));
+                        const next = engineerForTypedName(vendors, v.vendorId, text);
+                        setDraft((f) => ({ ...f, engineers: { ...f.engineers, [d]: next } }));
                       }}
                     />
                   ) : (

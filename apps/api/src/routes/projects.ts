@@ -1120,9 +1120,15 @@ projectsRouter.post(
         // 銀行帳號依 vendor_id 從名冊帶，{vendorId: 甲, vendorName: 乙} 會「顯示乙、匯給甲」。
         // 建案的副委託都是新建列 → vendorId 非 null 一律比對（trim 後完全相同）。
         // create_project_application_atomic 本身不比對名稱，只靠這裡在呼叫 RPC 前擋。
+        // 只帶 vendorId、名稱沒帶／空白（2026-11-16）→ 用名冊名稱補上（不擋 400）；有帶名稱且不符仍 400。
         for (const item of initialSubcontracts) {
           if (!item.vendorId) continue
-          if ((item.vendorName ?? "").trim() !== (rosterNames.get(item.vendorId) ?? "").trim()) {
+          const rosterName = rosterNames.get(item.vendorId) ?? ""
+          if ((item.vendorName ?? "").trim() === "") {
+            item.vendorName = rosterName
+            continue
+          }
+          if (item.vendorName!.trim() !== rosterName.trim()) {
             res.status(400).json({
               error: "vendor_name_mismatch",
               id: null,

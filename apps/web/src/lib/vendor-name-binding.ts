@@ -25,3 +25,27 @@ export function vendorIdForTypedName(
   const matches = vendors.filter(sameName);
   return matches.length === 1 ? matches[0].id : null;
 }
+
+/**
+ * 申請單「協力技師」欄手打名稱時的 {vendorId, name}（2026-11-16）。與 vendorIdForTypedName 同一套規則：
+ * 對到名冊（原本已綁定且名稱未變 → 保留原 id；否則名冊剛好一筆同名）→ 掛該廠商、名稱用名冊名稱；
+ * 同名多筆／沒有相符 → 自由輸入（vendorId null、名稱照打的字，不 trim，打到一半的空白要留著）。
+ */
+export function engineerForTypedName(
+  vendors: ReadonlyArray<{ id: string; name: string | null }>,
+  currentVendorId: string | null | undefined,
+  typedName: string,
+): { vendorId: string | null; name: string | null } {
+  const id = vendorIdForTypedName(vendors, currentVendorId, typedName);
+  const match = id ? vendors.find((v) => v.id === id) : undefined;
+  return match ? { vendorId: match.id, name: match.name } : { vendorId: null, name: typedName };
+}
+
+/** API 對「同時改名稱與帳戶且有未付款項」回 409 vendor_identity_change 時顯示的說明（2026-11-16）。 */
+export const VENDOR_IDENTITY_CHANGE_TEXT =
+  "同時更改廠商名稱與帳戶，且仍有未付款項。若是換成另一家公司，請新增廠商；若確為同一家公司改名換帳戶，請分兩次修改";
+
+/** 廠商儲存失敗的錯誤訊息：認得 vendor_identity_change（含 apiFetch 的 `[409]` 前綴）就換成中文，其餘原樣。 */
+export function humanizeVendorIdentityError(message: string): string {
+  return message.includes("vendor_identity_change") ? VENDOR_IDENTITY_CHANGE_TEXT : message;
+}

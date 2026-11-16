@@ -20,6 +20,7 @@ import { Button, Card, Empty, ErrorText, Pill, inputCls, labelCls, useToast } fr
 import { RosterDetailHeader, RosterSaveBar, RosterSection, useRosterRoles } from "@/components/roster-detail";
 import { useUnsavedChangesGuard } from "@/components/useUnsavedChangesGuard";
 import { humanizeAffiliateError } from "@/lib/affiliate";
+import { humanizeVendorIdentityError } from "@/lib/vendor-name-binding";
 import {
   listVendors, createVendor, updateVendor, deleteVendor, getVendorCardUrl, scanVendorCard,
   type Vendor, type VendorInput, type VendorRosterKind,
@@ -189,7 +190,7 @@ export default function VendorDetailPage() {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "儲存失敗";
-      setSaveError(msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : humanizeAffiliateError(msg));
+      setSaveError(msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : humanizeVendorIdentityError(humanizeAffiliateError(msg)));
     } finally {
       setSaving(false);
     }
