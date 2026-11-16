@@ -507,10 +507,31 @@ subcontractsRouter.put(
           .eq("tenant_id", tenantId)
           .in("subcontract_id", vendorChangedIds)
         if (changedAllocErr) throw new Error(`PUT /projects/${projectId}/subcontracts (vendor change allocations): ${changedAllocErr.message}`)
-        const blocking = await countableAllocations(
-          tenantId,
-          (changedAllocRows ?? []) as Array<{ id: string; subcontract_id: string; disbursement_id: string }>,
+        // 舊格式分攤列只掛 subcontract_payment_id（subcontract_id 為 null）：透過期款找回副委託一併算（2026-11-16 第四輪）。
+        const { data: changedPays, error: changedPayErr } = await supabaseAdmin
+          .from("project_subcontract_payments")
+          .select("id, subcontract_id")
+          .eq("tenant_id", tenantId)
+          .in("subcontract_id", vendorChangedIds)
+        if (changedPayErr) throw new Error(`PUT /projects/${projectId}/subcontracts (vendor change payments): ${changedPayErr.message}`)
+        const subOfPay = new Map(((changedPays ?? []) as Array<{ id: string; subcontract_id: string }>).map((p) => [p.id, p.subcontract_id]))
+        const allocRows = new Map(
+          ((changedAllocRows ?? []) as Array<{ id: string; subcontract_id: string; disbursement_id: string }>).map((r) => [r.id, r]),
         )
+        if (subOfPay.size > 0) {
+          const { data: payAllocRows, error: payAllocErr } = await supabaseAdmin
+            .from("disbursement_allocations")
+            .select("id, subcontract_id, subcontract_payment_id, disbursement_id")
+            .eq("tenant_id", tenantId)
+            .in("subcontract_payment_id", [...subOfPay.keys()])
+          if (payAllocErr) throw new Error(`PUT /projects/${projectId}/subcontracts (vendor change payment allocations): ${payAllocErr.message}`)
+          for (const r of (payAllocRows ?? []) as Array<{ id: string; subcontract_id: string | null; subcontract_payment_id: string; disbursement_id: string }>) {
+            if (!allocRows.has(r.id)) {
+              allocRows.set(r.id, { id: r.id, disbursement_id: r.disbursement_id, subcontract_id: r.subcontract_id ?? subOfPay.get(r.subcontract_payment_id)! })
+            }
+          }
+        }
+        const blocking = await countableAllocations(tenantId, [...allocRows.values()])
         if (blocking.length > 0) {
           res.status(409).json({
             error: "has_disbursement",

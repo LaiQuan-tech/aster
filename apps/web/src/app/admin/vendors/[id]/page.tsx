@@ -20,7 +20,7 @@ import { Button, Card, Empty, ErrorText, Pill, inputCls, labelCls, useToast } fr
 import { RosterDetailHeader, RosterSaveBar, RosterSection, useRosterRoles } from "@/components/roster-detail";
 import { useUnsavedChangesGuard } from "@/components/useUnsavedChangesGuard";
 import { humanizeAffiliateError } from "@/lib/affiliate";
-import { humanizeVendorIdentityError } from "@/lib/vendor-name-binding";
+import { humanizeVendorIdentityError, isChangeReasonRequired } from "@/lib/vendor-name-binding";
 import {
   listVendors, createVendor, updateVendor, deleteVendor, getVendorCardUrl, scanVendorCard,
   type Vendor, type VendorInput, type VendorRosterKind,
@@ -180,7 +180,18 @@ export default function VendorDetailPage() {
         leave(rosterDetailHref("vendors", r.vendor.id));
         return;
       }
-      await updateVendor(id, body);
+      try {
+        await updateVendor(id, body);
+      } catch (err) {
+        // 改收款帳戶而廠商仍有未付期款（沒有開單）：要填變更原因（寫稽核），填了再送一次。
+        if (!(err instanceof Error) || !isChangeReasonRequired(err.message)) throw err;
+        const reason = window.prompt("此廠商仍有未付期款，更改收款帳戶請填寫變更原因（會留稽核紀錄）：")?.trim();
+        if (!reason) {
+          setSaveError("未填寫變更原因，收款帳戶沒有更改。");
+          return;
+        }
+        await updateVendor(id, { ...body, changeReason: reason });
+      }
       toast.show("已儲存", "success");
       setScanMsg(null);
       try {

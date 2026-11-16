@@ -75,10 +75,23 @@ export type TargetResult =
 /** 銀行帳號最多露末 4 碼。 */
 export function maskAccount(value: unknown): string {
   // 快照格式「帳號 戶名」：只取開頭的帳號部分（數字、空白、連字號；全形先轉半形）再遮罩，絕不露戶名（2026-11-16 A2）。
-  const lead = String(value ?? "").normalize("NFKC").match(/^[\s\d\-‐–—]*/)?.[0] ?? ""
+  // 帳號不是數字開頭（例如英文字母開頭）：只取第一段（到第一個空白為止）的數字；沒有數字一律 ****（2026-11-16 第四輪）。
+  const text = String(value ?? "").normalize("NFKC").trim()
+  if (!text) return "?"
+  const lead = /^\d/.test(text) ? (text.match(/^[\s\d\-‐–—]*/)?.[0] ?? "") : (text.split(/\s+/)[0] ?? "")
   const digits = lead.replace(/\D/g, "")
-  if (!digits) return "?"
+  if (!digits) return "****"
   return digits.length <= 4 ? "****" : `****${digits.slice(-4)}`
+}
+
+/** 銀行代碼／銀行名稱的變更描述（MCP 確認頁，2026-11-16 第四輪）。 */
+function bankCodeNameChanges(b: Record<string, unknown>): string[] {
+  const out: string[] = []
+  const code = b.payeeBankCode ?? b.payee_bank_code
+  if (code !== undefined) out.push(typeof code === "string" && code.trim() ? `AI 要改成的銀行代碼${aiText(code)}` : "AI 要清空銀行代碼（將照名冊帶入）")
+  const bankName = b.payeeBankName ?? b.payee_bank_name
+  if (bankName !== undefined) out.push(typeof bankName === "string" && bankName.trim() ? `AI 要改成的銀行${aiText(bankName)}` : "AI 要清空銀行名稱（將照名冊帶入）")
+  return out
 }
 
 const str = (v: unknown) => (v === null || v === undefined || v === "" ? "?" : String(v))
@@ -146,7 +159,7 @@ export async function describeTarget(get: UserGet, method: string, path: string,
         const account = b.payeeBankAccount ?? b.payee_bank_account
         return {
           ok: true,
-          summary: `新增放款單／AI 送出的受款人${aiText(b.payeeName ?? b.payee_name)}・金額 ${money(b.amount)}${typeof account === "string" && account ? `・收款帳號 ${maskAccount(account)}` : ""}`,
+          summary: `新增放款單／AI 送出的受款人${aiText(b.payeeName ?? b.payee_name)}・金額 ${money(b.amount)}${typeof account === "string" && account ? `・收款帳號 ${maskAccount(account)}` : ""}${bankCodeNameChanges(b).map((c) => `・${c}`).join("")}`,
         }
       }
       if (!isUuid(id)) return { ok: true, summary: null }
@@ -162,6 +175,7 @@ export async function describeTarget(get: UserGet, method: string, path: string,
         if (kind !== undefined) changes.push(`AI 要改成的收款方類型${aiText(kind)}`)
         const vendorId = b.vendorId ?? b.vendor_id
         if (vendorId !== undefined) changes.push(vendorId ? "AI 要更換收款廠商" : "AI 要移除收款廠商")
+        changes.push(...bankCodeNameChanges(b))
         const account = b.payeeBankAccount ?? b.payee_bank_account
         if (account !== undefined) changes.push(typeof account === "string" && account.trim() ? `AI 要改成的收款帳號 ${maskAccount(account)}` : "AI 要清空收款帳號（將照名冊帶入）")
       }

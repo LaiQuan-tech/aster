@@ -114,7 +114,8 @@ export function listVendors(q?: string) {
 export function createVendor(body: VendorInput) {
   return apiFetch<{ vendor: Vendor }>("/vendors", { method: "POST", body: JSON.stringify(body) })
 }
-export function updateVendor(id: string, body: Partial<VendorInput>) {
+/** `changeReason`：只有未付期款時改收款帳戶必填（後端寫稽核，2026-11-16 R2）。 */
+export function updateVendor(id: string, body: Partial<VendorInput> & { changeReason?: string }) {
   return apiFetch<{ vendor: Vendor }>(`/vendors/${id}`, { method: "PATCH", body: JSON.stringify(body) })
 }
 export function deleteVendor(id: string) {

@@ -298,7 +298,9 @@ export default function DisbursementForm({
       payeeBankCode: selectedVendor.bankCode ?? "",
     }));
   }
-  const allowsZeroAlloc = state.payeeKind === "other" && state.allocations.length === 0;
+  // 零分攤＝非專案支出：「其他」直接可存；登錄廠商要填用途（後端 400 purpose_required，2026-11-16）。
+  const allowsZeroAlloc =
+    state.allocations.length === 0 && (state.payeeKind === "other" || (state.payeeKind === "vendor" && !!state.purpose.trim()));
   const centsEqual = (a: number, b: number) => Math.round(a * 100) === Math.round(b * 100);
   // 後端 checkAllocationTotals 分開驗證毛額與代扣兩個合計，兩個都要對，光是毛額
   // 合計相符但代扣沒分攤，一樣會被後端 400 allocation_mismatch 打回票。
@@ -592,7 +594,7 @@ export default function DisbursementForm({
       <div className="border-t pt-3">
         <h3 className="mb-2 text-sm font-semibold text-gray-700">分攤（對應到哪些專案／期款）</h3>
         {state.allocations.length === 0 ? (
-          <p className="mb-2 text-sm text-gray-400">尚無分攤列。{state.payeeKind === "other" && "「其他」收款方可以不分攤直接存檔。"}</p>
+          <p className="mb-2 text-sm text-gray-400">尚無分攤列。{state.payeeKind === "other" ? "「其他」收款方可以不分攤直接存檔。" : "登錄廠商的非專案支出（例如印刷費）可以不分攤，但必須填寫用途。"}</p>
         ) : (
           <div className="mb-2 overflow-x-auto">
             <table className="w-full text-sm">

@@ -54,11 +54,9 @@ describe("分攤合計檢核 checkAllocationTotals", () => {
     expect(r).toEqual({ ok: false, code: "allocation_mismatch", field: "withheldAmount", expected: 2_500, actual: 0 })
   })
 
-  it("payeeKind=other 允許零分攤；vendor 零分攤＝0 ≠ 毛額 → mismatch", () => {
+  it("零分攤（非專案支出）：other 與 vendor 都允許（vendor 須填用途由建立／修改另外檢查，2026-11-16）", () => {
     expect(checkAllocationTotals("other", 5_000, 0, []).ok).toBe(true)
-    const r = checkAllocationTotals("vendor", 5_000, 0, [])
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.actual).toBe(0)
+    expect(checkAllocationTotals("vendor", 5_000, 0, []).ok).toBe(true)
   })
 
   it("other 有分攤時規則照算", () => {

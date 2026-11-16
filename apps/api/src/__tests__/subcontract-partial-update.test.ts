@@ -543,4 +543,18 @@ describe("R1a：副委託已有放款單分攤時不可換廠商（2026-11-16）
     ])
     expect(same.status).toBe(200)
   })
+
+  it("舊格式分攤列只有 subcontract_payment_id（subcontract_id 為 null）→ 透過期款找到副委託，換廠商也 409", async () => {
+    seed("draft")
+    fake.db.project_subcontract_payments = [{ id: PAY_ID, tenant_id: TENANT_ID, subcontract_id: SUB_FIRM, installment_no: 1, paid_on: null }]
+    fake.db.disbursement_allocations = [
+      { id: "ffffffff-0000-4000-8000-000000000002", tenant_id: TENANT_ID, disbursement_id: DISB_ID, subcontract_id: null, subcontract_payment_id: PAY_ID },
+    ]
+    const res = await changeVendor()
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: "has_disbursement", subcontractId: SUB_FIRM })
+    expect(subWrites()).toHaveLength(0)
+    fake.db.disbursements = [{ id: DISB_ID, tenant_id: TENANT_ID, status: "void" }]
+    expect((await changeVendor()).status).toBe(200)
+  })
 })

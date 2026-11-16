@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { engineerForTypedName, humanizeVendorIdentityError, vendorIdForTypedName } from "../vendor-name-binding";
+import { engineerForTypedName, humanizeVendorIdentityError, isChangeReasonRequired, vendorIdForTypedName } from "../vendor-name-binding";
 
 /**
  * VendorCombo 手改名稱欄時 vendorId 的綁定規則（2026-11-16）。
@@ -73,7 +73,12 @@ describe("engineerForTypedName — 申請單協力技師欄手打名稱（同 ve
 
 describe("humanizeVendorIdentityError — 名冊同時改名稱與帳戶被 409 擋下", () => {
   it("[409] vendor_identity_change → 中文說明；其他訊息原樣", () => {
-    expect(humanizeVendorIdentityError("[409] vendor_identity_change")).toMatch(/請新增廠商.*分兩次修改/);
+    expect(humanizeVendorIdentityError("[409] vendor_identity_change")).toMatch(/請新增廠商/);
+    expect(humanizeVendorIdentityError("[409] vendor_identity_change")).not.toMatch(/分兩次/);
+    expect(humanizeVendorIdentityError("[409] vendor_has_open_disbursements")).toBe("此廠商仍有未匯款的放款單，請先作廢或匯款後再更改收款帳戶");
+    expect(humanizeVendorIdentityError("[400] change_reason_required")).toMatch(/變更原因/);
+    expect(isChangeReasonRequired("[400] change_reason_required")).toBe(true);
+    expect(isChangeReasonRequired("[409] vendor_has_open_disbursements")).toBe(false);
     expect(humanizeVendorIdentityError("[500] boom")).toBe("[500] boom");
   });
 });

@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { writeAuditLog } from "../services/audit.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
@@ -288,19 +289,26 @@ const BANK_FIELDS: Array<[keyof z.infer<typeof vendorBody>, string]> = [
 ]
 const UNSETTLED_DISBURSEMENT_STATUSES = ["draft", "pending_approval", "approved"]
 
+type BankChangeCheck = {
+  /** 名稱（trim 後不同）與收款帳戶同時改、且有未付款項 → 409 vendor_identity_change。 */
+  identityBlocked: boolean
+  /** 改了收款帳戶、且有未作廢未匯款的放款單 → 409 vendor_has_open_disbursements。 */
+  openDisbursements: boolean
+  /** 改了收款帳戶、只有未付期款（沒有開單）→ 須帶 changeReason 並寫稽核。 */
+  needsReason: boolean
+  /** 改到的收款帳戶欄位（寫稽核用）。 */
+  before: Record<string, string | null> | null
+}
+
 /**
- * PATCH 同時改了名稱（trim 後不同）與任一收款帳戶欄位（值有變），且該廠商仍有未付款項 → true。
- * 未付款項：未刪除副委託（vendor_id＝本廠商）底下 paid_on 為 null 的期款，或未作廢未匯款
- * （draft／pending_approval／approved）的放款單。查無廠商回 false（交給後面的 update 回 404）。
+ * 名冊 PATCH 改收款帳戶的防線（2026-11-16 R2 第四輪）。只在任一收款帳戶欄位（代碼／銀行名／帳號／戶名）值有變時才查。
+ * 未付期款：未刪除副委託（vendor_id＝本廠商）底下 paid_on 為空、或已付金額（實付＋代扣）小於應付（override_amount ?? amount）。
+ * 開單：未作廢未匯款（draft／pending_approval／approved）的放款單。查無廠商回全 false（交給後面的 update 回 404）。
  */
-async function identityChangeBlocked(
-  tenantId: string,
-  vendorId: string,
-  body: Partial<z.infer<typeof vendorBody>>,
-): Promise<boolean> {
-  if (body.name === undefined) return false
-  if (!BANK_FIELDS.some(([k]) => body[k] !== undefined)) return false
-  if (bankColsMissing) return false
+async function checkBankChange(tenantId: string, vendorId: string, body: Partial<z.infer<typeof vendorBody>>): Promise<BankChangeCheck> {
+  const none: BankChangeCheck = { identityBlocked: false, openDisbursements: false, needsReason: false, before: null }
+  if (!BANK_FIELDS.some(([k]) => body[k] !== undefined)) return none
+  if (bankColsMissing) return none
   const { data: stored, error } = await supabaseAdmin
     .from("vendors")
     .select("name, bank_code, bank_name, bank_account, account_holder")
@@ -309,35 +317,16 @@ async function identityChangeBlocked(
     .is("deleted_at", null)
     .maybeSingle()
   if (error) throw new Error(`PATCH /vendors/${vendorId} (load identity): ${error.message}`)
-  if (!stored) return false
+  if (!stored) return none
   const cur = stored as Record<string, string | null>
   const norm = (v: unknown) => {
     const t = typeof v === "string" ? v.trim() : ""
     return t === "" ? null : t
   }
-  if (norm(body.name) === norm(cur.name)) return false
   const bankChanged = BANK_FIELDS.some(([k, col]) => body[k] !== undefined && norm(body[k]) !== norm(cur[col]))
-  if (!bankChanged) return false
+  if (!bankChanged) return none
+  const nameChanged = body.name !== undefined && norm(body.name) !== norm(cur.name)
 
-  const { data: subs, error: subErr } = await supabaseAdmin
-    .from("project_subcontracts")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("vendor_id", vendorId)
-    .is("deleted_at", null)
-  if (subErr) throw new Error(`PATCH /vendors/${vendorId} (load subcontracts): ${subErr.message}`)
-  const subIds = (subs ?? []).map((r) => (r as { id: string }).id)
-  if (subIds.length > 0) {
-    const { data: unpaid, error: payErr } = await supabaseAdmin
-      .from("project_subcontract_payments")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .in("subcontract_id", subIds)
-      .is("paid_on", null)
-      .limit(1)
-    if (payErr) throw new Error(`PATCH /vendors/${vendorId} (load payments): ${payErr.message}`)
-    if ((unpaid ?? []).length > 0) return true
-  }
   const { data: open, error: disErr } = await supabaseAdmin
     .from("disbursements")
     .select("id")
@@ -346,7 +335,40 @@ async function identityChangeBlocked(
     .in("status", UNSETTLED_DISBURSEMENT_STATUSES)
     .limit(1)
   if (disErr) throw new Error(`PATCH /vendors/${vendorId} (load disbursements): ${disErr.message}`)
-  return (open ?? []).length > 0
+  const hasOpen = (open ?? []).length > 0
+
+  let hasUnpaid = false
+  const { data: subs, error: subErr } = await supabaseAdmin
+    .from("project_subcontracts")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("vendor_id", vendorId)
+    .is("deleted_at", null)
+  if (subErr) throw new Error(`PATCH /vendors/${vendorId} (load subcontracts): ${subErr.message}`)
+  const subIds = (subs ?? []).map((r) => (r as { id: string }).id)
+  for (let i = 0; i < subIds.length && !hasUnpaid; i += 100) {
+    const { data: pays, error: payErr } = await supabaseAdmin
+      .from("project_subcontract_payments")
+      .select("id, amount, override_amount, paid_on, paid_amount, withheld_amount")
+      .eq("tenant_id", tenantId)
+      .in("subcontract_id", subIds.slice(i, i + 100))
+    if (payErr) throw new Error(`PATCH /vendors/${vendorId} (load payments): ${payErr.message}`)
+    const n = (v: unknown) => (v === null || v === undefined || v === "" ? null : Number(v))
+    hasUnpaid = ((pays ?? []) as Array<Record<string, unknown>>).some((p) => {
+      if (!p.paid_on) return true
+      const due = n(p.override_amount) ?? n(p.amount) ?? 0
+      const paid = (n(p.paid_amount) ?? 0) + (n(p.withheld_amount) ?? 0)
+      return paid < due - 0.01
+    })
+  }
+
+  const before = Object.fromEntries(BANK_FIELDS.map(([, col]) => [col, cur[col] ?? null]))
+  return {
+    identityBlocked: nameChanged && (hasOpen || hasUnpaid),
+    openDisbursements: hasOpen,
+    needsReason: !hasOpen && hasUnpaid,
+    before,
+  }
 }
 
 // ── PATCH /vendors/:id ─────────────────────────────────────────────────
@@ -392,12 +414,28 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     }
     // 名冊把廠商整筆改成另一家（2026-11-16）：同一次同時改名稱與收款帳戶，等於把這筆 vendor_id 換成另一家公司；
     // 掛在這個 vendor_id 上的未付期款／未匯款的放款單會跟著匯到新帳戶 → 有未付款項時 409 vendor_identity_change。
-    // 只改名稱或只改帳戶維持現行（同一家公司改名、換帳戶）。
-    const blocked = await identityChangeBlocked(tenantId, id, parsed.data)
-    if (blocked) {
+    // R2 第四輪：只改帳戶也要擋——有未匯款放款單 → 409；只有未付期款 → 須填變更原因（寫稽核）。
+    const bankCheck = await checkBankChange(tenantId, id, parsed.data)
+    if (bankCheck.identityBlocked) {
       res.status(409).json({
         error: "vendor_identity_change",
-        message: "同時更改廠商名稱與帳戶，且仍有未付款項。若是換成另一家公司，請新增廠商；若確為同一家公司改名換帳戶，請分兩次修改",
+        message: "同時更改廠商名稱與帳戶，且仍有未付款項。若是換成另一家公司，請新增廠商",
+      })
+      return
+    }
+    if (bankCheck.openDisbursements) {
+      res.status(409).json({
+        error: "vendor_has_open_disbursements",
+        message: "此廠商仍有未匯款的放款單，請先作廢或匯款後再更改收款帳戶",
+      })
+      return
+    }
+    const rawReason = (req.body as { changeReason?: unknown } | undefined)?.changeReason
+    const changeReason = typeof rawReason === "string" ? rawReason.trim() : ""
+    if (bankCheck.needsReason && !changeReason) {
+      res.status(400).json({
+        error: "change_reason_required",
+        message: "此廠商仍有未付期款，更改收款帳戶請填寫變更原因",
       })
       return
     }
@@ -425,6 +463,20 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     if (!data) {
       res.status(404).json({ error: "not_found" })
       return
+    }
+    if (bankCheck.needsReason) {
+      const after = data as unknown as Record<string, unknown>
+      const actor = userId ? await resolveSelf(tenantId, userId) : null
+      await writeAuditLog({
+        tenantId,
+        tableName: "vendors",
+        recordId: id,
+        action: "UPDATE",
+        oldRow: bankCheck.before,
+        newRow: { ...Object.fromEntries(BANK_FIELDS.map(([, col]) => [col, after[col] ?? null])), changeReason },
+        actorEmpId: actor?.id ?? null,
+        context: "PATCH /vendors/:id 更改收款帳戶（有未付期款）",
+      })
     }
     res.status(200).json({ vendor: serialize(data as unknown as Record<string, unknown>) })
   } catch (err) {

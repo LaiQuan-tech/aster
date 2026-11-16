@@ -1,3 +1,4 @@
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isProjectDeletedError, isRetryableConflictError, isRowDeletedError } from "../middleware/project-deleted.js"
 import { logger } from "../lib/logger.js"
@@ -308,7 +309,9 @@ export function checkAllocationTotals(
   const grossAmount = roundMoney(amount + withheldAmount)
   const allocatedGross = roundMoney(allocations.reduce((s, a) => s + a.amount, 0))
   const allocatedWithheld = roundMoney(allocations.reduce((s, a) => s + (a.withheldAmount ?? 0), 0))
-  if (allocations.length === 0 && payeeKind === "other") {
+  // 零分攤＝非專案支出（印刷／快遞）：「其他」與登錄廠商都允許（登錄廠商零分攤須填用途，見 assertVendorPurpose，2026-11-16）。
+  void payeeKind
+  if (allocations.length === 0) {
     return { ok: true, grossAmount, allocatedGross: 0, allocatedWithheld: 0 }
   }
   if (Math.abs(allocatedGross - grossAmount) > AMOUNT_TOLERANCE) {
@@ -1246,6 +1249,8 @@ type ResolvedAllocation = {
   payment: PaymentRow | null
   /** 這列對到的副委託登錄廠商（副委託非登錄廠商＝null；沒對到副委託＝undefined）。付錯人檢查用。 */
   subcontractVendorId?: string | null
+  /** 這列對到的副委託廠商名稱快照（R3 #4 比對用；沒對到副委託＝undefined）。 */
+  subcontractVendorName?: string | null
 }
 
 async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): Promise<ResolvedAllocation[]> {
@@ -1273,6 +1278,7 @@ async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): 
     let subcontractId: string | null = a.subcontractId ?? null
     let payment: PaymentRow | null = null
     let subcontractVendorId: string | null | undefined
+    let subcontractVendorName: string | null | undefined
     if (a.subcontractPaymentId) {
       payment = paymentById.get(a.subcontractPaymentId) ?? null
       const sub = payment ? subById.get(payment.subcontract_id) : undefined
@@ -1281,12 +1287,14 @@ async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): 
       }
       subcontractId = sub.id
       subcontractVendorId = sub.vendor_id ?? null
+      subcontractVendorName = sub.vendor_name ?? null
     } else if (subcontractId) {
       const sub = subById.get(subcontractId)
       if (!sub || sub.project_id !== a.projectId) {
         throw new DisbursementError(400, "invalid_subcontract", { subcontractId })
       }
       subcontractVendorId = sub.vendor_id ?? null
+      subcontractVendorName = sub.vendor_name ?? null
     }
     return {
       projectId: a.projectId,
@@ -1298,6 +1306,7 @@ async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): 
       project,
       payment,
       subcontractVendorId,
+      subcontractVendorName,
     }
   })
 }
@@ -1443,21 +1452,103 @@ export function assertPayeeBankMatchesVendor(
   }
 }
 
-export async function assertPayeeNotRegisteredVendor(tenantId: string, payeeName: string): Promise<void> {
-  const n = payeeName.trim()
-  if (!n) return
-  for (const col of ["name", "account_holder"] as const) {
-    const { data, error } = await supabaseAdmin
-      .from("vendors")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .eq(col, n)
-      .is("deleted_at", null)
-      .limit(1)
-    if (error) throw new Error(`assertPayeeNotRegisteredVendor (${col}): ${error.message}`)
-    if ((data ?? []).length > 0) {
-      throw new DisbursementError(400, "payee_is_registered_vendor", { message: "此收款對象是登錄廠商，請改選登錄廠商" })
+/**
+ * R3（2026-11-16 第四輪）：戶名比對 key——NFKC（全形英數→半形、（股）→(股)）→ 小寫 → 去掉所有空白（含全形空白）
+ * 與零寬等格式字元（\p{Cf}）→ 去掉常見公司後綴（股份有限公司、有限公司、(股)、公司、Co.,Ltd、Ltd、Inc、Corp…，可疊加）；
+ * 去完變空字串就不去。「行號」等不去。
+ */
+const PAYEE_KEY_SUFFIXES = ["股份有限公司", "有限公司", "(股)", "公司", "co.,ltd.", "co.,ltd", "co.ltd.", "co.ltd", "ltd.", "ltd", "inc.", "inc", "corp.", "corp", "co."]
+export function payeeNameKey(name: string | null | undefined): string {
+  const base = String(name ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s\u3000\p{Cf}]/gu, "")
+  let key = base
+  for (let changed = true; changed; ) {
+    changed = false
+    for (const suf of PAYEE_KEY_SUFFIXES) {
+      if (key.endsWith(suf) && key.length > suf.length) {
+        key = key.slice(0, -suf.length).replace(/[.,、，]+$/u, "")
+        changed = true
+        break
+      }
     }
+  }
+  return key || base
+}
+
+/**
+ * R3：收款「其他」但戶名（key 比對）是同租戶未刪名冊廠商的名稱／簡稱／帳戶戶名 → 400 payee_is_registered_vendor。
+ * #4 例外：有分攤、且每一列都是非登錄副委託（vendor_id null）而戶名 key 等於該副委託的廠商名稱 key → 放行
+ * （副委託還沒綁名冊的正常付款）。零分攤不例外（登錄廠商的非專案支出請選登錄廠商、填用途）。
+ */
+export async function assertPayeeNotRegisteredVendor(
+  tenantId: string,
+  payeeName: string,
+  allocations: ReadonlyArray<Pick<ResolvedAllocation, "subcontractId" | "subcontractVendorId" | "subcontractVendorName">> = [],
+): Promise<void> {
+  const key = payeeNameKey(payeeName)
+  if (!key) return
+  const vendors = await selectAllPages<{ id: string; name: string | null; short_name?: string | null; account_holder: string | null }>(
+    (from, to) =>
+      supabaseAdmin
+        .from("vendors")
+        .select("id, name, short_name, account_holder")
+        .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
+        .order("id")
+        .range(from, to),
+    "assertPayeeNotRegisteredVendor",
+  )
+  const hit = vendors.some((v) => [v.name, v.short_name, v.account_holder].some((n) => (n ?? "").trim() !== "" && payeeNameKey(n) === key))
+  if (!hit) return
+  const unboundSameName =
+    allocations.length > 0 &&
+    allocations.every((a) => !!a.subcontractId && a.subcontractVendorId === null && payeeNameKey(a.subcontractVendorName) === key)
+  if (unboundSameName) return
+  throw new DisbursementError(400, "payee_is_registered_vendor", {
+    message: "此收款對象是登錄廠商，請改選登錄廠商；若此對象尚未綁定名冊廠商，請先到專案副委託選擇名冊廠商",
+  })
+}
+
+/** 第 6 項（2026-11-16）：登錄廠商零分攤（非專案支出）必須填用途。 */
+function assertVendorPurpose(header: Pick<ResolvedHeader, "payee_kind" | "purpose">, allocations: ReadonlyArray<unknown>): void {
+  if (header.payee_kind === "vendor" && allocations.length === 0 && !(header.purpose ?? "").trim()) {
+    throw new DisbursementError(400, "purpose_required", { message: "登錄廠商不分攤期款（非專案支出）時，請填寫用途" })
+  }
+}
+
+/** 單上的銀行快照（原始值或系統快照格式皆可）是否等於名冊現值。 */
+function bankSnapshotMatchesVendor(v: VendorLite, field: PayeeBankField, snapshot: string | null): boolean {
+  if (vendorBankRawMatches(v, field, snapshot)) return true
+  return normBankText(snapshot) === normBankText(vendorBankDefault(v, field))
+}
+
+/**
+ * N-1（2026-11-16 第四輪）：送簽／核准／付款（含批次付款）前，登錄廠商單的收款帳號與銀行代碼快照必須等於名冊現值，
+ * 否則 409 payee_bank_changed（名冊改了帳戶，舊單還掛舊帳戶／或名冊被改成他人帳戶後又改回）。駁回、作廢不呼叫。
+ */
+export async function assertPayeeBankStillMatchesVendor(
+  tenantId: string,
+  current: Pick<DisbursementRow, "payee_kind" | "vendor_id" | "payee_bank_account" | "payee_bank_code">,
+): Promise<void> {
+  if (current.payee_kind !== "vendor" || !current.vendor_id) return
+  const { data, error } = await supabaseAdmin
+    .from("vendors")
+    .select(VENDOR_LITE_COLS)
+    .eq("tenant_id", tenantId)
+    .eq("id", current.vendor_id)
+    .maybeSingle()
+  if (error) throw new Error(`assertPayeeBankStillMatchesVendor: ${error.message}`)
+  const vendor = (data ?? null) as unknown as VendorLite | null
+  const ok =
+    !!vendor &&
+    bankSnapshotMatchesVendor(vendor, "payeeBankAccount", current.payee_bank_account) &&
+    bankSnapshotMatchesVendor(vendor, "payeeBankCode", current.payee_bank_code)
+  if (!ok) {
+    throw new DisbursementError(409, "payee_bank_changed", {
+      message: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出",
+    })
   }
 }
 
@@ -1522,6 +1613,8 @@ async function resolveHeader(
     checkPayeeName?: boolean
     checkBankFields?: Iterable<PayeeBankField>
     storedBank?: Partial<Record<PayeeBankField, string | null>>
+    /** 這次有送／改到任一銀行欄位（未給＝看 input 有沒有送）：登錄廠商時三欄整組照名冊帶入。 */
+    bankTouched?: boolean
   } = {},
 ): Promise<ResolvedHeader> {
   let vendor: VendorLite | null = null
@@ -1542,14 +1635,16 @@ async function resolveHeader(
   if (!payeeName) throw new DisbursementError(400, "payee_name_required")
   if (vendor && opts.checkPayeeName !== false) assertPayeeNameMatchesVendor(payeeName, vendor)
   if (vendor) {
+    const bankTouched = opts.bankTouched ?? PAYEE_BANK_FIELDS.some((f) => input[f] !== undefined)
     input = dropBlankBankFieldsForVendor(vendor, input)
     assertPayeeBankMatchesVendor(vendor, input, opts.checkBankFields ?? PAYEE_BANK_FIELDS, opts.storedBank)
+    // 銀行三欄一致（2026-11-16 第四輪）：有送／改到任一欄 → 代碼、銀行名、帳號整組照名冊帶入，不留新舊混搭。
+    if (bankTouched) {
+      input = { ...input }
+      for (const f of PAYEE_BANK_FIELDS) delete input[f]
+    }
   }
-  // R3（2026-11-16）：收款方「其他」但戶名就是某家登錄廠商（名冊名稱或帳戶戶名）→ 400，請改選登錄廠商，
-  // 不然會繞過名冊帳戶與分攤廠商檢查。PATCH 只在戶名或收款方有改時檢查（checkPayeeName），不回溯。
-  if (!vendor && input.payeeKind === "other" && opts.checkPayeeName !== false) {
-    await assertPayeeNotRegisteredVendor(tenantId, payeeName)
-  }
+  // R3 的「其他」收款戶名冒用檢查移到分攤解析之後（assertPayeeNotRegisteredVendor，需要分攤的副委託名稱，#4）。
 
   const companyIds = uniq([input.payingCompanyId, input.receiptIssuerCompanyId])
   const companies = await loadCompanies(tenantId, companyIds)
@@ -2159,8 +2254,11 @@ export type Actor = { empId: string | null; role?: string | null; active?: boole
 export async function createDisbursement(tenantId: string, actor: Actor, input: DisbursementInput): Promise<SerializedDisbursement> {
   const header = await resolveHeader(tenantId, input)
   const allocations = await resolveAllocations(tenantId, input.allocations)
+  // R3：收款「其他」但戶名（正規化後）是登錄廠商 → 400（#4 非登錄副委託同名放行）。
+  if (header.payee_kind === "other") await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, allocations)
   assertAllocationVendors(header.vendor_id, allocations)
   assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
+  assertVendorPurpose(header, allocations)
   const payments = allocations.map((a) => a.payment).filter((p): p is PaymentRow => !!p)
   // M5：分攤到未驗收期款一律擋（HR 可帶 forceAcceptance＋forceReason 放行）。
   await assertPaymentsAccepted(tenantId, actor, payments.map((p) => p.id), {
@@ -2480,7 +2578,12 @@ export async function updateDisbursement(
         payingCompanyId: current.paying_company_id,
         receiptIssuerCompanyId: current.receipt_issuer_company_id,
       },
-      { checkPayeeName: payeeChanged || payeeNameChanged, checkBankFields: bankFieldsToCheck, storedBank },
+      {
+        checkPayeeName: payeeChanged || payeeNameChanged,
+        checkBankFields: bankFieldsToCheck,
+        storedBank,
+        bankTouched: payeeChanged || bankFieldsToCheck.length > 0,
+      },
     )
     const allocInputs: AllocationInput[] =
       patch.allocations !== undefined
@@ -2494,6 +2597,10 @@ export async function updateDisbursement(
             note: a.note,
           }))
     const allocations = await resolveAllocations(tenantId, allocInputs)
+    // R3：PATCH 只在收款方或戶名有改時檢查（不回溯）。
+    if (header.payee_kind === "other" && (payeeChanged || payeeNameChanged)) {
+      await assertPayeeNotRegisteredVendor(tenantId, header.payee_name, allocations)
+    }
     if (payeeChanged) {
       assertAllocationVendors(header.vendor_id, allocations)
     } else if (patch.allocations !== undefined) {
@@ -2509,6 +2616,7 @@ export async function updateDisbursement(
       )
     }
     assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
+    if (payeeChanged || patch.allocations !== undefined || patch.purpose !== undefined) assertVendorPurpose(header, allocations)
     if (patch.allocations !== undefined) {
       // M5：改了分攤才重查驗收（只改備註的 PATCH 不該被未驗收期款擋下來）。
       await assertPaymentsAccepted(
@@ -2593,6 +2701,8 @@ export async function payDisbursement(
   const allocations = await loadAllocations(tenantId, [id])
   // R1b：付款前重驗分攤副委託的廠商仍是收款廠商（開單後副委託換廠商 → 409）。
   await assertAllocationVendorsStillMatch(tenantId, current, allocations)
+  // N-1：付款前重驗收款帳戶快照仍等於名冊現值。
+  await assertPayeeBankStillMatchesVendor(tenantId, current)
   // M5：付款前再確認一次期款都已驗收（建單之後才被取消驗收的情況）。
   await assertPaymentsAccepted(
     tenantId,

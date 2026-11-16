@@ -41,11 +41,22 @@ export function engineerForTypedName(
   return match ? { vendorId: match.id, name: match.name } : { vendorId: null, name: typedName };
 }
 
-/** API 對「同時改名稱與帳戶且有未付款項」回 409 vendor_identity_change 時顯示的說明（2026-11-16）。 */
-export const VENDOR_IDENTITY_CHANGE_TEXT =
-  "同時更改廠商名稱與帳戶，且仍有未付款項。若是換成另一家公司，請新增廠商；若確為同一家公司改名換帳戶，請分兩次修改";
+/** API 對「同時改名稱與帳戶且有未付款項」回 409 vendor_identity_change 時顯示的說明（2026-11-16，第四輪不再教分兩次改）。 */
+export const VENDOR_IDENTITY_CHANGE_TEXT = "同時更改廠商名稱與帳戶，且仍有未付款項。若是換成另一家公司，請新增廠商";
+/** 有未匯款放款單時改收款帳戶 → 409 vendor_has_open_disbursements（2026-11-16 R2）。 */
+export const VENDOR_HAS_OPEN_DISBURSEMENTS_TEXT = "此廠商仍有未匯款的放款單，請先作廢或匯款後再更改收款帳戶";
+/** 只有未付期款時改收款帳戶要填原因 → 400 change_reason_required。 */
+export const VENDOR_CHANGE_REASON_REQUIRED_TEXT = "此廠商仍有未付期款，更改收款帳戶請填寫變更原因";
 
-/** 廠商儲存失敗的錯誤訊息：認得 vendor_identity_change（含 apiFetch 的 `[409]` 前綴）就換成中文，其餘原樣。 */
+/** 廠商儲存失敗的錯誤訊息：認得名冊身分／帳戶變更的錯誤碼（含 apiFetch 的 `[409]` 前綴）就換成中文，其餘原樣。 */
 export function humanizeVendorIdentityError(message: string): string {
-  return message.includes("vendor_identity_change") ? VENDOR_IDENTITY_CHANGE_TEXT : message;
+  if (message.includes("vendor_identity_change")) return VENDOR_IDENTITY_CHANGE_TEXT;
+  if (message.includes("vendor_has_open_disbursements")) return VENDOR_HAS_OPEN_DISBURSEMENTS_TEXT;
+  if (message.includes("change_reason_required")) return VENDOR_CHANGE_REASON_REQUIRED_TEXT;
+  return message;
+}
+
+/** 這個錯誤是「改帳戶要填原因」：前端據此請使用者輸入原因後帶 changeReason 重送。 */
+export function isChangeReasonRequired(message: string): boolean {
+  return message.includes("change_reason_required");
 }

@@ -63,13 +63,11 @@ describe("PATCH /vendors/:id — 同時改名稱與帳戶", () => {
     expect(vendorUpdates()).toHaveLength(0)
   })
 
-  it("有未付期款時分兩次改（先名稱、再帳戶）→ 兩次都 200", async () => {
+  it("409 訊息不再教「分兩次改」", async () => {
     fake.db.project_subcontract_payments = [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, paid_on: null }]
-    const r1 = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ name: "測試甲廠商（改名）" })
-    expect(r1.status).toBe(200)
-    const r2 = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", accountHolder: "測試甲廠商（改名）" })
-    expect(r2.status).toBe(200)
-    expect(vendorUpdates()).toHaveLength(2)
+    const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send(swap)
+    expect(res.body.message).toBe("同時更改廠商名稱與帳戶，且仍有未付款項。若是換成另一家公司，請新增廠商")
+    expect(res.body.message).not.toMatch(/分兩次/)
   })
 
   it("沒有未付款項（期款已付、副委託已刪、放款單已匯款／作廢）→ 200", async () => {
@@ -88,7 +86,7 @@ describe("PATCH /vendors/:id — 同時改名稱與帳戶", () => {
 
   it("名稱與帳戶值都沒變（trim 後相同）→ 不算更換身分，200", async () => {
     fake.db.disbursements = [{ id: "d1", tenant_id: TENANT_ID, vendor_id: VENDOR, status: "draft" }]
-    const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ name: " 測試甲廠商 ", bankAccount: "0000000000002" })
+    const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ name: " 測試甲廠商 ", bankAccount: " 0000000000001 " })
     expect(res.status).toBe(200)
     const res2 = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ name: "測試乙廠商", bankName: "測試銀行" })
     expect(res2.status).toBe(200)
@@ -99,5 +97,70 @@ describe("MCP 分級 — PATCH /vendors/:id", () => {
   it("帶名稱至少中風險；帶銀行欄位最高風險", () => {
     expect(dangerOf("PATCH", `/vendors/${VENDOR}`, { name: "測試乙廠商" })?.tier).toBe("medium")
     expect(dangerOf("PATCH", `/vendors/${VENDOR}`, { name: "測試乙廠商", bankAccount: "0000000000002" })?.tier).toBe("high")
+  })
+})
+
+describe("R2：改收款帳戶（2026-11-16 第四輪）", () => {
+  const unpaid = () => [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, amount: "1000", override_amount: null, paid_on: null, paid_amount: null, withheld_amount: "0" }]
+  const audits = () => fake.writes.filter((w) => w.table === "audit_logs")
+
+  it("有未匯款放款單（draft／pending_approval／approved）→ 只改帳號也 409 vendor_has_open_disbursements、0 寫入", async () => {
+    for (const status of ["draft", "pending_approval", "approved"]) {
+      fake.writes.length = 0
+      fake.db.disbursements = [{ id: "d1", tenant_id: TENANT_ID, vendor_id: VENDOR, status }]
+      const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "測試原因" })
+      expect(res.status, status).toBe(409)
+      expect(res.body).toMatchObject({ error: "vendor_has_open_disbursements", message: "此廠商仍有未匯款的放款單，請先作廢或匯款後再更改收款帳戶" })
+      expect(vendorUpdates()).toHaveLength(0)
+    }
+  })
+
+  it("改戶名／代碼／銀行名也算改帳戶；值沒變不擋", async () => {
+    fake.db.disbursements = [{ id: "d1", tenant_id: TENANT_ID, vendor_id: VENDOR, status: "draft" }]
+    for (const b of [{ accountHolder: "測試他人" }, { bankCode: "999" }, { bankName: "另一家測試銀行" }]) {
+      const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send(b)
+      expect(res.status, JSON.stringify(b)).toBe(409)
+    }
+    const same = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankCode: "000", phone: "02-0000-0000" })
+    expect(same.status).toBe(200)
+  })
+
+  it("有開單時分兩次改（先改名 200、再改帳戶）→ 第二次 409", async () => {
+    fake.db.disbursements = [{ id: "d1", tenant_id: TENANT_ID, vendor_id: VENDOR, status: "approved" }]
+    const r1 = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ name: "測試乙廠商" })
+    expect(r1.status).toBe(200)
+    const r2 = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", accountHolder: "測試乙廠商" })
+    expect(r2.status).toBe(409)
+    expect(r2.body.error).toBe("vendor_has_open_disbursements")
+    expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000001" })
+  })
+
+  it("只有未付期款（沒開單）：沒帶 changeReason → 400 change_reason_required；帶了 → 200 並寫稽核", async () => {
+    fake.db.project_subcontract_payments = unpaid()
+    const bad = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "  " })
+    expect(bad.status).toBe(400)
+    expect(bad.body.error).toBe("change_reason_required")
+    expect(vendorUpdates()).toHaveLength(0)
+    const ok = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "測試：廠商換銀行" })
+    expect(ok.status).toBe(200)
+    expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000002" })
+    const a = audits()
+    expect(a).toHaveLength(1)
+    expect(a[0]!.payload).toMatchObject({
+      table_name: "vendors",
+      record_id: VENDOR,
+      old_row: expect.objectContaining({ bank_account: "0000000000001" }),
+      new_row: expect.objectContaining({ bank_account: "0000000000002", changeReason: "測試：廠商換銀行" }),
+    })
+  })
+
+  it("部分付款（實付＋代扣 < 應付）仍算未付期款；已付清 → 不需原因", async () => {
+    fake.db.project_subcontract_payments = [{ ...unpaid()[0], paid_on: "2026-10-01", paid_amount: "500", withheld_amount: "0" }]
+    const partial = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002" })
+    expect(partial.status).toBe(400)
+    fake.db.project_subcontract_payments = [{ ...unpaid()[0], paid_on: "2026-10-01", paid_amount: "900", withheld_amount: "100" }]
+    const settled = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002" })
+    expect(settled.status).toBe(200)
+    expect(audits()).toHaveLength(0)
   })
 })
