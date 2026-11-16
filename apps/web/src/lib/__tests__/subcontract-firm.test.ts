@@ -53,8 +53,8 @@ describe("withholdingHints", () => {
 })
 
 describe("kindChangePatch", () => {
-  it("改成事務所：清發票；代扣率 0 帶預設 10%", () => {
-    expect(kindChangePatch({ kind: "subcontract", withholdingRate: 0 }, "firm")).toEqual({ kind: "firm", invoiceNo: null, invoiceDate: null, withholdingRate: 0.1 })
+  it("改成事務所：清發票；代扣率 0 維持 0（不自動帶 10%）", () => {
+    expect(kindChangePatch({ kind: "subcontract", withholdingRate: 0 }, "firm")).toEqual({ kind: "firm", invoiceNo: null, invoiceDate: null })
     expect(kindChangePatch({ kind: "technician", withholdingRate: 0.05 }, "firm")).toEqual({ kind: "firm", invoiceNo: null, invoiceDate: null })
   })
   it("從事務所改成其他：清代扣日期、代扣率歸 0", () => {
@@ -78,11 +78,35 @@ describe("kindChangePatch", () => {
     const firm = { ...loaded, kind: "firm" as const }
     expect(kindChangePatch(firm, "technician").withholdingRate).toBe(0.05)
   })
-  it("既有下包 0%：切事務所帶 10%，切回下包還原 0", () => {
+  it("既有下包 0%：切事務所仍 0（不帶 10%），切回下包還原 0", () => {
     const loaded = { kind: "subcontract" as const, withholdingRate: 0, _origKind: "subcontract" as const, _origRate: 0 }
     const toFirm = { ...loaded, ...kindChangePatch(loaded, "firm") }
-    expect(toFirm.withholdingRate).toBe(0.1)
+    expect(toFirm.withholdingRate).toBe(0)
     expect(kindChangePatch(toFirm, "subcontract").withholdingRate).toBe(0)
+  })
+  it("新建列（無原值）切事務所 → 代扣率 0", () => {
+    const fresh = { kind: "subcontract" as const, withholdingRate: 0 }
+    const toFirm = { ...fresh, ...kindChangePatch(fresh, "firm") }
+    expect(toFirm.kind).toBe("firm")
+    expect(toFirm.withholdingRate).toBe(0)
+    // 新建事務所 → 技師 → 事務所：仍 0
+    const tech = { ...toFirm, ...kindChangePatch(toFirm, "technician") }
+    expect({ ...tech, ...kindChangePatch(tech, "firm") }.withholdingRate).toBe(0)
+  })
+  it("既有事務所 0：事務所 → 技師 → 事務所 來回切仍 0（不變成 10%）", () => {
+    const loaded = { kind: "firm" as const, withholdingRate: 0, _origKind: "firm" as const, _origRate: 0 }
+    const tech = { ...loaded, ...kindChangePatch(loaded, "technician") }
+    expect(tech.withholdingRate).toBe(0)
+    const back = { ...tech, ...kindChangePatch(tech, "firm") }
+    expect(back.kind).toBe("firm")
+    expect(back.withholdingRate).toBe(0)
+  })
+  it("既有事務所 10%：事務所 → 下包 → 事務所 來回切仍 10%", () => {
+    const loaded = { kind: "firm" as const, withholdingRate: 0.1, _origKind: "firm" as const, _origRate: 0.1 }
+    const sub = { ...loaded, ...kindChangePatch(loaded, "subcontract") }
+    expect(sub.withholdingRate).toBe(0)
+    const back = { ...sub, ...kindChangePatch(sub, "firm") }
+    expect(back.withholdingRate).toBe(0.1)
   })
   it("原本就是事務所（或新建列）切到其他：歸 0；切回事務所還原原值", () => {
     const loaded = { kind: "firm" as const, withholdingRate: 0.1, _origKind: "firm" as const, _origRate: 0.1 }

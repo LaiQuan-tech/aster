@@ -27,7 +27,6 @@ export function isFirmKind(kind: string | null | undefined): boolean {
 export const WITHHOLDING_TAX_THRESHOLD = 20000
 /** 二代健保補充保費：單次給付「達」此金額即扣 2.11%。 */
 export const SUPPLEMENTARY_PREMIUM_THRESHOLD = 20000
-export const DEFAULT_FIRM_WITHHOLDING_RATE = 0.1
 
 export const WITHHOLDING_TIP =
   "執行業務所得單次給付超過 20,000 元需代扣 10% 所得稅（剛好 20,000 元免扣，因稅額未超過 2,000 元）；達 20,000 元以上另需代扣二代健保補充保費 2.11%。"
@@ -77,7 +76,8 @@ export interface KindChangeOrigin {
 
 /**
  * 切換類型時要一起改的欄位：不相關的那一組清成 null（後端也會再清一次）。
- * - 切成事務所：目前代扣率 > 0 保留；為 0 才帶預設 10%（切回原本就是事務所且原率 > 0 → 還原原值）。
+ * - 切成事務所：不自動帶任何代扣率（2026-11-16 起事務所也預設不代扣）。既有列 → 還原載入時的原代扣率；
+ *   新建列 → 維持目前值（預設 0）。需要代扣由使用者自行填寫。
  * - 從事務所切到其他：該列原本是其他類型 → 還原載入時的原代扣率；原本就是事務所（或新建列）→ 歸 0（開發票不代扣）。
  */
 export function kindChangePatch(
@@ -88,7 +88,7 @@ export function kindChangePatch(
   const origRate = Number(row._origRate) || 0
   if (isFirmKind(next)) {
     const cur = Number(row.withholdingRate) || 0
-    const rate = cur > 0 ? cur : row._origKind === "firm" && origRate > 0 ? origRate : DEFAULT_FIRM_WITHHOLDING_RATE
+    const rate = row._origRate != null ? origRate : cur
     return {
       kind: next,
       invoiceNo: null,

@@ -107,6 +107,26 @@ describe("副委託代扣率預設", () => {
     expect(rowOf(SUB_TEN)).toMatchObject({ withholding_rate: "0.1" })
   })
 
+  it("更新沒帶起扣門檻（或 null）→ 保留原值（原 50,000 仍 50,000），且不送這欄", async () => {
+    rowOf(SUB_TEN).withholding_threshold = 50000
+    rowOf(SUB_ZERO).withholding_threshold = 50000
+    const res = await put(keepBoth({ [SUB_TEN]: { amount: 40000 }, [SUB_ZERO]: { withholdingThreshold: null } }))
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_TEN)).toMatchObject({ amount: 40000, withholding_threshold: 50000 })
+    expect(rowOf(SUB_ZERO)).toMatchObject({ withholding_threshold: 50000 })
+    const upd = fake.writes.filter((w) => w.table === "project_subcontracts" && w.action === "update" && (w.payload as Row).amount != null)
+    expect(upd.length).toBe(2)
+    for (const w of upd) expect(w.payload).not.toHaveProperty("withholding_threshold")
+  })
+
+  it("更新有帶起扣門檻 → 用帶的值；新建沒帶 → 20,000", async () => {
+    const res = await put([...keepBoth({ [SUB_TEN]: { withholdingThreshold: 30000 } }), { kind: "firm", vendorName: "新測試廠商", amount: 50000, sortOrder: 2 }])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_TEN)).toMatchObject({ withholding_threshold: 30000 })
+    const created = fake.db.project_subcontracts?.find((r) => r.vendor_name === "新測試廠商") as Row
+    expect(Number(created.withholding_threshold)).toBe(20000)
+  })
+
   it("更新有帶代扣率 → 用帶的值（含改成 0、改成 5%）", async () => {
     const res = await put(keepBoth({ [SUB_TEN]: { withholdingRate: 0 }, [SUB_ZERO]: { withholdingRate: 0.05 } }))
     expect(res.status).toBe(200)

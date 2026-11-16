@@ -35,7 +35,7 @@ export const subcontractsRouter = Router()
 /**
  * 副委託（下包工程／技師簽證費）與其分期放款（P3）。
  *
- * 我方是甲方：發包給協力廠商或技師，分期放款、技師費代扣 10%（起扣 20,000），
+ * 我方是甲方：發包給協力廠商或技師，分期放款、依各列代扣率代扣（新建預設 0＝不代扣；起扣門檻預設 20,000），
  * 收據可能開給集團另一家公司（`receiptIssuerCompanyId` ≠ `payingCompanyId`）。
  *
  * 權限：finance（HR／該案 lead／該案部門主管）。
@@ -532,7 +532,12 @@ subcontractsRouter.put(
               : p.id
                 ? {}
                 : { withholding_rate: DEFAULT_WITHHOLDING_RATE }),
-            withholding_threshold: p.withholdingThreshold ?? DEFAULT_WITHHOLDING_THRESHOLD,
+            // 起扣門檻：同代扣率——有帶就用帶的值；沒帶時更新保留 DB 既有值（不送這欄），新建才用預設 20,000。
+            ...(p.withholdingThreshold != null
+              ? { withholding_threshold: p.withholdingThreshold }
+              : p.id
+                ? {}
+                : { withholding_threshold: DEFAULT_WITHHOLDING_THRESHOLD }),
             sort_order: p.sortOrder ?? i,
             note: p.note ?? null,
             updated_at: nowIso,
