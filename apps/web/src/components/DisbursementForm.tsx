@@ -27,6 +27,8 @@ export interface AllocRowDraft {
   subcontractPaymentId?: string | null;
   installmentNo?: number | null;
   vendorName?: string | null;
+  /** 這列期款所屬副委託的登錄廠商（null＝非登錄廠商；undefined＝不知道，例如編輯舊單載入的列）。付錯人檢查用。 */
+  vendorId?: string | null;
   amount: string;
   withheldAmount: string;
   note: string;
@@ -78,6 +80,7 @@ export function allocRowFromPayable(p: Payable): AllocRowDraft {
     subcontractPaymentId: p.subcontractPaymentId,
     installmentNo: p.installmentNo,
     vendorName: p.vendorName,
+    vendorId: p.vendorId,
     amount: String(p.grossAmount),
     withheldAmount: String(p.withheldAmount),
     note: "",
@@ -244,6 +247,21 @@ export default function DisbursementForm({
   const allocWithheldSum = state.allocations.reduce((sum, r) => sum + toNum(r.withheldAmount), 0);
   const grossNum = toNum(state.grossAmount);
   const withheldNum = toNum(state.withheldAmount);
+  // 付錯人防線（2026-11-16，後端 400 allocation_vendor_mismatch 為準）：收款方是登錄廠商時，
+  // 分攤到的期款必須屬於同一家廠商——從乙的應付開單後把廠商改成甲，這裡就標紅並鎖住儲存。
+  const selectedVendor = state.payeeKind === "vendor" ? vendors.find((v) => v.id === state.vendorId) : undefined;
+  const vendorMismatchKeys = new Set(
+    state.payeeKind === "vendor" && state.vendorId
+      ? state.allocations
+          .filter((r) => r.vendorId !== undefined && (r.vendorId ?? "").toLowerCase() !== state.vendorId.toLowerCase())
+          .map((r) => r.key)
+      : [],
+  );
+  const hasVendorMismatch = vendorMismatchKeys.size > 0;
+  // 登錄廠商的收款戶名只能是名冊名稱或名冊上的帳戶戶名（唯讀，後端 400 payee_name_mismatch 為準）。
+  const payeeNameChoices = selectedVendor
+    ? Array.from(new Set([selectedVendor.name, selectedVendor.accountHolder ?? ""].map((x) => x.trim()).filter(Boolean)))
+    : [];
   const allowsZeroAlloc = state.payeeKind === "other" && state.allocations.length === 0;
   const centsEqual = (a: number, b: number) => Math.round(a * 100) === Math.round(b * 100);
   // 後端 checkAllocationTotals 分開驗證毛額與代扣兩個合計，兩個都要對，光是毛額
@@ -261,7 +279,7 @@ export default function DisbursementForm({
     (state.payeeKind === "vendor" ? !!state.vendorId : !!state.payeeName.trim()) &&
     (state.status !== "paid" || !!state.paidOn);
 
-  const canSubmit = restrictedFields || (requiredOk && allocMatches);
+  const canSubmit = restrictedFields || (requiredOk && allocMatches && !hasVendorMismatch);
 
   function buildBody(): DisbursementInput {
     const allocations: AllocationInput[] = state.allocations.map((r) => ({
@@ -311,6 +329,10 @@ export default function DisbursementForm({
     }
     if (!allocMatches) {
       setLocalError("分攤合計與毛額不符，請調整。");
+      return;
+    }
+    if (hasVendorMismatch) {
+      setLocalError("分攤的副委託廠商與收款廠商不同，請確認收款對象（移除標紅的分攤列或改回原廠商）。");
       return;
     }
     if (forceAcceptance && !forceReason.trim()) {
@@ -363,7 +385,18 @@ export default function DisbursementForm({
           <div className="flex gap-3 py-1.5">
             {(Object.keys(PAYEE_KIND_LABELS) as PayeeKind[]).map((k) => (
               <label key={k} className="flex items-center gap-1.5 text-sm text-gray-700">
-                <input type="radio" name="payeeKind" checked={state.payeeKind === k} onChange={() => set("payeeKind", k)} />
+                <input
+                  type="radio"
+                  name="payeeKind"
+                  checked={state.payeeKind === k}
+                  onChange={() =>
+                    setState((s) => {
+                      // 切回「廠商」時戶名重新帶名冊名稱（避免沿用「其他」時手打的名稱）。
+                      const v = k === "vendor" ? vendors.find((x) => x.id === s.vendorId) : undefined;
+                      return { ...s, payeeKind: k, payeeName: v ? v.name : s.payeeName };
+                    })
+                  }
+                />
                 {PAYEE_KIND_LABELS[k]}
               </label>
             ))}
@@ -389,7 +422,23 @@ export default function DisbursementForm({
         )}
         <div>
           <label className={labelCls}>收款戶名</label>
-          <input className={inputCls} value={state.payeeName} onChange={(e) => set("payeeName", e.target.value)} placeholder="選了廠商會自動帶入，可覆寫" />
+          {state.payeeKind === "vendor" ? (
+            payeeNameChoices.length > 1 ? (
+              <select className={inputCls} value={state.payeeName} onChange={(e) => set("payeeName", e.target.value)}>
+                {!payeeNameChoices.includes(state.payeeName.trim()) && <option value={state.payeeName}>{state.payeeName}</option>}
+                {payeeNameChoices.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            ) : (
+              <input className={`${inputCls} bg-gray-50`} value={state.payeeName} readOnly placeholder="選了廠商會自動帶入名冊名稱" />
+            )
+          ) : (
+            <input className={inputCls} value={state.payeeName} onChange={(e) => set("payeeName", e.target.value)} />
+          )}
+          {state.payeeKind === "vendor" && (
+            <p className="mt-1 text-xs text-gray-400">登錄廠商的戶名只能是名冊名稱／帳戶戶名；要付給其他對象請改選「其他」。</p>
+          )}
         </div>
         <div>
           <label className={labelCls}>收款銀行</label>
@@ -509,8 +558,9 @@ export default function DisbursementForm({
               <tbody>
                 {state.allocations.map((r) => {
                   const proj = projects.find((p) => p.id === r.projectId);
+                  const mismatched = vendorMismatchKeys.has(r.key);
                   return (
-                    <tr key={r.key} className="border-b last:border-0 align-top">
+                    <tr key={r.key} className={`border-b last:border-0 align-top ${mismatched ? "bg-red-50" : ""}`}>
                       <td className="py-1.5 pr-2">
                         {r.fromPayable ? (
                           <span className="text-gray-700">{proj ? `${proj.code ?? ""} ${proj.name}` : r.projectId}</span>
@@ -525,6 +575,7 @@ export default function DisbursementForm({
                       </td>
                       <td className="py-1.5 pr-2 text-xs text-gray-500">
                         {r.fromPayable ? `第 ${r.installmentNo} 期${r.vendorName ? `・${r.vendorName}` : ""}` : "手動"}
+                        {mismatched && <div className="text-red-700">與收款廠商不同</div>}
                       </td>
                       <td className="py-1.5 pr-2">
                         <MoneyInput className={`${inputCls} text-right text-xs`} value={r.amount} onValueChange={(v) => patchRow(r.key, { amount: v })} />
@@ -586,6 +637,11 @@ export default function DisbursementForm({
           )}
           {hasNonPositiveRow && <div>有分攤列金額是 0 或空白，請填金額或移除該列。</div>}
         </div>
+        {hasVendorMismatch && (
+          <p className="mt-2 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">
+            分攤的副委託廠商與收款廠商不同，請確認收款對象：移除標紅的分攤列，或把收款廠商改回原廠商。
+          </p>
+        )}
       </div>
 
       {acceptanceBlocked && (

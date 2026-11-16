@@ -570,6 +570,8 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   status_changed: "這張放款單剛被別人改了狀態（例如撤回簽核），沒有付款；請重新整理後再確認。",
   approved: "已核准的單只能改用途／收據編號／發票資訊／備註；要改其他欄位請先撤回簽核。",
   allocation_mismatch: "分攤合計金額與毛額不符。",
+  allocation_vendor_mismatch: "分攤的副委託廠商與收款廠商不同，請確認收款對象。",
+  payee_name_mismatch: "收款戶名與登錄廠商名稱不同；若要付給其他對象請改為非登錄收款方。",
   payment_already_paid: "選到的期款已由其他匯款標記為已付。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_company: "選到的公司主體不存在。",

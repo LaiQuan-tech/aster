@@ -1244,6 +1244,8 @@ type ResolvedAllocation = {
   note: string | null
   project: ProjectLite
   payment: PaymentRow | null
+  /** 這列對到的副委託登錄廠商（副委託非登錄廠商＝null；沒對到副委託＝undefined）。付錯人檢查用。 */
+  subcontractVendorId?: string | null
 }
 
 async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): Promise<ResolvedAllocation[]> {
@@ -1270,6 +1272,7 @@ async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): 
     if (!project) throw new DisbursementError(400, "invalid_project", { projectId: a.projectId })
     let subcontractId: string | null = a.subcontractId ?? null
     let payment: PaymentRow | null = null
+    let subcontractVendorId: string | null | undefined
     if (a.subcontractPaymentId) {
       payment = paymentById.get(a.subcontractPaymentId) ?? null
       const sub = payment ? subById.get(payment.subcontract_id) : undefined
@@ -1277,11 +1280,13 @@ async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): 
         throw new DisbursementError(400, "invalid_payment", { subcontractPaymentId: a.subcontractPaymentId })
       }
       subcontractId = sub.id
+      subcontractVendorId = sub.vendor_id ?? null
     } else if (subcontractId) {
       const sub = subById.get(subcontractId)
       if (!sub || sub.project_id !== a.projectId) {
         throw new DisbursementError(400, "invalid_subcontract", { subcontractId })
       }
+      subcontractVendorId = sub.vendor_id ?? null
     }
     return {
       projectId: a.projectId,
@@ -1292,8 +1297,47 @@ async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): 
       note: a.note ?? null,
       project,
       payment,
+      subcontractVendorId,
     }
   })
+}
+
+/**
+ * 付錯人防線（2026-11-16 驗收 A）：收款方是登錄廠商時，每列有對到副委託的分攤，副委託的登錄廠商必須就是收款廠商
+ * （UUID 不分大小寫）；副委託是非登錄廠商（vendor_id null）也擋——不然「從乙的應付開單、把收款廠商改成甲」
+ * 會把乙的期款標成已付、錢匯給甲。收款方是非登錄（vendor_id null）時維持原行為。只在建立／修改草稿時呼叫，
+ * 已存在的單子不回溯檢查。
+ */
+export function assertAllocationVendors(
+  payeeVendorId: string | null,
+  allocations: ReadonlyArray<{ subcontractId: string | null; subcontractVendorId?: string | null }>,
+): void {
+  if (!payeeVendorId) return
+  const payee = payeeVendorId.toLowerCase()
+  allocations.forEach((a, index) => {
+    if (a.subcontractVendorId === undefined) return
+    if (!a.subcontractVendorId || a.subcontractVendorId.toLowerCase() !== payee) {
+      throw new DisbursementError(400, "allocation_vendor_mismatch", {
+        index,
+        subcontractId: a.subcontractId,
+        message: "分攤的副委託廠商與收款廠商不同，請確認收款對象",
+      })
+    }
+  })
+}
+
+/**
+ * 付錯人防線（2026-11-16 驗收 B）：收款方是登錄廠商時，收款戶名（trim）只能是名冊名稱或名冊上的帳戶戶名
+ * （account_holder），不能「選廠商甲、戶名打乙」——主管簽核時銀行欄位被遮，只看得到名稱。
+ */
+export function assertPayeeNameMatchesVendor(payeeName: string, vendor: { name: string; account_holder?: string | null }): void {
+  const n = payeeName.trim()
+  const allowed = [vendor.name, vendor.account_holder].map((v) => (v ?? "").trim()).filter(Boolean)
+  if (!allowed.includes(n)) {
+    throw new DisbursementError(400, "payee_name_mismatch", {
+      message: "收款戶名與登錄廠商名稱不同；若要付給其他對象請改為非登錄收款方",
+    })
+  }
 }
 
 type ResolvedHeader = {
@@ -1339,6 +1383,7 @@ async function resolveHeader(
   tenantId: string,
   input: Omit<DisbursementInput, "status" | "allocations">,
   stored?: { payingCompanyId?: string | null; receiptIssuerCompanyId?: string | null },
+  opts: { checkPayeeName?: boolean } = {},
 ): Promise<ResolvedHeader> {
   let vendor: VendorLite | null = null
   if (input.payeeKind === "vendor") {
@@ -1356,6 +1401,7 @@ async function resolveHeader(
   }
   const payeeName = (input.payeeName ?? "").trim() || vendor?.name || ""
   if (!payeeName) throw new DisbursementError(400, "payee_name_required")
+  if (vendor && opts.checkPayeeName !== false) assertPayeeNameMatchesVendor(payeeName, vendor)
 
   const companyIds = uniq([input.payingCompanyId, input.receiptIssuerCompanyId])
   const companies = await loadCompanies(tenantId, companyIds)
@@ -1969,6 +2015,7 @@ export type Actor = { empId: string | null; role?: string | null; active?: boole
 export async function createDisbursement(tenantId: string, actor: Actor, input: DisbursementInput): Promise<SerializedDisbursement> {
   const header = await resolveHeader(tenantId, input)
   const allocations = await resolveAllocations(tenantId, input.allocations)
+  assertAllocationVendors(header.vendor_id, allocations)
   assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
   const payments = allocations.map((a) => a.payment).filter((p): p is PaymentRow => !!p)
   // M5：分攤到未驗收期款一律擋（HR 可帶 forceAcceptance＋forceReason 放行）。
@@ -2267,10 +2314,21 @@ export async function updateDisbursement(
       if (patch.payeeBankAccount === undefined) delete merged.payeeBankAccount
       if (patch.payeeBankCode === undefined) delete merged.payeeBankCode
     }
-    const header = await resolveHeader(tenantId, merged, {
-      payingCompanyId: current.paying_company_id,
-      receiptIssuerCompanyId: current.receipt_issuer_company_id,
-    })
+    // 付錯人檢查（2026-11-16）只對這次「改到」的東西：換了收款廠商／收款方種類，或戶名真的改了。
+    // 只改備註的 PATCH 不重驗——草稿建立後廠商改名，舊快照名稱不該讓整張單改不動。
+    const payeeChanged =
+      (patch.payeeKind !== undefined && patch.payeeKind !== current.payee_kind) ||
+      (patch.vendorId !== undefined && (patch.vendorId ?? null) !== (current.vendor_id ?? null))
+    const payeeNameChanged = patch.payeeName !== undefined && normalize(patch.payeeName) !== normalize(current.payee_name)
+    const header = await resolveHeader(
+      tenantId,
+      merged,
+      {
+        payingCompanyId: current.paying_company_id,
+        receiptIssuerCompanyId: current.receipt_issuer_company_id,
+      },
+      { checkPayeeName: payeeChanged || payeeNameChanged },
+    )
     const allocInputs: AllocationInput[] =
       patch.allocations !== undefined
         ? patch.allocations
@@ -2283,6 +2341,20 @@ export async function updateDisbursement(
             note: a.note,
           }))
     const allocations = await resolveAllocations(tenantId, allocInputs)
+    if (payeeChanged) {
+      assertAllocationVendors(header.vendor_id, allocations)
+    } else if (patch.allocations !== undefined) {
+      // 收款方沒換：只驗這次新加／換掉的分攤列（副委託＋期款組合原本不在單上的），既有列不回溯。
+      const existingKeys = new Set(
+        (await loadAllocations(tenantId, [id])).map((e) => allocationRefKey(e.subcontract_id, e.subcontract_payment_id)),
+      )
+      assertAllocationVendors(
+        header.vendor_id,
+        allocations.map((r) =>
+          existingKeys.has(allocationRefKey(r.subcontractId, r.subcontractPaymentId)) ? { ...r, subcontractVendorId: undefined } : r,
+        ),
+      )
+    }
     assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
     if (patch.allocations !== undefined) {
       // M5：改了分攤才重查驗收（只改備註的 PATCH 不該被未驗收期款擋下來）。
@@ -2312,6 +2384,10 @@ export async function updateDisbursement(
     context: "PATCH /disbursements/:id",
   })
   return getDisbursement(tenantId, id)
+}
+
+function allocationRefKey(subcontractId: string | null | undefined, paymentId: string | null | undefined): string {
+  return `${(subcontractId ?? "").toLowerCase()}|${(paymentId ?? "").toLowerCase()}`
 }
 
 function normalize(v: unknown): string {

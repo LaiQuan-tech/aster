@@ -18,6 +18,10 @@ describe("humanizeDisbursementError", () => {
   it("一般錯誤碼照舊對應中文（不被 serverMessage 蓋掉）", () => {
     expect(humanizeDisbursementError(apiErr({ error: "subcontract_deleted", message: "x" }), "y")).toContain("副委託已被刪除")
   })
+  it("付錯人防線（2026-11-16）：分攤廠商不符／戶名不符有中文", () => {
+    expect(humanizeDisbursementError(apiErr({ error: "allocation_vendor_mismatch" }), "x")).toContain("副委託廠商與收款廠商不同")
+    expect(humanizeDisbursementError(apiErr({ error: "payee_name_mismatch" }), "x")).toContain("收款戶名與登錄廠商名稱不同")
+  })
   it("批次付款逐筆：manual_check_required 帶 message 時顯示它", () => {
     expect(describeBatchPayError("manual_check_required", { message: "單號 D-115-003 需人工確認" })).toBe("單號 D-115-003 需人工確認")
   })
