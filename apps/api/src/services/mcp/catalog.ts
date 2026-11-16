@@ -121,6 +121,8 @@ const SPECIFIC: Record<string, string> = {
   "POST /requests/:id/approve": "核准申請單（body: comment?）",
   "POST /requests/:id/reject": "駁回申請單（body: comment?）",
   "POST /requests/batch-decision": "批次簽核（body: ids[], action, comment?）",
+  "PUT /projects/:id/subcontracts":
+    "副委託整批（body: subcontracts[], deleteReason?）：未列出的既有列會被軟刪（需 deleteReason）；既有列沒帶的欄位保留原值、帶 null 清空；amount 必填；改廠商名稱需同時給 vendorId",
   "GET /punch": "打卡紀錄；query: employeeId, deptId, from, to, type, source",
   "GET /attendance/punch-overview": "打卡當日總覽／週表；query: date 或 from/to, deptId, employeeId",
   "GET /attendance/anomalies": "出勤異常；query: from, to",

@@ -407,6 +407,54 @@ subcontractsRouter.put(
           res.status(400).json({ error: "invalid_contract", contractId: p.contractId })
           return
         }
+        // 廠商名稱與 vendor_id 必須一起改（2026-11-16）：更新既有列「沒帶的欄位保留原值」後，
+        // 只送 vendorName 會變成「畫面顯示新廠商、vendor_id 仍是舊廠商」——應付清單依 vendor_id 分組、
+        // 放款單從 vendor_id 帶銀行帳號，錢會匯給舊廠商。反之只送 vendorId 也會「顯示舊名快照、匯給新廠商」。
+        const prev = p.id ? existingById.get(p.id) : undefined
+        if (prev) {
+          const sameName = (p.vendorName ?? "").trim() === (prev.vendor_name ?? "").trim()
+          if (p.vendorName !== undefined && p.vendorId === undefined && !sameName) {
+            res.status(400).json({
+              error: "vendor_id_required",
+              id: p.id,
+              message: "修改廠商名稱時請一併提供 vendorId（或送 vendorId: null 表示非登錄廠商）",
+            })
+            return
+          }
+          if (p.vendorId !== undefined && p.vendorId !== null && p.vendorName === undefined && p.vendorId !== prev.vendor_id) {
+            res.status(400).json({
+              error: "vendor_name_required",
+              id: p.id,
+              message: "修改廠商（vendorId）時請一併提供 vendorName，避免顯示名稱與付款對象不一致",
+            })
+            return
+          }
+        }
+        // 沒帶 kind 時，0089 欄位依「有效 kind」（更新＝DB 現有、新建＝subcontract）只寫相關那組；
+        // 送了不適用的那組（非空值）以前會被默默丟掉 → 改回 400 提示（2026-11-16）。
+        if (p.kind === undefined) {
+          const kindNow = prev?.kind ?? "subcontract"
+          const bad =
+            kindNow === "firm"
+              ? (p.invoiceNo != null && p.invoiceNo !== "") || p.invoiceDate != null
+                ? "invoiceNo/invoiceDate"
+                : null
+              : p.withholdingDate != null
+                ? "withholdingDate"
+                : null
+          if (bad) {
+            res.status(400).json({
+              error: "field_not_applicable",
+              id: p.id ?? null,
+              field: bad,
+              message:
+                kindNow === "firm"
+                  ? "發票號碼／發票日期不適用事務所列（事務所記代扣日期）；若要改類型請一併送 kind"
+                  : "代扣日期只適用事務所列（其他類型記發票）；若要改成事務所請一併送 kind: \"firm\"",
+            })
+            return
+          }
+        }
       }
 
       // 未出現的 → 軟刪；有已付／已驗收期款、或已有請款放款分攤的不可移除（與刪除專案的擋刪條件一致，2026-11-12 驗收）。
@@ -522,13 +570,15 @@ subcontractsRouter.put(
           const prev = p.id ? existingById.get(p.id) : undefined
           const col = <T>(name: string, v: T | undefined, insertDefault: unknown): Record<string, unknown> =>
             v !== undefined ? { [name]: v } : p.id ? {} : { [name]: insertDefault }
+          // 只送 vendorName（與 DB 相同，前面已擋掉不同的）而沒送 vendorId：兩欄都不動。
+          const vendorNameIn = p.id && p.vendorId === undefined ? undefined : p.vendorName
           // 決定 0089 欄位寫哪一組的 kind：有帶用帶的；更新沒帶用 DB 現有 kind（不改類型）；新建沒帶＝subcontract。
           const effectiveKind = p.kind ?? prev?.kind ?? "subcontract"
           const fields: Record<string, unknown> = {
             ...col("kind", p.kind, "subcontract"),
             ...col("discipline", p.discipline, null),
             ...col("vendor_id", p.vendorId, null),
-            ...col("vendor_name", p.vendorName, null),
+            ...col("vendor_name", vendorNameIn, null),
             ...col("contact", p.contact, null),
             ...col("item", p.item, null),
             amount: p.amount,

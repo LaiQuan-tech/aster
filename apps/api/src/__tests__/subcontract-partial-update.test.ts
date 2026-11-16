@@ -38,6 +38,7 @@ const HR_TOKEN = "hr-user"
 const HR_EMP_ID = "bbbbbbbb-0000-4000-8000-000000000001"
 const PROJECT_ID = "dddddddd-0000-4000-8000-000000000001"
 const VENDOR_ID = "dddddddd-0000-4000-8000-0000000000f1"
+const VENDOR_ID_2 = "dddddddd-0000-4000-8000-0000000000f2"
 const CONTRACT_ID = "dddddddd-0000-4000-8000-0000000000c1"
 const SUB_FIRM = "dddddddd-0000-4000-8000-0000000000b1"
 const SUB_PLAIN = "dddddddd-0000-4000-8000-0000000000b2"
@@ -62,13 +63,12 @@ const plainRow = (): Row => ({
 const rowOf = (id: string) => fake.db.project_subcontracts?.find((r) => r.id === id) as Row
 const put = (items: Row[]) =>
   request(app).put(`/projects/${PROJECT_ID}/subcontracts`).set("Authorization", `Bearer ${HR_TOKEN}`).send({ subcontracts: items })
-const updatePayloadFor = (id: string) => {
-  const w = fake.writes.filter((x) => x.table === "project_subcontracts" && x.action === "update" && (x.payload as Row).amount != null)
-  // fake 的 update 寫入不帶 id；依 PUT 的寫入順序（payload 順序）對回去。
-  return w
-    .map((x) => x.payload as Row)
-    .find((_, i) => i === (id === SUB_FIRM ? 0 : 1)) as Row
-}
+const updatePayloadFor = (id: string) =>
+  // 依 fake 記下的命中 id 對回（不靠寫入順序）。
+  fake.writes.find(
+    (x) => x.table === "project_subcontracts" && x.action === "update" && (x.payload as Row).amount != null && x.ids?.includes(id),
+  )?.payload as Row
+const subWrites = () => fake.writes.filter((x) => x.table === "project_subcontracts")
 
 beforeEach(() => {
   fake.reset()
@@ -127,14 +127,92 @@ describe("副委託整批 PUT：更新既有列只寫有帶的欄位", () => {
     })
   })
 
-  it("kind 沒帶時依 DB 現有 kind 決定 0089 欄位：事務所列送代扣日期會寫入、送發票不會寫入", async () => {
+  it("kind 沒帶時依 DB 現有 kind 決定 0089 欄位：事務所列送代扣日期、下包列送發票都會寫入", async () => {
     const res = await put([
-      { id: SUB_FIRM, amount: 100000, withholdingDate: "2026-11-20", invoiceNo: "TEST-9999" },
-      { id: SUB_PLAIN, amount: 30000, invoiceNo: "TEST-0002", withholdingDate: "2026-11-20" },
+      { id: SUB_FIRM, amount: 100000, withholdingDate: "2026-11-20" },
+      { id: SUB_PLAIN, amount: 30000, invoiceNo: "TEST-0002" },
     ])
     expect(res.status).toBe(200)
     expect(rowOf(SUB_FIRM)).toMatchObject({ kind: "firm", withholding_date: "2026-11-20", invoice_no: null })
     expect(rowOf(SUB_PLAIN)).toMatchObject({ kind: "subcontract", invoice_no: "TEST-0002", withholding_date: null })
+  })
+
+  it("事務所列送 invoiceNo 但沒帶 kind → 400 field_not_applicable，DB 不變", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, invoiceNo: "TEST-9999" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "field_not_applicable", id: SUB_FIRM })
+    expect(subWrites()).toHaveLength(0)
+    expect(rowOf(SUB_FIRM)).toEqual(firmRow())
+  })
+
+  it("非事務所列送 withholdingDate 但沒帶 kind → 400 field_not_applicable，DB 不變", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000 },
+      { id: SUB_PLAIN, amount: 30000, withholdingDate: "2026-11-20" },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "field_not_applicable", id: SUB_PLAIN, field: "withholdingDate" })
+    expect(subWrites()).toHaveLength(0)
+    expect(rowOf(SUB_PLAIN)).toEqual(plainRow())
+  })
+
+  it("只送不同的 vendorName、沒送 vendorId → 400 vendor_id_required，DB 完全不變", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorName: "測試另一家事務所" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "vendor_id_required", id: SUB_FIRM })
+    expect(res.body.message).toContain("vendorId")
+    expect(subWrites()).toHaveLength(0)
+    expect(rowOf(SUB_FIRM)).toEqual(firmRow())
+    expect(rowOf(SUB_PLAIN)).toEqual(plainRow())
+  })
+
+  it("只送相同的 vendorName（前後空白不計）→ 成功，vendor_id／vendor_name 都不寫", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorName: "  測試事務所 " },
+      { id: SUB_PLAIN, amount: 30000, vendorName: "測試廠商" },
+    ])
+    expect(res.status).toBe(200)
+    expect(updatePayloadFor(SUB_FIRM)).not.toHaveProperty("vendor_name")
+    expect(updatePayloadFor(SUB_FIRM)).not.toHaveProperty("vendor_id")
+    expect(updatePayloadFor(SUB_PLAIN)).not.toHaveProperty("vendor_name")
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: VENDOR_ID, vendor_name: "測試事務所" })
+  })
+
+  it("只送不同的 vendorId、沒送 vendorName → 400 vendor_name_required（避免顯示舊名、匯給新廠商）", async () => {
+    fake.db.vendors!.push({ id: VENDOR_ID_2, tenant_id: TENANT_ID, name: "測試另一家事務所", deleted_at: null })
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2 },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "vendor_name_required", id: SUB_FIRM })
+    expect(subWrites()).toHaveLength(0)
+    expect(rowOf(SUB_FIRM)).toEqual(firmRow())
+  })
+
+  it("同時送 vendorId＋vendorName → 兩欄一起改", async () => {
+    fake.db.vendors!.push({ id: VENDOR_ID_2, tenant_id: TENANT_ID, name: "測試另一家事務所", deleted_at: null })
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: VENDOR_ID_2, vendor_name: "測試另一家事務所", kind: "firm" })
+  })
+
+  it("送 vendorId: null＋新 vendorName → 清掉 vendor_id、改名（非登錄廠商）", async () => {
+    const res = await put([
+      { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試臨時廠商" },
+      { id: SUB_PLAIN, amount: 30000 },
+    ])
+    expect(res.status).toBe(200)
+    expect(rowOf(SUB_FIRM)).toMatchObject({ vendor_id: null, vendor_name: "測試臨時廠商" })
   })
 
   it("前端副委託卡的完整 payload → update 內容與改前完全相同", async () => {

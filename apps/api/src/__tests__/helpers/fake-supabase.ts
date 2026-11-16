@@ -45,6 +45,8 @@ export type FakeWrite = {
   payload: unknown
   /** update／delete 命中的列數。 */
   matched?: number
+  /** update 命中的列 id（依庫中順序）；可用來把 update 寫入對回是哪一列。 */
+  ids?: unknown[]
 }
 
 type PgError = { message: string; code?: string }
@@ -242,7 +244,7 @@ export function createFakeSupabase() {
         const clash = uniqueViolation(merged, [...stored.filter((row) => !hitSet.has(row)), ...merged])
         if (clash) return uniqueFailure(clash)
         for (const row of hit) Object.assign(row, payload)
-        writes.push({ table, action, payload, matched: hit.length })
+        writes.push({ table, action, payload, matched: hit.length, ids: hit.map((row) => row.id) })
         return respond(hit.map((row) => projectColumns(row, columns)))
       }
       if (action === "upsert") {
