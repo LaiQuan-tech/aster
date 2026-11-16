@@ -58,10 +58,14 @@ describe("第十輪：短名稱廠商「名冊名稱被新名稱包含」（lib�
     }
   })
   it("不得變成相近：e-Life／e-Home、7-ELEVEN／7-11、全家／全家便利商店；2 字核心後接非地名不相近", () => {
-    for (const [a, b] of [["e-Life", "e-Home"], ["7-ELEVEN", "7-11"], ["全家", "全家便利商店"], ["王明", "王明德"], ["宏碁", "宏碁電子材料"], ["大同", "大同工程有限公司台中"], ["3M", "3MX Taiwan"]] as const) {
+    for (const [a, b] of [["e-Life", "e-Home"], ["7-ELEVEN", "7-11"], ["全家", "全家便利商店"], ["王明", "王明德"], ["宏碁", "宏碁電子材料"], ["3M", "3MX Taiwan"]] as const) {
       expect(relation(a, b), `${a} ← ${b}`).toBe("none")
       expect(relation(b, a), `${b} ← ${a}`).toBe("none")
     }
+  })
+  it("收尾輪 F1／F3：「大同」對「大同工程有限公司台中」（產業詞＋型態字＋地名）→ 相近；反方向名冊長名的核心不是「大同」→ 不相近", () => {
+    expect(relation("大同", "大同工程有限公司台中")).toBe("similar")
+    expect(relation("大同工程有限公司台中", "大同")).toBe("none")
   })
   it("只看「名冊名稱被新名稱包含」：新名稱短、被名冊長名包含不因新規則相近", () => {
     expect(relation("大同行台中營業所", "大同")).toBe("none")
@@ -74,17 +78,19 @@ describe("第十輪：短名稱廠商「名冊名稱被新名稱包含」（lib�
 })
 
 describe("第十輪：注音／聲調／日文長音等附加字", () => {
-  it("比對 key 先去掉注音、聲調、丶、々、ー；™ 在 NFKC 前去掉", () => {
-    expect(exactNameKey("測試ㄅ甲ㄆ工程行")).toBe(exactNameKey("測試甲工程行"))
-    expect(exactNameKey("測試甲ˊˇˋ˙ˉ工程行")).toBe(exactNameKey("測試甲工程行"))
-    expect(exactNameKey("測試ㆠ甲工程行")).toBe(exactNameKey("測試甲工程行"))
-    expect(exactNameKey("測試丶甲々工程行ー")).toBe(exactNameKey("測試甲工程行"))
-    expect(exactNameKey("測試甲ｰ工程行")).toBe(exactNameKey("測試甲工程行"))
-    expect(exactNameKey("ACME™")).toBe("acme")
-    expect(exactNameKey("ACME℠ ℡")).toBe("acme")
+  it("相近級別的 key 去掉注音、聲調、丶、々、ー、™（收尾輪：exact 不去，改判相近）", () => {
+    for (const n of ["測試ㄅ甲ㄆ工程行", "測試甲ˊˇˋ˙ˉ工程行", "測試ㆠ甲工程行", "測試丶甲々工程行ー", "測試甲ｰ工程行"]) {
+      expect(exactNameKey(n), n).not.toBe(exactNameKey("測試甲工程行"))
+      expect(similarNameKeys(n), n).toContain(exactNameKey("測試甲工程行"))
+      expect(relation("測試甲工程行", n), n).toBe("similar")
+    }
+    expect(similarNameKeys("ACME™")).toContain("acme")
+    expect(similarNameKeys("ACME℠ ℡")).toContain("acme")
+    expect(exactNameKey("ACME™")).not.toBe("acme")
+    expect(exactNameKey("ACME™")).not.toBe(exactNameKey("ACMETM"))
     expect(similarNameKeys("測試ㄅ甲有限公司")).toContain("測試甲")
-    expect(relation("測試甲工程行", "測試ㄅ甲工程行ˋ")).toBe("exact")
-    expect(relation("ACME Design", "ACME™ Design")).toBe("exact")
+    expect(relation("測試甲工程行", "測試ㄅ甲工程行ˋ")).toBe("similar")
+    expect(relation("ACME Design", "ACME™ Design")).toBe("similar")
   })
 })
 
@@ -147,7 +153,11 @@ describe("第十輪：API 層（放款「其他」收款、名冊新增）", () 
       const ok = await as(request(app).post("/disbursements")).send(other(n, { confirmDistinctReason: "測試：不同公司" }))
       expect(ok.status, n).toBe(201)
     }
-    const hard = await as(request(app).post("/disbursements")).send(other("測試ˋ行", { confirmDistinctReason: "測試：說明也不行" }))
+    // 收尾輪：聲調等附加字不進 exact →「測試ˋ行」對「測試行」改為相近（需說明）
+    const tone = await as(request(app).post("/disbursements")).send(other("測試ˋ行"))
+    expect(tone.status).toBe(409)
+    expect(tone.body.error).toBe("payee_name_similar")
+    const hard = await as(request(app).post("/disbursements")).send(other(" 測試 行 ", { confirmDistinctReason: "測試：說明也不行" }))
     expect(hard.status).toBe(400)
     expect(hard.body.error).toBe("payee_is_registered_vendor")
   })

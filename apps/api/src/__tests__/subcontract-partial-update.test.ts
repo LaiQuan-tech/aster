@@ -635,9 +635,10 @@ describe("第五輪 #4（2026-11-17）：非登錄副委託不可與名冊廠商
       expect(res.status, vendorName).toBe(409)
       expect(res.body).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測試廠商股份有限公司", vendorName, index: 2 })
     }
-    // 簡稱 key < 3 字不比
+    // 簡稱 key < 3 字：收尾輪 F2 起「等於 2 字簡稱」→ 相近（需說明，不硬擋）
     fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_SAME ? { ...v, short_name: "測簡" } : v))
     const short = await put([{ id: SUB_FIRM, amount: 100000 }, { id: SUB_PLAIN, amount: 30000 }, { amount: 7000, vendorId: null, vendorName: "測簡" }])
-    expect(short.status).toBe(200)
+    expect(short.status).toBe(409)
+    expect(short.body).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測試廠商股份有限公司" })
   })
 })

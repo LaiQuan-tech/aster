@@ -350,10 +350,15 @@ async function duplicateVendorName(tenantId: string, next: RosterIdentity, selfI
     exact: nextKeys.exact.filter((k) => !prevKeys.exact.includes(k)),
     similar: nextKeys.similar.filter((k) => !prevKeys.similar.includes(k)),
     full: nextKeys.full.filter((k) => !prevKeys.full.includes(k)),
+    fullHay: nextKeys.fullHay,
     // 第十輪「名稱包含」只看名稱：名稱沒變（只改簡稱／戶名）就不比，改名或新增才比。
-    ...(renamed ? { name: nextKeys.name, nameCore: nextKeys.nameCore, nameParen: nextKeys.nameParen } : { name: [], nameCore: null, nameParen: "" }),
+    ...(renamed
+      ? { name: nextKeys.name, nameHay: nextKeys.nameHay, nameParen: nextKeys.nameParen, f4Suffix: nextKeys.f4Suffix }
+      : { name: [], nameHay: [], nameParen: null, f4Suffix: null }),
+    // 收尾輪 F1／F2：名稱／簡稱的核心——只拿這次新增的（只改簡稱時就是新簡稱的核心）。
+    patterns: (nextKeys.patterns ?? []).filter((p) => !(prevKeys.patterns ?? []).includes(p)),
   }
-  if (mine.exact.length === 0 && mine.similar.length === 0 && mine.full.length === 0 && (mine.name ?? []).length === 0) return null
+  if (mine.exact.length === 0 && mine.similar.length === 0 && mine.full.length === 0 && (mine.name ?? []).length === 0 && (mine.patterns ?? []).length === 0) return null
   const roster = await selectAllPages<{ id: string; name: string | null; short_name: string | null; account_holder: string | null }>(
     (from, to) =>
       supabaseAdmin

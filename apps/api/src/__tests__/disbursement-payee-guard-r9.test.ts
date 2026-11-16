@@ -174,8 +174,8 @@ describe("第九輪 H-1：相近加「包含」（lib）", () => {
       expect(relation("台灣大同工程有限公司", n), n).toBe("none")
       expect(relation("測試己有限公司", n), n).toBe("none")
     }
-    // 名冊短名「大同」（2 中文字）：其餘有「工程」（不是地名／分公司／公司型態字）→ 不相近
-    expect(relation("大同", "大同工程有限公司台中")).toBe("none")
+    // 收尾輪 F1／F3：2 字核心前後只多產業詞（工程）、公司型態字、地名 → 相近
+    expect(relation("大同", "大同工程有限公司台中")).toBe("similar")
     // 第十輪 insideExact：名冊名稱 exact key ≥3 字元且去後綴仍 ≥2 英數字，整串出現在新名稱裡 → 相近（需說明）
     expect(relation("ABCD", "ABCD Design")).toBe("similar")
   })

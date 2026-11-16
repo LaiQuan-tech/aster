@@ -631,6 +631,19 @@ describe("POST /projects primary contract", () => {
       }
     })
 
+    it("收尾輪 F1／F3：名冊 2 字名稱夾在地名／產業詞／公司型態字中間 → 相近需說明（不 must_bind）", async () => {
+      h.db.vendors = [...h.db.vendors, { id: "44444444-4444-4444-8444-44444444445b", tenant_id: h.tenantId, name: "測宏", short_name: null, account_holder: null, deleted_at: null }]
+      for (const [i, vendorName] of ["台中測宏股份有限公司", "(台中)測宏工程有限公司"].entries()) {
+        h.operations.length = 0
+        const response = await post([{ vendorId: null, vendorName, amount: 5_000 }], `VN-F1-${i}`)
+        expect(response.status, vendorName).toBe(409)
+        expect(response.body, vendorName).toMatchObject({ error: "vendor_name_similar", matchedVendorName: "測宏" })
+        expect(rpcCalls()).toEqual([])
+        const ok = await post([{ vendorId: null, vendorName, amount: 5_000, confirmDistinctReason: "測試：確為不同對象" }], `VN-F1-OK-${i}`)
+        expect(ok.status, vendorName).toBe(201)
+      }
+    })
+
     it("第七輪：副委託名稱全西里爾／含希臘字母／不可見字元 → 400 invalid_subcontract_vendor_name，未呼叫 RPC", async () => {
       for (const [i, name] of ["Тест Вендор", "測試Ωmega工程", "測試\u200b廠商"].entries()) {
         h.operations.length = 0

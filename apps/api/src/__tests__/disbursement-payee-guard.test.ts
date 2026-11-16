@@ -1027,14 +1027,17 @@ describe("第五輪（2026-11-17）", () => {
       expect(bad.status).toBe(400)
       expect(bad.body.error).toBe("invalid_payee_name")
     })
-    it("簡稱 key 只有 2 字不誤擋；帳戶戶名與名稱不同且只有 2 字也不擋；名稱本身照比", async () => {
+    it("簡稱 key 只有 2 字不硬擋（收尾輪 F2：等於 2 字簡稱／簡稱＋附加字 → 相近需說明）；帳戶戶名與名稱不同且只有 2 字不擋；名稱本身照比", async () => {
       fake.db.vendors = fake.db.vendors!.map((v) =>
         v.id === VENDOR_B ? { ...v, short_name: "乙工", account_holder: "王五" } : v,
       )
-      for (const name of ["乙工", "王五", "乙工(股)"]) {
+      for (const name of ["乙工", "乙工(股)"]) {
         const res = await as(request(app).post("/disbursements")).send(other(name))
-        expect(res.status, name).toBe(201)
+        expect(res.status, name).toBe(409)
+        expect(res.body.error, name).toBe("payee_name_similar")
       }
+      const holder = await as(request(app).post("/disbursements")).send(other("王五"))
+      expect(holder.status).toBe(201)
       const res = await as(request(app).post("/disbursements")).send(other("測試乙工程行"))
       expect(res.status).toBe(400)
     })

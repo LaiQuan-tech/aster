@@ -154,6 +154,27 @@ describe("複製專案 — 非登錄副委託撞名冊廠商名稱（2026-11-17 
       { vendorName: "測試陳大文 水電行", candidates: 1, kind: "autobound", boundVendorName: "測試陳大文水電行" },
     ])
   })
+  it("收尾輪 F1／F2：名冊名稱核心＋地名／產業詞、或等於名冊 2 字簡稱 → 不自動綁定，只回 similar 警告", async () => {
+    const V_K = "aaaaaaaa-0000-4000-8000-0000000000c2"
+    fake.db.vendors!.push({ id: V_K, tenant_id: TENANT_ID, name: "測聯實業股份有限公司", short_name: "測聯", account_holder: null, deleted_at: null })
+    fake.db.project_subcontracts = [
+      sub({ vendor_id: null, vendor_name: "台中測聯國際有限公司" }),
+      sub({ vendor_id: null, vendor_name: "測聯" }),
+      sub({ vendor_id: null, vendor_name: "測聯社 台中" }),
+    ]
+    const result = await duplicate()
+    expect(result.ok).toBe(true)
+    expect(insertedSubs().map((s) => [s.vendor_id, s.vendor_name])).toEqual([
+      [null, "台中測聯國際有限公司"],
+      [null, "測聯"],
+      [null, "測聯社 台中"],
+    ])
+    expect(result.ok && result.subcontractWarnings).toEqual([
+      { vendorName: "台中測聯國際有限公司", candidates: 1, kind: "similar", similarVendorNames: ["測聯實業股份有限公司"] },
+      { vendorName: "測聯", candidates: 1, kind: "similar", similarVendorNames: ["測聯實業股份有限公司"] },
+      { vendorName: "測聯社 台中", candidates: 1, kind: "similar", similarVendorNames: ["測聯實業股份有限公司"] },
+    ])
+  })
   it("名冊多家同 key → 保留非登錄、回警告，不擋複製", async () => {
     fake.db.vendors!.push(
       { id: V_B1, tenant_id: TENANT_ID, name: "測試重名工程行", deleted_at: null },
