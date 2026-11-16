@@ -1346,6 +1346,30 @@ function vendorBankAllowed(v: VendorLite, field: PayeeBankField): string[] {
   return [normBankAccount(v.bank_account), normBankAccount([v.bank_account, v.account_holder].filter(Boolean).join(" "))]
 }
 
+/** 名冊上這家廠商該欄位的預設快照值（沒送時照名冊帶的值）。 */
+function vendorBankDefault(v: VendorLite, field: PayeeBankField): string | null {
+  if (field === "payeeBankCode") return v.bank_code ?? null
+  if (field === "payeeBankName") return vendorBankName(v)
+  return [v.bank_account, v.account_holder].filter(Boolean).join(" ") || null
+}
+
+/**
+ * 2026-11-16 第三輪（B1）：登錄廠商收款時，銀行欄位送 null／空字串而名冊有值 → 視同沒送、照名冊帶。
+ * 表單在名冊尚未載入、或舊入口沒帶代碼時會送 null；不能當作「想清掉」而擋（也不會真的清掉——快照照名冊）。
+ */
+export function dropBlankBankFieldsForVendor<T extends Partial<Record<PayeeBankField, string | null | undefined>>>(
+  vendor: VendorLite,
+  input: T,
+): T {
+  const out = { ...input }
+  for (const field of PAYEE_BANK_FIELDS) {
+    const sent = out[field]
+    if (sent === undefined) continue
+    if (normBankText(sent) === "" && normBankText(vendorBankDefault(vendor, field)) !== "") delete out[field]
+  }
+  return out
+}
+
 /**
  * 付錯人防線（2026-11-16 第二輪）：收款方是登錄廠商時，有送的收款銀行欄位必須等於名冊上該廠商的值
  * （trim；帳號去掉空白與連字號後比對；空值＝名冊也空）。帳戶變更要先改廠商名冊（需財務權限）。
@@ -1444,7 +1468,10 @@ async function resolveHeader(
   const payeeName = (input.payeeName ?? "").trim() || vendor?.name || ""
   if (!payeeName) throw new DisbursementError(400, "payee_name_required")
   if (vendor && opts.checkPayeeName !== false) assertPayeeNameMatchesVendor(payeeName, vendor)
-  if (vendor) assertPayeeBankMatchesVendor(vendor, input, opts.checkBankFields ?? PAYEE_BANK_FIELDS)
+  if (vendor) {
+    input = dropBlankBankFieldsForVendor(vendor, input)
+    assertPayeeBankMatchesVendor(vendor, input, opts.checkBankFields ?? PAYEE_BANK_FIELDS)
+  }
 
   const companyIds = uniq([input.payingCompanyId, input.receiptIssuerCompanyId])
   const companies = await loadCompanies(tenantId, companyIds)
@@ -1470,14 +1497,10 @@ async function resolveHeader(
     payee_kind: input.payeeKind,
     vendor_id: vendor?.id ?? null,
     payee_name: payeeName,
-    payee_bank_name: input.payeeBankName !== undefined ? (input.payeeBankName ?? null) : vendor ? vendorBankName(vendor) : null,
+    payee_bank_name: input.payeeBankName !== undefined ? (input.payeeBankName ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankName") : null,
     payee_bank_account:
-      input.payeeBankAccount !== undefined
-        ? (input.payeeBankAccount ?? null)
-        : vendor
-          ? [vendor.bank_account, vendor.account_holder].filter(Boolean).join(" ") || null
-          : null,
-    payee_bank_code: input.payeeBankCode !== undefined ? (input.payeeBankCode ?? null) : vendor ? (vendor.bank_code ?? null) : null,
+      input.payeeBankAccount !== undefined ? (input.payeeBankAccount ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankAccount") : null,
+    payee_bank_code: input.payeeBankCode !== undefined ? (input.payeeBankCode ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankCode") : null,
     paying_company_id: paying.id,
     paying_company_name: paying.name,
     paying_bank_account: companyBankAccount(paying),

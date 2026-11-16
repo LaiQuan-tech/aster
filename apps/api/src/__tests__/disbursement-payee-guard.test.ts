@@ -246,10 +246,19 @@ describe("C. 登錄廠商的收款銀行欄位必須等於名冊", () => {
     }
   })
 
-  it("帶 null 想清掉名冊帳號 → 也擋", async () => {
-    const res = await as(request(app).post("/disbursements")).send(body({ payeeBankAccount: null }))
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe("payee_bank_mismatch")
+  it("帶 null／空字串（名冊有值）→ 視同沒送，201 且快照照名冊帶（不會被清掉）", async () => {
+    const res = await as(request(app).post("/disbursements")).send(body({ payeeBankAccount: null, payeeBankCode: "", payeeBankName: null }))
+    expect(res.status).toBe(201)
+    const inserted = writesTo("disbursements").find((w) => w.action === "insert")!.payload as Row
+    expect(inserted).toMatchObject({ payee_bank_code: "999", payee_bank_name: "測試銀行（999）", payee_bank_account: "0000111 測試甲工程行王小明" })
+  })
+
+  it("PATCH 草稿送 null 銀行欄位（名冊有值）→ 200，快照改照名冊帶", async () => {
+    fake.db.disbursements = [draftRow({ payee_bank_account: "0000111", payee_bank_code: "999", payee_bank_name: "測試銀行" })]
+    fake.db.disbursement_allocations = [allocRow(SUB_A, PAY_A)]
+    const res = await as(request(app).patch(`/disbursements/${DISB}`)).send({ payeeBankCode: null, payeeBankAccount: null })
+    expect(res.status).toBe(200)
+    expect(fake.db.disbursements![0]).toMatchObject({ payee_bank_code: "999", payee_bank_account: "0000111 測試甲工程行王小明" })
   })
 
   it("與名冊相同（帳號含空白與連字號、銀行名前後空白）→ 201；沒送 → 201 且照名冊帶", async () => {
@@ -352,5 +361,54 @@ describe("MCP：放款單帶銀行欄位＝最高風險（後台本人確認）"
       expect(tier("POST", "/disbursements", b), JSON.stringify(b)).toBe("high")
       expect(tier("PATCH", `/disbursements/${DISB}`, b), JSON.stringify(b)).toBe("high")
     }
+  })
+})
+
+describe("B1／B2：從應付分組開單（前端完整 payload）", () => {
+  // 等同 apps/web/src/app/admin/disbursements/page.tsx openCreateFromGroup → DisbursementForm.buildBody 送出的內容。
+  const uiPayload = (over: Row = {}): Row => ({
+    payeeKind: "vendor",
+    vendorId: VENDOR_A,
+    payeeName: "測試甲工程行",
+    payeeBankName: "測試銀行",
+    payeeBankAccount: "0000111",
+    payeeBankCode: "999",
+    payingCompanyId: COMPANY,
+    method: "transfer",
+    paidOn: null,
+    amount: 1000,
+    withheldAmount: 0,
+    receiptIssuerCompanyId: null,
+    receiptRef: null,
+    hasInvoice: false,
+    invoiceNo: null,
+    purpose: null,
+    note: null,
+    status: "draft",
+    allocations: [{ projectId: PROJECT, subcontractId: SUB_A, subcontractPaymentId: PAY_A, amount: 1000, withheldAmount: 0 }],
+    ...over,
+  })
+
+  it("名冊有代碼、前端帶齊銀行名／代碼／帳號 → 201", async () => {
+    const res = await as(request(app).post("/disbursements")).send(uiPayload())
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+  })
+
+  it("舊前端漏帶代碼（payeeBankCode: null）→ 201，代碼照名冊帶", async () => {
+    const res = await as(request(app).post("/disbursements")).send(uiPayload({ payeeBankCode: null }))
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    const inserted = writesTo("disbursements").find((w) => w.action === "insert")!.payload as Row
+    expect(inserted.payee_bank_code).toBe("999")
+  })
+
+  it("名冊尚未載入（銀行三欄皆 null）→ 201，照名冊帶", async () => {
+    const res = await as(request(app).post("/disbursements")).send(uiPayload({ payeeBankCode: null, payeeBankName: null, payeeBankAccount: null }))
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+  })
+
+  it("廠商在名冊改名後（副委託快照仍是舊名），戶名帶名冊現名 → 201", async () => {
+    fake.db.vendors = fake.db.vendors!.map((v) => (v.id === VENDOR_A ? { ...v, name: "測試甲工程行（新名）" } : v))
+    const res = await as(request(app).post("/disbursements")).send(uiPayload({ payeeName: "測試甲工程行（新名）" }))
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
   })
 })

@@ -190,9 +190,12 @@ function BillingDisbursementsPage() {
       // invalid_vendor），改預設「其他」，逼使用者在表單裡自己選一個真廠商或確認用其他收款方。
       payeeKind: group.vendorId ? "vendor" : "other",
       vendorId: group.vendorId,
-      payeeName: group.vendorName,
+      // 戶名以名冊現名為準（副委託上的名稱是快照，廠商在名冊改名後會是舊名，後端 payee_name_mismatch 會擋）。
+      payeeName: vendor?.name ?? group.vendorName,
       payeeBankName: vendor?.bankName ?? null,
       payeeBankAccount: vendor?.bankAccount ?? null,
+      // 銀行代碼一併帶（漏帶會送 null，舊版後端當成與名冊不符 400 payee_bank_mismatch）。
+      payeeBankCode: vendor?.bankCode ?? null,
       payingCompanyId: defaultCompanyId || null,
       amount: chosen.reduce((s, r) => s + r.netAmount, 0),
       withheldAmount: chosen.reduce((s, r) => s + r.withheldAmount, 0),
