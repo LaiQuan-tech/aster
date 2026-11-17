@@ -129,6 +129,8 @@ export interface Disbursement {
   nonInstallmentConfirmed?: boolean
   /** 第八輪：「其他」收款名稱與名冊廠商相近（單筆 GET 與待簽清單帶；核准頁醒目標示）。 */
   payeeSimilarWarning?: PayeeSimilarWarning
+  /** 只在詳情、「其他」收款且已核准時有值；false＝最後簽核人非老闆／平台管理員（舊核准由 HR 代簽）。 */
+  otherPayeeApprovedByBoss?: boolean
 }
 
 /**
@@ -185,6 +187,8 @@ export interface PendingDisbursementApproval extends Disbursement {
   submittedByName: string | null
   /** 是否輪到「我」簽（scope=all 時才可能 false）。 */
   mine: boolean
+  /** 「其他」收款卡在老闆關且沒有可簽的老闆／平台管理員（HR 不能代簽）時的提示。 */
+  otherPayeeNoBossHint?: string
 }
 
 /** POST /disbursements、PATCH /disbursements/:id 的 body。 */
@@ -633,6 +637,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   payee_is_registered_vendor: "收款對象與名冊廠商名稱相同，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
   payee_name_similar: "收款名稱與名冊廠商相近；若是同一家請改選登錄廠商，若確為不同公司請填寫說明。",
   other_payee_requires_boss_approval: "「其他」收款（手動帳戶）的放款單須經老闆或平台管理員核准，不能直接付款或直接建成已匯款。",
+  other_payee_approval_not_by_boss: "這張「其他」收款單的核准不是由老闆或平台管理員簽的（舊核准由 HR 代簽），不能付款；請作廢後重開送簽。",
   other_payee_no_boss_approver: "「其他」收款需由老闆或平台管理員（建單人以外）核准，目前沒有可核准的人；請改由他人建單送簽，或聯絡平台管理員。",
   use_split_account_fields: "「其他」收款的帳戶請分開填寫「帳號」與「帳戶戶名」兩欄（不再接受帳號與戶名寫在同一格）。",
   split_account_required: "這張單的舊收款帳號格式無法自動拆開，請同時填寫「帳號」與「帳戶戶名」兩欄後再儲存。",

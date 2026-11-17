@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
-import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { columnsExist, isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { isHrRole } from "../middleware/scope.js"
 import { loadChainCandidates, pickDisbursementChain, type ChainSource, type ChainStep } from "./approval-chain.js"
 import {
@@ -30,6 +30,7 @@ import {
   isBossOrPlatformAdmin,
   isConfiguredBoss,
   isPlatformAdminRole,
+  loadActiveHrAdminEmpIds,
   loadConfiguredBossEmpId,
 } from "../lib/boss.js"
 import { enqueue } from "./notify.js"
@@ -108,6 +109,14 @@ const PROBE_TTL_MS = 60_000
 let probe: { ok: boolean; at: number } | null = null
 
 /** `disbursement_approval_steps` 表與 `disbursements` 的簽核欄位都在才算就緒。 */
+/** 「其他」收款單卡在老闆關、沒有可簽的老闆／平台管理員時的提示（HR 不能代簽）。 */
+export const OTHER_PAYEE_NO_BOSS_HINT = "「其他」收款須由老闆或平台管理員核准，目前沒有可簽的人（HR 不能代簽）；請撤回簽核，或請平台管理員新增／設定老闆後再簽。"
+
+/** disbursement_approval_steps.approved_as_boss（migration 0114）是否已套用。 */
+export function stepsHaveApprovedAsBoss(): Promise<boolean> {
+  return columnsExist("disbursement_approval_steps", "approved_as_boss")
+}
+
 export async function disbursementApprovalReady(): Promise<boolean> {
   if (probe && (probe.ok || Date.now() - probe.at < PROBE_TTL_MS)) return probe.ok
   const { error } = await supabaseAdmin.from("disbursement_approval_steps").select("id").limit(1)
@@ -297,11 +306,13 @@ async function stepRecipients(
   owners: Array<string | null>,
   earlier: string[] = [],
   ctx?: BossGateCtx,
+  payeeKind?: string | null,
 ): Promise<string[]> {
   try {
     const gate = bossGateStep(step, ctx ?? { requiresBoss: true, bossEmpId: await loadConfiguredBossEmpId(tenantId) })
     if (!isBossStep(gate)) return stepCandidates(step)
-    return await bossStepNotifyRecipients(tenantId, { candidateEmpIds: stepCandidates(step), requesters: owners, earlier })
+    // 2026-11-17：「其他」收款單的老闆關不准 HR 代簽 → 不寄 L3 代簽通知給 HR。
+    return await bossStepNotifyRecipients(tenantId, { candidateEmpIds: stepCandidates(step), requesters: owners, earlier, allowHrFallback: payeeKind !== "other" })
   } catch {
     return stepCandidates(step)
   }
@@ -476,6 +487,9 @@ export async function submitDisbursement(
           step_kind: chain.steps[0].kind,
         },
         [chainOwner, ...excludeEmpIds],
+        [],
+        undefined,
+        current.payee_kind,
       ),
       type: "approval",
       title: `待簽核：放款單 ${current.disbursement_no}`,
@@ -630,6 +644,8 @@ export async function decideDisbursement(params: {
     acted_at: actedAt,
     acted_by_emp_id: actor.empId,
     ...(takeOver ? { approver_emp_id: actor.empId } : {}),
+    // 2026-11-17（migration 0114）：核准當下是否為在職的設定老闆／platform_admin；「其他」收款付款前看這個標記。
+    ...(action === "approve" && (await stepsHaveApprovedAsBoss()) ? { approved_as_boss: isBossOrPlatformAdmin(bossEmpId, stepActor) } : {}),
   }
   // 並發防護（2026-10-27 驗收）：只更新仍是 decision='pending' 的關卡、以 .select() 確認更新列數。
   // 兩人同時按（核准＋核准、駁回＋核准）只有先寫進去的那位成立，另一位 409 not_pending，不做任何後續動作。
@@ -705,7 +721,7 @@ export async function decideDisbursement(params: {
     try {
       notified = await enqueue({
         tenantId,
-        employeeIds: await stepRecipients(tenantId, next, requestersOf(current), [...earlier, actor.empId.toLowerCase()], disbursementGateCtx(bossEmpId, rows, next)),
+        employeeIds: await stepRecipients(tenantId, next, requestersOf(current), [...earlier, actor.empId.toLowerCase()], disbursementGateCtx(bossEmpId, rows, next), current.payee_kind),
         type: "approval",
         title: `待簽核：放款單 ${current.disbursement_no}`,
         body: noticeBody(current, next.step_order, totalSteps, next.step_kind),
@@ -721,6 +737,31 @@ export async function decideDisbursement(params: {
       })
     } catch (err) {
       logger.warn({ err, disbursementId: id }, "decideDisbursement: advance notification failed")
+    }
+    // 2026-11-17：「其他」收款單進到老闆關但沒有可簽的老闆／平台管理員（HR 不能代簽）→ 通知申請人與 HR 撤回或新增平台管理員。
+    if (current.payee_kind === "other") {
+      try {
+        const gate = bossGateStep(next, disbursementGateCtx(bossEmpId, rows, next))
+        if (isBossStep(gate) && !(await bossStepHasEligibleSigner(tenantId, { exclude: requestersOf(current), stepCandidateEmpIds: stepCandidates(next) }))) {
+          const seen = new Set<string>()
+          const ids = [...requestersOf(current), ...(await loadActiveHrAdminEmpIds(tenantId))].filter((x) => {
+            const k = x.toLowerCase()
+            if (seen.has(k)) return false
+            seen.add(k)
+            return true
+          })
+          await enqueue({
+            tenantId,
+            employeeIds: ids,
+            type: "approval",
+            title: `放款單 ${current.disbursement_no} 卡在老闆關`,
+            body: OTHER_PAYEE_NO_BOSS_HINT,
+            payload: basePayload(current, { event: "other_payee_no_boss", currentStep: next.step_order, totalSteps, round }),
+          })
+        }
+      } catch (err) {
+        logger.warn({ err, disbursementId: id }, "decideDisbursement: other payee no-boss notice failed")
+      }
     }
     await writeAuditLog({
       tenantId,
@@ -934,6 +975,8 @@ export type PendingDisbursementApproval = SerializedDisbursement & {
   submittedByName: string | null
   /** 是否輪到「我」簽（HR 全租戶模式才可能 false）。 */
   mine: boolean
+  /** 2026-11-17：「其他」收款卡在老闆關且無可簽的老闆／平台管理員（HR 不能代簽）時的提示。 */
+  otherPayeeNoBossHint?: string
 }
 
 /**
@@ -970,7 +1013,7 @@ export async function listPendingDisbursementApprovals(
   }
 
   const wantAll = opts.scope === "all"
-  const picked: Array<{ row: DisbursementRow; step: DisbursementStepRow; total: number; mine: boolean }> = []
+  const picked: Array<{ row: DisbursementRow; step: DisbursementStepRow; total: number; mine: boolean; stuck?: boolean }> = []
   // L3：HR 看老闆關時，若這張單找不到可簽的老闆／平台管理員，HR 也算「輪到我」（同 decideDisbursement 的判斷）。
   const actorIsHr = isHrRole(actor.role ?? undefined) && actor.active !== false
   let checker: Awaited<ReturnType<typeof bossSignerChecker>> | null = null
@@ -992,10 +1035,18 @@ export async function listPendingDisbursementApprovals(
       const state = await bossSignerState(tenantId, { requesters, earlier: earlierSigners(rowSteps, step), stepCandidateEmpIds: stepCandidates(step) }, checker)
       const actorBossish =
         isPlatformAdminRole(actor.role) || isConfiguredBoss(bossEmpId, actor.empId) || (isBossStep(rawStep) && isStepCandidate(rawStep, actor.empId))
-      mine = canAct ? actorBossish && !state.fresh && state.any : !state.any
+      // 2026-11-17：「其他」收款單的老闆關不准 HR 代簽（L3）→ 不列為 HR「輪到我」。
+      mine = canAct ? actorBossish && !state.fresh && state.any : !state.any && row.payee_kind !== "other"
+    }
+    // 2026-11-17：「其他」收款單卡在老闆關、又沒有可簽的老闆／平台管理員 → HR 不能代簽，提示撤回或新增平台管理員。
+    let stuck = false
+    if (row.payee_kind === "other" && step.step_kind === BOSS_STEP_KIND && actorIsHr && wantAll) {
+      checker ??= await bossSignerChecker(tenantId)
+      const state = await bossSignerState(tenantId, { requesters, earlier: earlierSigners(rowSteps, step), stepCandidateEmpIds: stepCandidates(step) }, checker)
+      stuck = !state.any
     }
     if (!mine && !wantAll) continue
-    picked.push({ row, step, total: rowSteps.filter((s) => s.round === step.round).length, mine })
+    picked.push({ row, step, total: rowSteps.filter((s) => s.round === step.round).length, mine, stuck })
   }
   if (picked.length === 0) return []
 
@@ -1033,6 +1084,7 @@ export async function listPendingDisbursementApprovals(
         createdByName: p.row.created_by_emp_id ? (names.get(p.row.created_by_emp_id) ?? null) : null,
         submittedByName: p.row.submitted_by_emp_id ? (names.get(p.row.submitted_by_emp_id) ?? null) : null,
         mine: p.mine,
+        ...(p.stuck ? { otherPayeeNoBossHint: OTHER_PAYEE_NO_BOSS_HINT } : {}),
       }
     })
     .filter((v): v is PendingDisbursementApproval => v !== null)

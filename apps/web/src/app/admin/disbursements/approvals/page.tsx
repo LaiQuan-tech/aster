@@ -204,6 +204,12 @@ export default function DisbursementApprovalsPage() {
                 {d.candidateNames.length > 0 && (
                   <p className="mt-1 text-xs text-gray-400">{stepCandidatesLine(d.candidateNames, d.stepKind)}</p>
                 )}
+                {/* 2026-11-17：「其他」收款卡在老闆關且沒有可簽的老闆／平台管理員（HR 不能代簽）。 */}
+                {d.otherPayeeNoBossHint && (
+                  <p role="alert" className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    {d.otherPayeeNoBossHint}
+                  </p>
+                )}
                 {d.mine ? (
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <input

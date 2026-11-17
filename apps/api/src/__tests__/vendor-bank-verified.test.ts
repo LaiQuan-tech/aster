@@ -9,8 +9,9 @@ vi.mock("../lib/tenant-tz.js", () => ({ getTenantTimezone: async () => "Asia/Tai
 import { disbursementsRouter } from "../routes/disbursements.js"
 import { vendorsRouter } from "../routes/vendors.js"
 import { vendorBankChangesRouter } from "../routes/vendor-bank-changes.js"
-import { payDisbursement } from "../services/disbursements.js"
-import { decideDisbursement, resetDisbursementApprovalProbe, submitDisbursement } from "../services/disbursement-approval.js"
+import { getDisbursement, payDisbursement } from "../services/disbursements.js"
+import { decideDisbursement, listPendingDisbursementApprovals, resetDisbursementApprovalProbe, submitDisbursement } from "../services/disbursement-approval.js"
+import { bossStepNotifyRecipients } from "../lib/boss.js"
 import { payDisbursementsBatch } from "../services/disbursement-batch-pay.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
@@ -704,7 +705,7 @@ describe("2026-11-17 業主決定：「其他」收款一律老闆／平台管�
     expect(res.body.error).toBe("other_payee_requires_boss_approval")
     expect(fake.db.disbursements).toHaveLength(0)
   })
-  it("已核准：最後簽的是平台管理員 → 可付；最後簽的是 HR（例如舊的 L3 代簽）→ 403", async () => {
+  it("已核准：最後簽的是平台管理員 → 可付；最後簽的是 HR（例如舊的 L3 代簽）→ 403 other_payee_approval_not_by_boss", async () => {
     fake.db.disbursements = [otherRow()]
     fake.db.disbursement_allocations = [alloc()]
     fake.db.disbursement_approval_steps = [approvedStep(PA)]
@@ -713,7 +714,53 @@ describe("2026-11-17 業主決定：「其他」收款一律老闆／平台管�
     fake.db.project_subcontract_payments![0]!.paid_on = null
     fake.db.project_subcontract_payments![0]!.disbursement_id = null
     fake.db.disbursement_approval_steps = [approvedStep(HR2)]
-    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17" })).rejects.toMatchObject({ code: "other_payee_requires_boss_approval" })
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17" })).rejects.toMatchObject({ httpStatus: 403, code: "other_payee_approval_not_by_boss" })
+    // 詳情頁停用付款：otherPayeeApprovedByBoss=false
+    expect((await getDisbursement(TENANT_ID, DISB))?.otherPayeeApprovedByBoss).toBe(false)
+    const res = await as("hr-user", request(app).post(`/disbursements/${DISB}/pay`)).send({ paidOn: "2026-11-17" })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("other_payee_approval_not_by_boss")
+  })
+  it("approved_as_boss 標記優先於現在身分：HR 簽但標記 true → 可付；平台管理員簽但標記 false → 403", async () => {
+    fake.db.disbursements = [otherRow()]
+    fake.db.disbursement_allocations = [alloc()]
+    fake.db.disbursement_approval_steps = [{ ...approvedStep(PA), approved_as_boss: false }]
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17" })).rejects.toMatchObject({ code: "other_payee_approval_not_by_boss" })
+    fake.db.disbursement_approval_steps = [{ ...approvedStep(HR2), approved_as_boss: true }]
+    expect((await getDisbursement(TENANT_ID, DISB))?.otherPayeeApprovedByBoss).toBe(true)
+    expect((await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17" }))?.status).toBe("paid")
+  })
+  it("核准時寫入 approved_as_boss：平台管理員核准 → true；之後被降權仍可付款", async () => {
+    const pendingBossStep = (): Row => ({ ...approvedStep(BOSS), decision: "pending", acted_at: null, acted_by_emp_id: null })
+    fake.db.disbursements = [otherRow({ status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT, submitted_by_emp_id: ACCT })]
+    fake.db.disbursement_allocations = [alloc()]
+    fake.db.disbursement_approval_steps = [pendingBossStep()]
+    await decideDisbursement({ action: "approve", tenantId: TENANT_ID, id: DISB, actor: { empId: PA, role: "platform_admin", active: true } })
+    expect(fake.db.disbursement_approval_steps![0]).toMatchObject({ decision: "approved", approved_as_boss: true })
+    fake.db.employees = fake.db.employees!.map((e) => (e.id === PA ? { ...e, role: "hr_admin" } : e))
+    expect((await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17" }))?.status).toBe("paid")
+  })
+  it("L3：沒有可簽的老闆／平台管理員時，其他收款單不列入 HR「輪到我」，全租戶清單附撤回提示；通知不寄 HR 代簽", async () => {
+    const pendingBossStep = (): Row => ({ ...approvedStep(BOSS), decision: "pending", acted_at: null, acted_by_emp_id: null })
+    fake.db.disbursements = [otherRow({ status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT, submitted_by_emp_id: ACCT })]
+    fake.db.disbursement_allocations = [alloc()]
+    fake.db.disbursement_approval_steps = [pendingBossStep()]
+    fake.db.employees = fake.db.employees!.map((e) => (e.id === BOSS || e.id === PA ? { ...e, status: "terminated" } : e))
+    const hr = { empId: HR2, role: "hr_admin", active: true }
+    expect(await listPendingDisbursementApprovals(TENANT_ID, hr)).toHaveLength(0)
+    const all = await listPendingDisbursementApprovals(TENANT_ID, hr, { scope: "all" })
+    expect(all).toHaveLength(1)
+    expect(all[0]).toMatchObject({ mine: false })
+    expect(all[0]!.otherPayeeNoBossHint).toContain("撤回")
+    const recipients = await bossStepNotifyRecipients(TENANT_ID, { candidateEmpIds: [BOSS], requesters: [ACCT], allowHrFallback: false })
+    expect(recipients).not.toContain(HR2)
+    expect(await bossStepNotifyRecipients(TENANT_ID, { candidateEmpIds: [BOSS], requesters: [ACCT] })).toContain(HR2)
+    // 名冊廠商單仍照舊 L3：HR 輪到我
+    fake.db.project_subcontracts![0]!.vendor_id = VENDOR_A
+    fake.db.disbursements = [header(VENDOR_A, { status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT, submitted_by_emp_id: ACCT })]
+    const vendorList = await listPendingDisbursementApprovals(TENANT_ID, hr)
+    expect(vendorList).toHaveLength(1)
+    expect(vendorList[0]!.otherPayeeNoBossHint).toBeUndefined()
   })
   it("老闆關：HR 不能代簽其他收款單（沒有老闆／平台管理員可簽時也不行）；平台管理員可", async () => {
     const pendingBossStep = (): Row => ({ ...approvedStep(BOSS), decision: "pending", acted_at: null, acted_by_emp_id: null })

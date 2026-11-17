@@ -365,7 +365,23 @@ export default function DisbursementDetailPage() {
                 {saving ? "處理中…" : "送簽"}
               </PrimaryButton>
             )}
-            {d.status === "approved" && <PrimaryButton onClick={() => setPayOpen((v) => !v)}>標記已匯款</PrimaryButton>}
+            {d.status === "approved" && !(d.payeeKind === "other" && d.otherPayeeApprovedByBoss === false) && (
+              <PrimaryButton onClick={() => setPayOpen((v) => !v)}>標記已匯款</PrimaryButton>
+            )}
+            {/* 2026-11-17：已核准的「其他」收款單，最後簽核人不是老闆／平台管理員（舊核准由 HR 代簽）→ 停用付款。 */}
+            {d.status === "approved" && d.payeeKind === "other" && d.otherPayeeApprovedByBoss === false && (
+              <>
+                <button
+                  type="button"
+                  disabled
+                  className="cursor-not-allowed rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-400"
+                  title="舊核准由 HR 代簽，請作廢後重開送簽"
+                >
+                  標記已匯款
+                </button>
+                <span className="self-center text-xs text-amber-700">舊核准由 HR 代簽，請作廢後重開送簽（「其他」收款須由老闆或平台管理員核准）</span>
+              </>
+            )}
             {d.payeeKind === "other" && (d.status === "draft" || d.status === "pending_approval") && (
               <span className="self-center text-xs text-amber-700">「其他」收款：簽核鏈最後一關為老闆或平台管理員（建單人以外），核准後才能付款</span>
             )}

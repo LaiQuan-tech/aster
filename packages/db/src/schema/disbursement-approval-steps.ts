@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, integer, timestamp, boolean, uniqueIndex, index } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { employees } from "./employees"
 import { disbursements } from "./disbursements"
@@ -42,6 +42,8 @@ export const disbursementApprovalSteps = pgTable(
     comment: text("comment"),
     actedAt: timestamp("acted_at", { withTimezone: true }),
     actedByEmpId: uuid("acted_by_emp_id").references(() => employees.id),
+    /** 2026-11-17（0114）：核准當下簽核人是否為在職的設定老闆／platform_admin；null＝舊紀錄或駁回。 */
+    approvedAsBoss: boolean("approved_as_boss"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

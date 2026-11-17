@@ -201,7 +201,13 @@ export async function loadActiveHrAdminEmpIds(tenantId: string): Promise<string[
  */
 export async function bossStepNotifyRecipients(
   tenantId: string,
-  params: { candidateEmpIds: ReadonlyArray<string>; requesters: ReadonlyArray<string | null | undefined>; earlier?: ReadonlyArray<string | null | undefined> },
+  params: {
+    candidateEmpIds: ReadonlyArray<string>
+    requesters: ReadonlyArray<string | null | undefined>
+    earlier?: ReadonlyArray<string | null | undefined>
+    /** false＝不寄 L3 代簽的 HR（例：「其他」收款放款單，老闆關不准 HR 代簽，2026-11-17）。預設 true。 */
+    allowHrFallback?: boolean
+  },
 ): Promise<string[]> {
   const skip = new Set(params.requesters.filter((id): id is string => !!id).map((id) => id.toLowerCase()))
   const out: string[] = []
@@ -218,7 +224,7 @@ export async function bossStepNotifyRecipients(
     const boss = await loadConfiguredBossEmpId(tenantId)
     for (const id of await bossNotificationRecipients(tenantId, boss, params.requesters)) push(id)
     const any = await bossStepHasEligibleSigner(tenantId, { exclude: params.requesters, stepCandidateEmpIds: params.candidateEmpIds })
-    if (!any) {
+    if (!any && params.allowHrFallback !== false) {
       const earlier = new Set((params.earlier ?? []).filter((id): id is string => !!id).map((id) => id.toLowerCase()))
       for (const id of await loadActiveHrAdminEmpIds(tenantId)) if (!earlier.has(id)) push(id)
     }

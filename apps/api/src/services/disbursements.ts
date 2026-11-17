@@ -639,6 +639,8 @@ export type SerializedDisbursement = {
   nonInstallmentConfirmed?: boolean
   /** 第八輪：「其他」收款名稱與名冊廠商相近的標示（由稽核查出）；單筆 GET、待簽清單與列表（未付的單，第九輪 C）帶。 */
   payeeSimilarWarning?: PayeeSimilarWarning
+  /** 2026-11-17：只在詳情、「其他」收款且已核准時有值；false＝最後簽核人非老闆／平台管理員，不能付款。 */
+  otherPayeeApprovedByBoss?: boolean
   /** 簽核軌跡（只有 GET /disbursements/:id 帶；services/disbursement-approval.ts 填）。 */
   approvalSteps?: SerializedApprovalStep[]
 }
@@ -1042,6 +1044,14 @@ export async function getDisbursement(tenantId: string, id: string): Promise<Ser
   if (row.payee_kind === "other") {
     const warning = (await payeeSimilarWarnings(tenantId, [row])).get(id)
     if (warning) out.payeeSimilarWarning = warning
+    // 2026-11-17：已核准的「其他」收款單若最後簽核人非老闆／平台管理員（舊核准由 HR 代簽）→ 詳情頁停用付款。
+    if (row.status === "approved") {
+      try {
+        out.otherPayeeApprovedByBoss = await otherPayeeApprovedByBoss(tenantId, row)
+      } catch (err) {
+        console.error("[disbursements] otherPayeeApprovedByBoss failed", err)
+      }
+    }
   }
   return out
 }
@@ -2570,31 +2580,41 @@ export async function assertPaymentsAccepted(
  * 「其他」收款單付款前確認：本輪最後核准的關卡是由在職的設定老闆或 platform_admin 簽的（業主決定 2026-11-17）。
  * 本輪沒有簽核紀錄（不經簽核的舊資料）或最後簽的人不是老闆／平台管理員 → 403 other_payee_requires_boss_approval。
  */
-async function assertOtherPayeeApprovedByBoss(tenantId: string, current: DisbursementRow): Promise<void> {
+/**
+ * 「其他」收款已核准單：本輪最後核准的那一關是否由老闆／platform_admin 簽。
+ * 2026-11-17：優先看簽核當下寫入的 `approved_as_boss`（migration 0114）；舊紀錄（null／欄位未套用）
+ * fallback 看簽核人「現在」的身分（角色 platform_admin 或設定的老闆）。
+ */
+export async function otherPayeeApprovedByBoss(tenantId: string, current: Pick<DisbursementRow, "id" | "approval_round">): Promise<boolean> {
+  const flagCol = await columnsExist("disbursement_approval_steps", "approved_as_boss")
   const { data, error } = await supabaseAdmin
     .from("disbursement_approval_steps")
-    .select("round, step_order, decision, approver_emp_id, acted_by_emp_id")
+    .select(`round, step_order, decision, approver_emp_id, acted_by_emp_id${flagCol ? ", approved_as_boss" : ""}`)
     .eq("tenant_id", tenantId)
     .eq("disbursement_id", current.id)
-  if (error) throw new Error(`assertOtherPayeeApprovedByBoss: ${error.message}`)
+  if (error) throw new Error(`otherPayeeApprovedByBoss: ${error.message}`)
   const round = current.approval_round ?? 0
-  const approved = ((data ?? []) as Array<{ round: number; step_order: number; decision: string; approver_emp_id: string | null; acted_by_emp_id: string | null }>)
+  type StepRow = { round: number; step_order: number; decision: string; approver_emp_id: string | null; acted_by_emp_id: string | null; approved_as_boss?: boolean | null }
+  const approved = ((data ?? []) as unknown as StepRow[])
     .filter((r) => r.round === round && r.decision === "approved")
     .sort((a, b) => b.step_order - a.step_order)
-  const signer = approved[0] ? (approved[0].acted_by_emp_id ?? approved[0].approver_emp_id) : null
-  let ok = false
-  if (signer) {
-    const [{ data: emp }, boss] = await Promise.all([
-      supabaseAdmin.from("employees").select("id, role, status").eq("tenant_id", tenantId).eq("id", signer).maybeSingle(),
-      loadConfiguredBossEmpId(tenantId),
-    ])
-    const e = emp as { id: string; role: string | null; status: string | null } | null
-    // 簽的當下是老闆或平台管理員即可（之後離職不追溯）；比對以角色或設定的老闆 id 判斷。
-    ok = !!e && (e.role === "platform_admin" || (!!boss && boss.toLowerCase() === e.id.toLowerCase()))
-  }
-  if (!ok) {
-    throw new DisbursementError(403, "other_payee_requires_boss_approval", {
-      message: "「其他」收款（手動帳戶）的放款單須由老闆或平台管理員核准後才能付款",
+  const last = approved[0]
+  if (!last) return false
+  if (typeof last.approved_as_boss === "boolean") return last.approved_as_boss
+  const signer = last.acted_by_emp_id ?? last.approver_emp_id
+  if (!signer) return false
+  const [{ data: emp }, boss] = await Promise.all([
+    supabaseAdmin.from("employees").select("id, role, status").eq("tenant_id", tenantId).eq("id", signer).maybeSingle(),
+    loadConfiguredBossEmpId(tenantId),
+  ])
+  const e = emp as { id: string; role: string | null; status: string | null } | null
+  return !!e && (e.role === "platform_admin" || (!!boss && boss.toLowerCase() === e.id.toLowerCase()))
+}
+
+async function assertOtherPayeeApprovedByBoss(tenantId: string, current: DisbursementRow): Promise<void> {
+  if (!(await otherPayeeApprovedByBoss(tenantId, current))) {
+    throw new DisbursementError(403, "other_payee_approval_not_by_boss", {
+      message: "這張「其他」收款單的核准不是由老闆或平台管理員簽的（舊核准由 HR 代簽），不能付款；請作廢後重開送簽",
     })
   }
 }
