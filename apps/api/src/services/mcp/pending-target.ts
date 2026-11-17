@@ -84,12 +84,32 @@ export function maskAccount(value: unknown): string {
   return digits.length <= 4 ? "****" : `****${digits.slice(-4)}`
 }
 
+/**
+ * 收款帳號／戶名的描述（驗收第五輪）：只認 API 實際接受的駝峰鍵，優先序同伺服器——送了分欄
+ * （payeeBankAccountNumber／payeeAccountHolder）就不看 payeeBankAccount；帳號只露末 4 碼。登錄廠商單標「以名冊為準」。
+ */
+function accountChanges(b: Record<string, unknown>, isVendor: boolean, verb = ""): string[] {
+  const out: string[] = []
+  const split = b.payeeBankAccountNumber !== undefined || b.payeeAccountHolder !== undefined
+  const account = split ? b.payeeBankAccountNumber : b.payeeBankAccount
+  const note = isVendor ? "（登錄廠商以名冊為準）" : ""
+  if (account !== undefined) {
+    out.push(typeof account === "string" && account.trim() ? `${verb}收款帳號 ${maskAccount(account)}${note}` : `${verb ? "AI 要清空" : "清空"}收款帳號${isVendor ? "（將照名冊帶入）" : ""}`)
+  }
+  if (split && b.payeeAccountHolder !== undefined) {
+    const h = b.payeeAccountHolder
+    out.push(typeof h === "string" && h.trim() ? `${verb}帳戶戶名${aiText(h)}${note}` : `${verb ? "AI 要清空" : "清空"}帳戶戶名`)
+  }
+  return out
+}
+
 /** 銀行代碼／銀行名稱的變更描述（MCP 確認頁，2026-11-16 第四輪）。 */
 function bankCodeNameChanges(b: Record<string, unknown>): string[] {
   const out: string[] = []
-  const code = b.payeeBankCode ?? b.payee_bank_code
+  // 驗收第五輪：只認 API 實際接受的駝峰鍵（zod 會丟掉 snake_case；偽造的 snake 鍵不可影響摘要）。
+  const code = b.payeeBankCode
   if (code !== undefined) out.push(typeof code === "string" && code.trim() ? `AI 要改成的銀行代碼${aiText(code)}` : "AI 要清空銀行代碼（將照名冊帶入）")
-  const bankName = b.payeeBankName ?? b.payee_bank_name
+  const bankName = b.payeeBankName
   if (bankName !== undefined) out.push(typeof bankName === "string" && bankName.trim() ? `AI 要改成的銀行${aiText(bankName)}` : "AI 要清空銀行名稱（將照名冊帶入）")
   return out
 }
@@ -156,11 +176,9 @@ export async function describeTarget(get: UserGet, method: string, path: string,
         return { ok: true, summary: `批次放款／AI 送出的清單 ${ids.length} 張` }
       }
       if (!seg[1]) {
-        const account = b.payeeBankAccountNumber ?? b.payee_bank_account_number ?? b.payeeBankAccount ?? b.payee_bank_account
-        const holder = b.payeeAccountHolder ?? b.payee_account_holder
         return {
           ok: true,
-          summary: `新增放款單／AI 送出的受款人${aiText(b.payeeName ?? b.payee_name)}・金額 ${money(b.amount)}${typeof account === "string" && account ? `・收款帳號 ${maskAccount(account)}` : ""}${typeof holder === "string" && holder.trim() ? `・帳戶戶名${aiText(holder)}` : ""}${bankCodeNameChanges(b).map((c) => `・${c}`).join("")}`,
+          summary: `新增放款單／AI 送出的受款人${aiText(b.payeeName)}・金額 ${money(b.amount)}${accountChanges(b, b.payeeKind === "vendor").map((c) => `・${c}`).join("")}${bankCodeNameChanges(b).map((c) => `・${c}`).join("")}`,
         }
       }
       if (!isUuid(id)) return { ok: true, summary: null }
@@ -170,18 +188,15 @@ export async function describeTarget(get: UserGet, method: string, path: string,
       // PATCH 比照 POST（2026-11-16 A2）：把 AI 這次要改成的受款人／收款廠商／收款帳號（遮罩）一併列出。
       const changes: string[] = []
       if (method.toUpperCase() === "PATCH" && !seg[2]) {
-        const name = b.payeeName ?? b.payee_name
+        const name = b.payeeName
         if (name !== undefined) changes.push(`AI 要改成的受款人${aiText(name)}`)
-        const kind = b.payeeKind ?? b.payee_kind
+        const kind = b.payeeKind
         if (kind !== undefined) changes.push(`AI 要改成的收款方類型${aiText(kind)}`)
-        const vendorId = b.vendorId ?? b.vendor_id
+        const vendorId = b.vendorId
         if (vendorId !== undefined) changes.push(vendorId ? "AI 要更換收款廠商" : "AI 要移除收款廠商")
         changes.push(...bankCodeNameChanges(b))
-        // 驗收第四輪 H2：分欄（帳號只露末 4 碼＋戶名）優先。
-        const account = b.payeeBankAccountNumber ?? b.payee_bank_account_number ?? b.payeeBankAccount ?? b.payee_bank_account
-        if (account !== undefined) changes.push(typeof account === "string" && account.trim() ? `AI 要改成的收款帳號 ${maskAccount(account)}` : "AI 要清空收款帳號（將照名冊帶入）")
-        const holder = b.payeeAccountHolder ?? b.payee_account_holder
-        if (holder !== undefined) changes.push(typeof holder === "string" && holder.trim() ? `AI 要改成的帳戶戶名${aiText(holder)}` : "AI 要清空帳戶戶名")
+        const effectiveKind = kind !== undefined ? kind : (d.payeeKind ?? d.payee_kind)
+        changes.push(...accountChanges(b, effectiveKind === "vendor", "AI 要改成的"))
       }
       return {
         ok: true,

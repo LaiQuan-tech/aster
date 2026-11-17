@@ -313,6 +313,7 @@ export default function DisbursementDetailPage() {
     payeeBankAccount: d.payeeBankAccount,
     payeeBankAccountNumber: d.payeeBankAccountNumber,
     payeeAccountHolder: d.payeeAccountHolder,
+    payeeAccountSplit: d.payeeAccountSplit,
     payeeBankCode: d.payeeBankCode,
     payingCompanyId: d.payingCompanyId,
     method: d.method,

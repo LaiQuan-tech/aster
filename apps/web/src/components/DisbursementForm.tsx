@@ -44,9 +44,10 @@ export interface DisbursementFormInitial {
   payeeName?: string;
   payeeBankName?: string | null;
   payeeBankAccount?: string | null;
-  /** 0106 分欄（有就優先，沒有才解析 payeeBankAccount 舊快照）。 */
+  /** 0106 分欄；payeeAccountSplit＝分欄是否實存（false／缺席 → 解析 payeeBankAccount 舊快照）。 */
   payeeBankAccountNumber?: string | null;
   payeeAccountHolder?: string | null;
+  payeeAccountSplit?: boolean;
   payeeBankCode?: string | null;
   payingCompanyId?: string | null;
   method?: DisbursementMethod;
@@ -100,7 +101,7 @@ const normAcct = (v: string | null | undefined) => normBank(v).replace(/[\s\-－
  * 只用來提示，後端 payee_bank_mismatch 為準。
  */
 export function bankSnapshotDiffersFromVendor(
-  snap: { payeeBankName: string; payeeBankAccount: string; payeeBankCode: string },
+  snap: { payeeBankName: string; payeeBankAccount: string; payeeBankCode: string; payeeAccountHolder?: string },
   v: Pick<Vendor, "bankName" | "bankCode" | "bankAccount" | "accountHolder">,
 ): boolean {
   const vName = normBank(v.bankName);
@@ -110,7 +111,9 @@ export function bankSnapshotDiffersFromVendor(
   const nameOk = [vName, snapName].includes(normBank(snap.payeeBankName));
   const codeOk = normBank(snap.payeeBankCode) === vCode;
   const acctOk = [normAcct(v.bankAccount), normAcct(snapAcct)].includes(normAcct(snap.payeeBankAccount));
-  return !(nameOk && codeOk && acctOk);
+  // 驗收第五輪：表單帳號與戶名分欄——戶名有值時要等於名冊戶名（空＝舊單沒有戶名段，不算不同）。
+  const holderOk = !normBank(snap.payeeAccountHolder) || normBank(snap.payeeAccountHolder) === normBank(v.accountHolder);
+  return !(nameOk && codeOk && acctOk && holderOk);
 }
 
 function emptyAllocRow(projectId = ""): AllocRowDraft {
@@ -148,10 +151,10 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
     vendorId: d?.vendorId ?? "",
     payeeName: d?.payeeName ?? "",
     payeeBankName: d?.payeeBankName ?? "",
-    // 手動收款：既有快照「帳號 戶名」拆成兩欄顯示（沒改就原樣回送，不改寫既有快照）。
-    // 驗收第四輪：帳號與戶名分欄（廠商單與其他單都是）；舊單沒有分欄才解析舊快照。
-    payeeBankAccount: d?.payeeBankAccountNumber ?? (d?.payeeAccountHolder != null ? "" : splitAccountSnapshot(d?.payeeBankAccount).account),
-    payeeAccountHolder: d?.payeeAccountHolder ?? (d?.payeeBankAccountNumber != null ? "" : (splitAccountSnapshot(d?.payeeBankAccount).holder ?? "")),
+    // 驗收第五輪：帳號與戶名分欄（廠商單與其他單都是）——依後端 payeeAccountSplit（分欄是否實存）決定：
+    // 實存 → 直接用分欄；否則（舊單、名冊帳號含非數字的廠商單）解析舊快照「帳號 戶名」。
+    payeeBankAccount: d?.payeeAccountSplit ? (d.payeeBankAccountNumber ?? "") : splitAccountSnapshot(d?.payeeBankAccount).account,
+    payeeAccountHolder: d?.payeeAccountSplit ? (d.payeeAccountHolder ?? "") : (splitAccountSnapshot(d?.payeeBankAccount).holder ?? ""),
     payeeBankCode: d?.payeeBankCode ?? "",
     payingCompanyId: d?.payingCompanyId ?? "",
     method: d?.method ?? "transfer",
@@ -454,7 +457,8 @@ export default function DisbursementForm({
                   type="radio"
                   name="payeeKind"
                   checked={state.payeeKind === k}
-                  onChange={() =>
+                  onChange={() => {
+                    if (k === "other") setManualAccountDirty(true); // 驗收第五輪：切到「其他」＝帳戶要重填，存檔一定送兩欄（空＝null）
                     setState((s) => {
                       // 切回「廠商」時戶名重新帶名冊名稱（避免沿用「其他」時手打的名稱）。
                       const v = k === "vendor" ? vendors.find((x) => x.id === s.vendorId) : undefined;
@@ -469,11 +473,11 @@ export default function DisbursementForm({
                             payeeBankCode: v.bankCode ?? "",
                           }
                         : k === "other" && s.payeeKind === "vendor"
-                          // 廠商 → 其他：名冊帶來的帳戶不沿用（兩欄清空，由使用者重填）。
+                          // 廠商 → 其他：名冊帶來的帳戶不沿用（兩欄清空，由使用者重填）；存檔明確送 null（manualAccountDirty）。
                           ? { ...s, payeeKind: k, payeeBankName: "", payeeBankCode: "", payeeBankAccount: "", payeeAccountHolder: "" }
                           : { ...s, payeeKind: k };
-                    })
-                  }
+                    });
+                  }}
                 />
                 {PAYEE_KIND_LABELS[k]}
               </label>

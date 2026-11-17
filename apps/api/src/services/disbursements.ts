@@ -568,6 +568,8 @@ export type SerializedDisbursement = {
   payeeAccountSource?: "roster" | "manual"
   /** 0106：收款帳號（只含數字）。完整帳號——簽核端點遮成 null（routes/disbursements.ts maskPayeeBank）。 */
   payeeBankAccountNumber?: string | null
+  /** 0106 分欄是否實存（帳號或戶名任一有值）；false＝舊單（前端解析 payeeBankAccount）。 */
+  payeeAccountSplit?: boolean
   /** 驗收 M2：真正的帳戶戶名（登錄廠商取名冊 account_holder；手動取快照「帳號 戶名」的戶名段）；查不到 null。 */
   payeeAccountHolder?: string | null
   /** 登錄廠商的名冊收款帳戶是否經第二人確認（0104 bank_verified_at）；未確認時送審／核准／付款 409 vendor_bank_unverified。 */
@@ -707,7 +709,12 @@ export function serializeDisbursement(
     payeeBankAccount: d.payee_bank_account,
     payeeBankCode: d.payee_bank_code,
     payeeBankAccountNumber: d.payee_bank_account_number ?? null,
-    payeeAccountMasked: d.payee_bank_account_number ? `****${d.payee_bank_account_number.slice(-4)}` : maskBankAccount(d.payee_bank_account),
+    // 驗收第五輪：分欄是否實存（帳號或戶名任一有值）——實存就只用分欄（帳號空＝沒有帳號），否則解析舊快照。
+    payeeAccountSplit: d.payee_bank_account_number != null || d.payee_account_holder != null,
+    payeeAccountMasked:
+      d.payee_bank_account_number != null || d.payee_account_holder != null
+        ? d.payee_bank_account_number ? `****${d.payee_bank_account_number.slice(-4)}` : null
+        : maskBankAccount(d.payee_bank_account),
     payeeAccountSource: d.payee_kind === "vendor" && d.vendor_id ? "roster" : "manual",
     payeeAccountHolder: d.payee_bank_account_number || d.payee_account_holder ? (d.payee_account_holder ?? null) : holderSegment(d.payee_bank_account),
     payingCompanyId: d.paying_company_id,
@@ -909,7 +916,7 @@ async function attachVendorBankStatus(tenantId: string, items: SerializedDisburs
       if (verified.has(key)) d.vendorBankVerified = verified.get(key)
       const holder = holders.get(key)
       // 有分欄的單：戶名與末 4 碼直接用分欄（不再解析快照）。
-      if (holder && !d.payeeBankAccountNumber) {
+      if (holder && !d.payeeAccountSplit) {
         d.payeeAccountHolder = holder
         // 快照是「帳號 戶名」：知道戶名後重新遮，避免戶名開頭數字混進末 4 碼。
         if (d.payeeBankAccount) d.payeeAccountMasked = maskBankAccount(d.payeeBankAccount, holder)
@@ -2131,8 +2138,13 @@ function rosterAccountNumber(v: VendorLite): string | null {
   return /^\d{1,40}$/.test(n) ? n : null
 }
 function rosterAccountHolder(v: VendorLite): string | null {
-  const h = String(v.account_holder ?? "").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "").trim()
-  return h ? h.slice(0, 120) : null
+  return cleanHolder(v.account_holder)
+}
+
+/** 戶名寫入分欄前的清理（驗收第五輪：去控制字元、依字元（code point）截 120）；空回 null，不丟錯。 */
+function cleanHolder(raw: string | null | undefined): string | null {
+  const h = String(raw ?? "").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "").trim()
+  return h ? Array.from(h).slice(0, 120).join("") : null
 }
 
 /**
@@ -2153,14 +2165,17 @@ function resolvePayeeAccount(
     if (!stored) return { number: null, holder: null }
     const p = splitAccountSnapshot(stored, vendor?.account_holder ?? null)
     const n = normalizeAccountNumber(p.account)
-    return { number: /^\d{1,40}$/.test(n) ? n : null, holder: p.holder }
+    // 舊快照拆出的值寫入分欄前清理（帳號非純數字 → null；戶名去控制字元、按字元截 120），不丟錯。
+    return { number: /^\d{1,40}$/.test(n) ? n : null, holder: cleanHolder(p.holder) }
   }
   const sameAsStored = (sent: string | null | undefined) => stored !== null && sent !== undefined && (sent ?? "").trim() === stored.trim()
   if (vendor) {
     const sent = input.payeeBankAccount
     if (sent === undefined) {
       const number = rosterAccountNumber(vendor)
-      const holder = rosterAccountHolder(vendor)
+      // 驗收第五輪：名冊有帳號但含非數字（寫不進分欄）→ 兩欄都不寫，前端改解析舊快照（避免帳號空白、戶名有值的半套分欄）。
+      const rosterHasAccount = String(vendor.bank_account ?? "").trim() !== ""
+      const holder = rosterHasAccount && number === null ? null : rosterAccountHolder(vendor)
       return { number, holder, snapshot: vendorBankDefault(vendor, "payeeBankAccount") }
     }
     if (sameAsStored(sent)) return { ...storedParts(), snapshot: stored }
@@ -3169,6 +3184,20 @@ export async function updateDisbursement(
       ...headerToInput(current),
       ...stripUndefined(patch),
     }
+    // 驗收第五輪：登錄廠商 → 其他，且沒送帳戶欄 → 帳戶（分欄、舊快照、銀行名／代碼）一律清空，不沿用原廠商的名冊帳戶。
+    let kindSwitchedToOther = false
+    if (patch.payeeKind === "other" && current.payee_kind === "vendor") {
+      const sentAccount =
+        patch.payeeBankAccount !== undefined || patch.payeeBankAccountNumber !== undefined || patch.payeeAccountHolder !== undefined
+      if (!sentAccount) {
+        merged.payeeBankAccountNumber = null
+        merged.payeeAccountHolder = null
+        merged.payeeBankAccount = null
+      }
+      if (patch.payeeBankName === undefined) merged.payeeBankName = null
+      if (patch.payeeBankCode === undefined) merged.payeeBankCode = null
+      kindSwitchedToOther = true
+    }
     // 換了廠商而沒另外給名稱／帳戶 → 快照重新從新廠商複製，不然會留著舊廠商的名字。
     if (patch.vendorId !== undefined && patch.vendorId !== current.vendor_id) {
       if (patch.payeeName === undefined) merged.payeeName = null
@@ -3201,8 +3230,9 @@ export async function updateDisbursement(
       {
         checkPayeeName: payeeChanged || payeeNameChanged,
         checkBankFields: bankFieldsToCheck,
-        storedBank,
-        storedSplit: { number: current.payee_bank_account_number ?? null, holder: current.payee_account_holder ?? null },
+        // 改成「其他」時不沿用原廠商的分欄／快照（只送一欄時另一欄也不從原廠商帶）。
+        storedBank: kindSwitchedToOther ? { ...storedBank, payeeBankAccount: null } : storedBank,
+        storedSplit: kindSwitchedToOther ? { number: null, holder: null } : { number: current.payee_bank_account_number ?? null, holder: current.payee_account_holder ?? null },
         bankTouched: payeeChanged || bankFieldsToCheck.length > 0,
       },
     )

@@ -750,6 +750,13 @@
       "when": 1795600000000,
       "tag": "0106_disbursement_payee_account_split",
       "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1795700000000,
+      "tag": "0107_revoke_finance_table_writes",
+      "breakpoints": true
     }
   ]
 }

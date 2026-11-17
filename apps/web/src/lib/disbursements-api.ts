@@ -72,6 +72,8 @@ export interface Disbursement {
   payeeBankCode: string | null
   /** 0106：收款帳號（只含數字）分欄；簽核端點為 null。舊單／舊 API 沒有。 */
   payeeBankAccountNumber?: string | null
+  /** 分欄是否實存（false＝舊單或名冊帳號含非數字，前端改解析 payeeBankAccount 快照）。 */
+  payeeAccountSplit?: boolean
   /** 2026-11-17：帳號末 4 碼（****1234，後端遮好）。簽核端點的 payeeBankAccount 一律 null，只有這個。舊 API 沒帶。 */
   payeeAccountMasked?: string | null
   /** 帳戶來源：roster＝照名冊／manual＝手動輸入（非登錄廠商）。 */

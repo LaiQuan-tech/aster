@@ -1124,3 +1124,23 @@ describe("第五輪（2026-11-17）", () => {
     })
   })
 })
+
+describe("驗收第五輪：MCP 確認頁摘要只認 API 接受的駝峰鍵、優先序同伺服器", () => {
+  const get = async () => ({ status: 200, json: { disbursement: { disbursementNo: "D-115-001", amount: 1, payeeName: "測試甲工程行", status: "draft", payeeKind: "other" } } })
+  it("snake_case 偽造鍵不影響摘要；有分欄時不顯示 payeeBankAccount", async () => {
+    const forged = await describeTarget(get as never, "POST", "/disbursements", { payeeName: "x", amount: 1, payee_bank_account_number: "99998888", payee_account_holder: "偽造", payee_bank_code: "999" })
+    const s1 = (forged as { summary: string }).summary
+    expect(s1).not.toContain("8888")
+    expect(s1).not.toContain("偽造")
+    expect(s1).not.toContain("999")
+    const both = await describeTarget(get as never, "PATCH", `/disbursements/${DISB}`, { payeeBankAccount: "11112222 別人", payeeBankAccountNumber: "33334444", payeeAccountHolder: "測試某人" })
+    const s2 = (both as { summary: string }).summary
+    expect(s2).toContain("****4444")
+    expect(s2).toContain("帳戶戶名「測試某人」")
+    expect(s2).not.toContain("2222")
+  })
+  it("登錄廠商單標「以名冊為準」", async () => {
+    const r = await describeTarget(get as never, "POST", "/disbursements", { payeeKind: "vendor", payeeName: "x", amount: 1, payeeBankAccount: "0000111" })
+    expect((r as { summary: string }).summary).toContain("以名冊為準")
+  })
+})

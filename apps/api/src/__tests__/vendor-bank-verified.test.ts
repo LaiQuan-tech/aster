@@ -427,3 +427,47 @@ describe("驗收第四輪：收款帳號與戶名分欄儲存", () => {
     expect(JSON.stringify(res.body)).not.toContain("0000111")
   })
 })
+
+describe("驗收第五輪", () => {
+  const otherDraft = (over: Row = {}) => header("", { payee_kind: "other", vendor_id: null, payee_name: "測試某人", status: "draft", approved_at: null, ...over })
+  it("payeeAccountSplit：分欄實存才為 true；舊單 false（前端解析舊快照）", async () => {
+    fake.db.disbursements = [otherDraft({ payee_bank_account: "0123 4567 8901 王小明", payee_bank_account_number: null, payee_account_holder: null })]
+    const legacy = await as("hr-user", request(app).get(`/disbursements/${DISB}`))
+    expect(legacy.body.disbursement ?? legacy.body).toMatchObject({ payeeAccountSplit: false, payeeAccountMasked: "****8901", payeeAccountHolder: "王小明" })
+    fake.db.disbursements = [otherDraft({ payee_bank_account: "王小明", payee_bank_account_number: null, payee_account_holder: "王小明" })]
+    const holderOnly = await as("hr-user", request(app).get(`/disbursements/${DISB}`))
+    expect(holderOnly.body.disbursement ?? holderOnly.body).toMatchObject({ payeeAccountSplit: true, payeeAccountMasked: null, payeeAccountHolder: "王小明" })
+  })
+  it("登錄廠商名冊帳號含非數字 → 分欄兩欄都不寫（不是帳號空白＋戶名有值的半套）", async () => {
+    Object.assign(fake.db.vendors![0]!, { bank_account: "A-0001-1111", account_holder: "測試甲工程行" })
+    const res = await as("hr-user", request(app).post("/disbursements")).send({
+      payeeKind: "vendor", vendorId: VENDOR_A, payingCompanyId: COMPANY, method: "transfer", amount: 1000, status: "draft",
+      allocations: [{ projectId: PROJECT, subcontractId: SUB_A, subcontractPaymentId: PAY_A, amount: 1000 }],
+    })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(fake.db.disbursements!.at(-1)).toMatchObject({ payee_bank_account_number: null, payee_account_holder: null, payee_bank_account: "A00011111 測試甲工程行" })
+    expect(res.body.disbursement.payeeAccountSplit).toBe(false)
+  })
+  it("PATCH 登錄廠商 → 其他且沒送帳戶 → 分欄、舊快照、銀行名／代碼全清空；只送戶名時帳號也不從原廠商帶", async () => {
+    fake.db.disbursements = [header(VENDOR_A, { status: "draft", approved_at: null, payee_bank_account_number: "0000111", payee_account_holder: "測試甲工程行" })]
+    fake.db.disbursement_allocations = []
+    const res = await as("hr-user", request(app).patch(`/disbursements/${DISB}`)).send({ payeeKind: "other", vendorId: null, payeeName: "測試某人", allocations: [] })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(fake.db.disbursements![0]).toMatchObject({ payee_kind: "other", payee_bank_account_number: null, payee_account_holder: null, payee_bank_account: null, payee_bank_name: null, payee_bank_code: null })
+    fake.db.disbursements = [header(VENDOR_A, { status: "draft", approved_at: null, payee_bank_account_number: "0000111", payee_account_holder: "測試甲工程行" })]
+    const res2 = await as("hr-user", request(app).patch(`/disbursements/${DISB}`)).send({ payeeKind: "other", vendorId: null, payeeName: "測試某人", payeeAccountHolder: "測試某人", allocations: [] })
+    expect(res2.status).toBe(200)
+    expect(fake.db.disbursements![0]).toMatchObject({ payee_bank_account_number: null, payee_account_holder: "測試某人" })
+  })
+  it("舊快照拆出的戶名寫入分欄前清理：控制字元去掉、按字元截 120，不 500", async () => {
+    const long = "😀".repeat(130)
+    fake.db.disbursements = [otherDraft({ payee_bank_account: `12345678 王\u0007小明`, payee_bank_account_number: null, payee_account_holder: null })]
+    const r1 = await as("hr-user", request(app).patch(`/disbursements/${DISB}`)).send({ payeeBankAccountNumber: "87654321" })
+    expect(r1.status, JSON.stringify(r1.body)).toBe(200)
+    expect(fake.db.disbursements![0]).toMatchObject({ payee_bank_account_number: "87654321", payee_account_holder: "王小明" })
+    fake.db.disbursements = [otherDraft({ payee_bank_account: `12345678 ${long}`, payee_bank_account_number: null, payee_account_holder: null })]
+    const r2 = await as("hr-user", request(app).patch(`/disbursements/${DISB}`)).send({ payeeBankAccountNumber: "87654321" })
+    expect(r2.status).toBe(200)
+    expect(Array.from(fake.db.disbursements![0]!.payee_account_holder as string)).toHaveLength(120)
+  })
+})
