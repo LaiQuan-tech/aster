@@ -311,6 +311,15 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       desc: "依薪資年月、資料類型、結算狀態與截止日完成設定、全數拋轉與下載",
       module: "attendanceSettlement",
     },
+    {
+      // 2026-11-17 業主：打卡紀錄維護最右邊新增「特殊假別」（颱風假等，有薪／無薪；API requireHrAdmin → hrOnly）。
+      key: "special",
+      label: "特殊假別",
+      href: "/admin/special-leave-days",
+      title: "特殊假別",
+      desc: "颱風假、停班等特定日期設為有薪或無薪：當天不算曠職、遲到早退，不影響全勤；無薪依時薪扣當日工時",
+      hrOnly: true,
+    },
   ],
   payroll: [
     {

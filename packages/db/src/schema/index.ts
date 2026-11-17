@@ -91,3 +91,4 @@ export { vehicles, vehicleMaintenanceLogs, vehicleBookings, vehicleTrips, vehicl
 export { insuredSalaryChanges } from "./insured-salary-changes"
 export { projectApplicationVersions } from "./project-application-versions"
 export { projectBillingShares, projectBillingBonusDates } from "./project-billing-shares"
+export { specialLeaveDays } from "./special-leave-days"

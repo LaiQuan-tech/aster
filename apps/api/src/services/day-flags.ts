@@ -12,7 +12,22 @@
  */
 
 /** 只是旗標、不是異常的鍵（舊列寫在 anomaly 頂層；新列寫在 anomaly.flags）。 */
-export const DAY_FLAG_KEYS = ["ptoWork", "compDayOwed", "compTimeMinutes", "dinnerTaken", "dinnerSource", "wfh"] as const
+export const DAY_FLAG_KEYS = ["ptoWork", "compDayOwed", "compTimeMinutes", "dinnerTaken", "dinnerSource", "wfh", "specialDay"] as const
+
+/** 特殊假日旗標（2026-11-17，settleAttendance 寫在 anomaly.flags.specialDay；services/special-leave-days.ts）。 */
+export interface SpecialDayFlag {
+  id: string | null
+  name: string
+  paid: boolean
+  /** 「颱風假（無薪）」。 */
+  label: string
+  /** 無薪：當日約定工時中沒做到、要扣薪的分鐘（有薪或做滿＝省略）。 */
+  unpaidMinutes?: number
+  /** 當天有出勤（特殊假日出勤）。 */
+  worked?: true
+  /** 當天原有已核准請假的分鐘（已不計請假，提示 HR 退假單時數）。 */
+  leaveOverlapMinutes?: number
+}
 
 export interface DayFlags {
   /** 特休日出勤（計薪同國定假日）。 */
@@ -26,6 +41,8 @@ export interface DayFlags {
   dinnerSource?: "manual" | "punch"
   /** 在家工作申請單認列出勤（M2；當天沒打卡、以班表淨工時認列）。 */
   wfh?: true
+  /** 特殊假日（颱風假等）。 */
+  specialDay?: SpecialDayFlag
 }
 
 function record(v: unknown): Record<string, unknown> | null {
@@ -42,6 +59,20 @@ export function dayFlagsOf(anomaly: unknown): DayFlags {
   if (typeof src.compDayOwed === "number" && src.compDayOwed > 0) out.compDayOwed = src.compDayOwed
   if (typeof src.compTimeMinutes === "number" && src.compTimeMinutes > 0) out.compTimeMinutes = src.compTimeMinutes
   if (src.wfh === true) out.wfh = true
+  const sd = record(src.specialDay)
+  if (sd && typeof sd.name === "string" && sd.name) {
+    const paid = sd.paid === true
+    const flag: SpecialDayFlag = {
+      id: typeof sd.id === "string" ? sd.id : null,
+      name: sd.name,
+      paid,
+      label: typeof sd.label === "string" && sd.label ? sd.label : `${sd.name}（${paid ? "有薪" : "無薪"}）`,
+    }
+    if (typeof sd.unpaidMinutes === "number" && sd.unpaidMinutes > 0) flag.unpaidMinutes = sd.unpaidMinutes
+    if (sd.worked === true) flag.worked = true
+    if (typeof sd.leaveOverlapMinutes === "number" && sd.leaveOverlapMinutes > 0) flag.leaveOverlapMinutes = sd.leaveOverlapMinutes
+    out.specialDay = flag
+  }
   if (typeof src.dinnerTaken === "boolean") {
     out.dinnerTaken = src.dinnerTaken
     out.dinnerSource = src.dinnerSource === "manual" ? "manual" : "punch"
@@ -55,4 +86,9 @@ export function hasRealAnomaly(anomaly: unknown): boolean {
   if (!a) return false
   const flagKeys = new Set<string>(["flags", ...DAY_FLAG_KEYS])
   return Object.keys(a).some((k) => !flagKeys.has(k))
+}
+
+/** anomaly → 特殊假日標籤（「颱風假（無薪）」）；沒有 → null。純函式。 */
+export function specialDayLabelOf(anomaly: unknown): string | null {
+  return dayFlagsOf(anomaly).specialDay?.label ?? null
 }

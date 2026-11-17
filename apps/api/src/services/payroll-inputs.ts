@@ -1,4 +1,5 @@
 import { dayFlagsOf } from "./day-flags.js"
+import { specialUnpaidLeaveCode } from "./special-leave-days.js"
 import { loadNhiDependentsOverrides, resolveNhiDependents } from "./nhi-dependents-count.js"
 import {
   computePayslip,
@@ -156,6 +157,12 @@ export function toAttendanceDay(
       deductRate: deductRateByCode.get(code) ?? 0,
     }))
     .filter((l) => l.minutes > 0)
+  // 特殊假日（2026-11-17）無薪：沒做到的約定工時照時薪 × 1 扣（同事假），薪資單明細「請假扣款(颱風假（無薪）)」。
+  // 不影響全勤（全勤只看遲到；結算已把特殊假日的遲到早退歸零）。時薪制引擎本來就不扣請假（只付實際工時）。
+  const special = dayFlagsOf(row.anomaly).specialDay
+  if (special && !special.paid && (special.unpaidMinutes ?? 0) > 0) {
+    leaves.push({ code: specialUnpaidLeaveCode(special.name), minutes: special.unpaidMinutes ?? 0, deductRate: 1 })
+  }
   return {
     date: row.work_date,
     workedMinutes: row.worked_minutes,

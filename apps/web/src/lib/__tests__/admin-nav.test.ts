@@ -133,6 +133,7 @@ describe("resolveAdminPath：最長前綴", () => {
 
   it("值日／總機；2026-11-09 現金給付（三節獎金／加班超額另計）併入「費用與給付」", () => {
     expect(resolveAdminPath("/admin/duty-rosters")).toMatchObject({ section: "attendance", tab: "duty", title: "值日生／總機輪播排班" });
+    expect(resolveAdminPath("/admin/special-leave-days")).toMatchObject({ section: "attendance", tab: "special", title: "特殊假別" });
     expect(resolveAdminPath("/admin/expenses")).toMatchObject({ section: "payroll", tab: "expenses", title: "費用與給付" });
     for (const path of ["/admin/expenses", "/admin/duty-rosters"]) {
       expect(resolveAdminPath(path).module, path).toBeUndefined();
@@ -460,7 +461,8 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     expect(tabsForSection("announce", { knowledge: true }).map((t) => t.key)).toEqual(["announcements", "companyInfo", "knowledge"]);
     // 班表（/admin/schedules）2026-10-11 移除；班別在設定區、值日／總機保留。
     // 2026-11-09：出勤月表與月結（sheets）併入出勤統計表（statements）；遲到說明（lateReports）併入打卡紀錄（punches）。
-    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "statements", "duty"]);
+    // 2026-11-17：最右邊新增特殊假別（special）。
+    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "statements", "duty", "special"]);
   });
 
   it("subTabsFor：有 children 回子分頁（含 href）、沒有回 []、null 回 []", () => {
@@ -540,7 +542,8 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
 
   it("hrOnly 目前只有「未核准加班」報表（2026-11；集團總覽 2026-10-27 移到首頁；獎金分潤同日併入、改在頁內區塊守門，見 lib/bonus-page-access.ts）", () => {
     const hrOnlyKeys = (Object.values(ADMIN_TABS).flat() as Array<{ key: string; hrOnly?: boolean }>).filter((t) => t.hrOnly).map((t) => t.key);
-    expect(hrOnlyKeys).toEqual(["payroll", "unapprovedOvertime"]);
+    // 2026-11-17：特殊假別（API requireHrAdmin）也是 hrOnly。
+    expect(hrOnlyKeys).toEqual(["special", "payroll", "unapprovedOvertime"]);
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).toMatchObject({ href: "/admin/bonus-sheet" });
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).not.toHaveProperty("hrOnly");
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).not.toHaveProperty("groupFinancials");
@@ -936,7 +939,7 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
   });
 
   it("目前的 hrOnly 分頁是月結發薪＋系統／未核准加班（2026-11；下面的路徑與提示測試會自動涵蓋）", () => {
-    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual(["payroll/payroll", "system/unapprovedOvertime"]);
+    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual(["attendance/special", "payroll/payroll", "system/unapprovedOvertime"]);
   });
 
   it("isHrOnlyAdminPath：HR 限定頁（含 query／尾斜線／子路徑）→ true；其他頁、首頁、未知路徑 → false", () => {

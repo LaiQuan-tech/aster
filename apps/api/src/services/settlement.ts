@@ -30,6 +30,7 @@ import { loadDayTypeResolver } from "./day-type.js"
 import { loadRuleConfigFor } from "./payroll-inputs.js"
 import { assertDateRangeOpen } from "./period-lock.js"
 import { loadShiftResolver } from "./employee-shifts.js"
+import { specialDayLabel } from "./special-leave-days.js"
 import { dinnerPunchByDate, effectiveDinnerTaken, pairPunchesTz, type PairedDay } from "./punch-pairing.js"
 
 /**
@@ -462,6 +463,8 @@ export async function lateMinutesForArrival(input: {
   // 日屬性（services/day-type.ts，與結算／月表／缺卡掃描同一支）
   const dayTypes = await loadDayTypeResolver({ tenantId, from: workDate, to: workDate, employeeIds: [employeeId] })
   const dayType: DayType = dayTypes.forDay(employeeId, workDate)
+  // 特殊假日（颱風假等，services/special-leave-days.ts）：當天沒有應上班時間 → 不判遲到、不要求遲到說明。
+  if (dayTypes.specialFor(employeeId, workDate)) return { workDate, lateMinutes: 0, threshold: null, mode: "none" }
 
   // 當天班別（services/employee-shifts.ts，與結算／月表／缺卡掃描同一支）：排班（歷史資料）→ 個人預設班別
   // （只限工作日）→ 沒有＝工作日走彈性上班。
@@ -653,6 +656,8 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   await assertDateRangeOpen(tenantId, from, to)
 
   const { rows } = await computeAttendanceRows({ tenantId, from, to, employeeId })
+  // 特殊假日刪除／改範圍後，原本只因特殊假日而寫的列（沒打卡、沒假）不會再出現在 rows → 清掉殘留旗標（含無薪扣薪）。
+  await clearStaleSpecialDays(tenantId, from, to, employeeId, new Set(rows.map((r) => `${r.employee_id}|${r.work_date}`)))
   if (rows.length === 0) return { settled: 0 }
 
   const { error: upsertErr } = await supabaseAdmin
@@ -675,6 +680,55 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   }
 
   return { settled: rows.length }
+}
+
+/**
+ * 特殊假日殘留清理（2026-11-17）：attendance_days 有 anomaly.flags.specialDay、但這次結算沒產生該列（＝當天沒打卡、
+ * 沒假、沒排班，只因特殊假日才寫的列，而特殊假日已刪除或不再適用）→ 歸零（attendance_days 有 no_hard_delete，不能刪）：
+ * 工時／遲到／加班／請假 0、移除 specialDay 旗標（其他旗標保留）。失敗只記 log，不擋結算。
+ */
+async function clearStaleSpecialDays(
+  tenantId: string,
+  from: DateKey,
+  to: DateKey,
+  employeeId: string | undefined,
+  freshKeys: Set<string>,
+): Promise<void> {
+  try {
+    const existing = await selectAllPages<{ id: string; employee_id: string; work_date: string; anomaly: unknown }>((rFrom, rTo) => {
+      let q = supabaseAdmin
+        .from("attendance_days")
+        .select("id, employee_id, work_date, anomaly")
+        .eq("tenant_id", tenantId)
+        .gte("work_date", from)
+        .lte("work_date", to)
+      if (employeeId) q = q.eq("employee_id", employeeId)
+      return q.order("id", { ascending: true }).range(rFrom, rTo)
+    }, "settleAttendance (stale special days)")
+    for (const r of existing) {
+      if (freshKeys.has(`${r.employee_id}|${r.work_date}`)) continue
+      const a = r.anomaly && typeof r.anomaly === "object" && !Array.isArray(r.anomaly) ? (r.anomaly as Record<string, unknown>) : null
+      const flags = a?.flags && typeof a.flags === "object" ? { ...(a.flags as Record<string, unknown>) } : null
+      if (!a || !flags || !("specialDay" in flags)) continue
+      delete flags.specialDay
+      const rest: Record<string, unknown> = { ...a }
+      delete rest.flags
+      if (Object.keys(flags).length > 0) rest.flags = flags
+      const anomaly = Object.keys(rest).length > 0 ? rest : null
+      const base = { worked_minutes: 0, late_minutes: 0, overtime_minutes: 0, night_minutes: 0, anomaly }
+      let { error } = await supabaseAdmin
+        .from("attendance_days")
+        .update({ ...base, leave_minutes: 0, leave_breakdown: {}, outing_minutes: 0, early_leave_minutes: 0 })
+        .eq("tenant_id", tenantId)
+        .eq("id", r.id)
+      if (error && isMissingColumnError(error)) {
+        ;({ error } = await supabaseAdmin.from("attendance_days").update(base).eq("tenant_id", tenantId).eq("id", r.id))
+      }
+      if (error) console.error(`[settlement] clearStaleSpecialDays: ${error.message}`)
+    }
+  } catch (err) {
+    console.error("[settlement] clearStaleSpecialDays failed:", err)
+  }
 }
 
 /** 某員工某天的結算上下文（computeAttendanceRows 用的同一份班別／日別／請假時段）。 */
@@ -919,6 +973,13 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
       if (resolver.forDay(empId, d, dayTypeFor(empId, d)).source === "default") keys.add(`${empId}|${d}`)
     }
   }
+  // 特殊假日（2026-11-17，services/special-leave-days.ts）：命中的工作日一律寫一列（沒打卡也要有列，無薪才扣得到、
+  // 月表／總覽才顯示得出「颱風假（無薪）」）。單一員工結算時只收那位。
+  for (const k of dayTypes.specialKeys()) {
+    if (k.date < from || k.date > to) continue
+    if (employeeId && k.employeeId !== employeeId) continue
+    keys.add(`${k.employeeId}|${k.date}`)
+  }
 
   // 個人開關「不計夜間加給」（employees.features.noNightPremium）不在這裡處理：night_minutes 照實寫，
   // 只在薪資引擎入口 applyNightPolicy 歸 0——開關日後關掉時，不必重新結算夜間加給就會回來。
@@ -943,7 +1004,10 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
     const hasExpectedTimes = !!scheduledShift || !!shift.flex
 
     const dayRegularMinutes = regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes)
-    const leave = leaveByKey.get(key)
+    // 特殊假日（颱風假等）：當天的已核准請假不計（不扣假別薪、不算請假分鐘），改記 leaveOverlapMinutes 提示 HR 退假單時數。
+    const special = dayTypes.specialFor(empId, workDate)
+    const rawLeave = leaveByKey.get(key)
+    const leave = special ? undefined : rawLeave
     // 特休日出勤（2026-10-17）：當天有已核准的特休（code 'annual'）整天假、又有打卡出勤 → 引擎依國定假日計薪
     // （DayContext.ptoWork）。特休假單本身不在這裡撤銷：anomaly.flags.ptoWork 留痕，由月表／HR 處理。
     const punchedPairs = !!day && day.pairs.length > 0
@@ -959,8 +1023,9 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
       ptoWork: ptoWork || undefined,
     })
     let workedMinutes = result.workedMinutes
-    let lateMinutes = hasExpectedTimes ? result.lateMinutes : 0
-    let earlyLeaveMinutes = hasExpectedTimes ? (result.earlyLeaveMinutes ?? 0) : 0
+    // 特殊假日沒有應上下班時間：遲到／早退歸零（工時、加班照一般工作日算）。
+    let lateMinutes = hasExpectedTimes && !special ? result.lateMinutes : 0
+    let earlyLeaveMinutes = hasExpectedTimes && !special ? (result.earlyLeaveMinutes ?? 0) : 0
 
     const anomaly: Record<string, unknown> = {}
     if (day) {
@@ -1001,6 +1066,21 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
     }
     const compTimeMinutes = compTimeByKey.get(key) ?? 0
     if (compTimeMinutes > 0) flags.compTimeMinutes = compTimeMinutes
+    // 特殊假日（2026-11-17）：計薪旗標。無薪＝當日約定工時中沒做到的分鐘（payroll-inputs 依時薪 × 1 扣，同事假）；
+    // 有薪＝不扣。worked＝當天有出勤（「特殊假日出勤」，加給由 HR 以加減項處理）。不影響全勤（全勤只看遲到）。
+    if (special) {
+      const unpaidMinutes = special.paid ? 0 : Math.max(0, dayRegularMinutes - workedMinutes)
+      const leaveOverlapMinutes = rawLeave?.total ?? 0
+      flags.specialDay = {
+        id: special.id,
+        name: special.name,
+        paid: special.paid,
+        label: specialDayLabel(special),
+        ...(unpaidMinutes > 0 ? { unpaidMinutes } : {}),
+        ...(punchedAny ? { worked: true } : {}),
+        ...(leaveOverlapMinutes > 0 ? { leaveOverlapMinutes } : {}),
+      }
+    }
     if (Object.keys(flags).length > 0) anomaly.flags = flags
 
     rows.push({

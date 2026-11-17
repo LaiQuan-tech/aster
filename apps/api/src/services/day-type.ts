@@ -4,6 +4,7 @@ import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { weekdayOfKey, type DateKey } from "../lib/tz.js"
 import { asWeekday, normalizeEmployeeFeatures, type EmployeeFeatures } from "./employee-features.js"
 import { employeesHavePersonalSettings } from "./employee-shifts.js"
+import { EMPTY_SPECIAL_INDEX, loadSpecialDayIndex, type SpecialDayHit, type SpecialDayIndex } from "./special-leave-days.js"
 
 /**
  * 日別判定（2026-10-17 一例一休）——settleAttendance、打卡遲到判斷、月表 facts、缺卡掃描、跨日打卡判斷共用。
@@ -175,6 +176,13 @@ export interface DayTypeResolver {
   tenantPolicy: WeekendPolicy
   /** 某員工的週休設定（沒個人設定＝公司設定）。 */
   policyOf(employeeId: string | null): WeekendPolicy
+  /**
+   * 特殊假日（颱風假等，services/special-leave-days.ts）：某員工某天命中、且那天是他的**工作日** → 命中的假日；
+   * 否則 null（落在例假／休息日／國定假日不適用）。日別本身不變（仍是 workday）。
+   */
+  specialFor(employeeId: string | null, date: DateKey): SpecialDayHit | null
+  /** 區間內所有「命中特殊假日的工作日」(員工, 日期)——結算補列用（沒打卡也要寫一列才扣得到無薪）。 */
+  specialKeys(): Array<{ employeeId: string; date: DateKey }>
 }
 
 /** 純函式版的查詢器（測試與已載好資料的呼叫端用）。 */
@@ -182,9 +190,12 @@ export function buildDayTypeResolver(input: {
   calendar: Map<DateKey, CalendarEntry>
   tenantPolicy: WeekendPolicy
   personal?: Map<string, Pick<EmployeeFeatures, "regularLeaveWeekday" | "restDayWeekday">>
+  /** 特殊假日查詢器（省略＝沒有特殊假日）。 */
+  special?: SpecialDayIndex
 }): DayTypeResolver {
   const { calendar, tenantPolicy } = input
   const personal = input.personal ?? new Map()
+  const special = input.special ?? EMPTY_SPECIAL_INDEX
   const policyCache = new Map<string, WeekendPolicy>()
   const policyOf = (employeeId: string | null): WeekendPolicy => {
     if (!employeeId) return tenantPolicy
@@ -195,23 +206,34 @@ export function buildDayTypeResolver(input: {
     }
     return p
   }
+  const forDay = (employeeId: string | null, date: DateKey): DayType =>
+    resolveDayType({
+      date,
+      calendar: calendar.get(date) ?? null,
+      policy: policyOf(employeeId),
+      personalWeekend: employeeId ? hasPersonalWeekend(personal.get(employeeId)) : false,
+    })
+  const specialFor = (employeeId: string | null, date: DateKey): SpecialDayHit | null => {
+    if (!special.any) return null
+    const hit = special.forDay(employeeId, date)
+    return hit && forDay(employeeId, date) === "workday" ? hit : null
+  }
   return {
     tenantPolicy,
     policyOf,
-    forDay(employeeId, date) {
-      return resolveDayType({
-        date,
-        calendar: calendar.get(date) ?? null,
-        policy: policyOf(employeeId),
-        personalWeekend: employeeId ? hasPersonalWeekend(personal.get(employeeId)) : false,
-      })
+    forDay,
+    specialFor,
+    specialKeys() {
+      if (!special.any) return []
+      return special.keys().filter((k) => forDay(k.employeeId, k.date) === "workday")
     },
   }
 }
 
 /**
- * 一次載入 [from, to] 的行事曆、公司週休設定與（`employeeIds` 內或全租戶）員工個人例假／休息日，回傳查詢器。
- * 表／欄位缺漏容錯：tenant_calendar_days 未建 → 全走星期；employees.features 未套 → 沒有個人設定。
+ * 一次載入 [from, to] 的行事曆、公司週休設定、（`employeeIds` 內或全租戶）員工個人例假／休息日與特殊假日，回傳查詢器。
+ * 表／欄位缺漏容錯：tenant_calendar_days 未建 → 全走星期；employees.features 未套 → 沒有個人設定；
+ * special_leave_days 未建（0110 前）→ 沒有特殊假日。
  */
 export async function loadDayTypeResolver(opts: {
   tenantId: string
@@ -220,10 +242,11 @@ export async function loadDayTypeResolver(opts: {
   employeeIds?: string[]
 }): Promise<DayTypeResolver> {
   const { tenantId, from, to, employeeIds } = opts
-  const [calendar, tenantPolicy, personal] = await Promise.all([
+  const [calendar, tenantPolicy, personal, special] = await Promise.all([
     loadCalendarEntries(tenantId, from, to),
     loadTenantWeekendPolicy(tenantId),
     loadPersonalWeekends(tenantId, employeeIds),
+    loadSpecialDayIndex({ tenantId, from, to, employeeIds }),
   ])
-  return buildDayTypeResolver({ calendar, tenantPolicy, personal })
+  return buildDayTypeResolver({ calendar, tenantPolicy, personal, special })
 }

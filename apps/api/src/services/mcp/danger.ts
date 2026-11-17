@@ -96,6 +96,7 @@ export const HIGH_RISK_DELETE_PREFIXES = [
   "/overtime-settlements",
   "/leave-types", // 假別
   "/calendar/days", // 行事曆日
+  "/special-leave-days", // 特殊假日（影響扣薪，2026-11-17）
   "/employees", // 員工（含個資、照片）
   "/educations",
   "/certifications",
@@ -175,6 +176,9 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "PUT", path: "/expense-categories", label: "變更報銷類別" },
   { method: "PUT", path: "/project-settings", label: "變更專案設定" },
   { method: "PUT", path: "/companies", label: "變更公司名冊" },
+  // 特殊假日（颱風假等，2026-11-17）：無薪會扣薪、會重算未結算月份的月表 → 最高風險（後台本人確認）。
+  { method: "POST", path: "/special-leave-days", tier: "high", label: "新增特殊假日（有薪／無薪，影響扣薪與月表）" },
+  { method: "PATCH", path: "/special-leave-days/:id", tier: "high", label: "修改特殊假日（影響扣薪與月表）" },
   { method: "POST", path: "/calendar/generate", label: "重新產生年度行事曆" },
   { method: "POST", path: "/calendar/import/regenerate", label: "重新產生國定假日" },
   { method: "POST", path: "/calendar/import/drafts/:id/approve", label: "核准國定假日匯入" },

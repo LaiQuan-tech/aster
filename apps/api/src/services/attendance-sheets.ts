@@ -57,7 +57,8 @@ import {
   sevenDayLookbackFrom,
 } from "./compliance.js"
 import { writeAuditLog } from "./audit.js"
-import { dayFlagsOf } from "./day-flags.js"
+import { dayFlagsOf, specialDayLabelOf } from "./day-flags.js"
+import { specialDayLabel } from "./special-leave-days.js"
 import { BEYOND_CAP_VOID_NOTE } from "./overtime-void.js"
 import { assertPeriodOpen } from "./period-lock.js"
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf, type LateReportRow } from "./late-reports.js"
@@ -360,6 +361,24 @@ export function allocateBeyondCap(
     if (beyond > 0) out.set(day.date, beyond)
   }
   return out
+}
+
+/** 特殊假日名稱接在請假摘要前：`颱風假（無薪）；事假 2h`。純函式。 */
+export function withSpecialDayLabel(label: string | null | undefined, summary: string | null): string | null {
+  if (!label) return summary
+  return summary ? `${label}；${summary}` : label
+}
+
+/** 結算旗標 → 「颱風假（無薪）」；當天原有假單時補「當日假單 8h 未計，請退回假單時數」。純函式。 */
+function specialDayNote(anomaly: unknown): string | null {
+  const label = specialDayLabelOf(anomaly)
+  if (!label) return null
+  const overlap = dayFlagsOf(anomaly).specialDay?.leaveOverlapMinutes ?? 0
+  return overlap > 0 ? `${label}（當日假單 ${trimHours(overlap / 60)}h 未計，請退回假單時數）` : label
+}
+
+function specialLabelFromResolver(hit: { name: string; paid: boolean } | null | undefined): string | null {
+  return hit ? specialDayLabel(hit) : null
 }
 
 /** `{sick: 90, annual: 480}` → `病假 1.5h；特休 8h`（code 找不到名稱就用 code）。 */
@@ -1148,8 +1167,10 @@ export async function loadMonthFacts(tenantId: string, period: string, employeeI
     return Math.max(0, end - start - (shift.breakMinutes ?? 0))
   }
   // 舊排班列照舊：有列就算有應到；shift_id 空／班別已刪 → 淨工時 null（與改動前相同）。
+  // 特殊假日（颱風假等，services/special-leave-days.ts）那天不算有應到（不判曠職）。
   for (const key of resolver.scheduledKeys()) {
     const [empId, d] = key.split("|")
+    if (facts.dayTypes.specialFor(empId, d)) continue
     facts.scheduleByKey.set(key, { shiftNetMinutes: shiftNetOf(resolver.scheduleOf(empId, d) ?? null) })
   }
   // 出差／公出、在家工作單蓋滿班別的日子也不算有應到（月表本身只看得到請假分鐘與 wfh 申請單，看不到出差）。
@@ -1163,6 +1184,7 @@ export async function loadMonthFacts(tenantId: string, period: string, employeeI
       const dayType: DayType = facts.dayTypes.forDay(empId, d)
       const resolved = resolver.forDay(empId, d, dayType)
       if (!resolved.source || !resolved.shift) continue
+      if (facts.dayTypes.specialFor(empId, d)) continue
       if (coveredByRequests(offsiteRequests, empId, d, resolved.shift, tz)) continue
       facts.scheduleByKey.set(key, { shiftNetMinutes: shiftNetOf(resolved.shift) })
     }
@@ -1329,7 +1351,11 @@ function buildDayRows(
       ot_tier3_minutes: tiers.tier3,
       outing_minutes: ad?.outing_minutes ?? 0,
       leave_minutes_computed: ad?.leave_minutes ?? 0,
-      leave_summary: formatLeaveSummary(ad?.leave_breakdown ?? null, facts.leaveNameByCode),
+      // 特殊假日（2026-11-17）：「颱風假（無薪）」接在請假摘要前（月表與出勤統計表「內容」欄都讀這欄）。
+      leave_summary: withSpecialDayLabel(
+        specialDayNote(ad?.anomaly) ?? specialLabelFromResolver(facts.dayTypes.specialFor(employeeId, d)),
+        formatLeaveSummary(ad?.leave_breakdown ?? null, facts.leaveNameByCode),
+      ),
       wfh: facts.wfhByKey.has(key),
       anomalies: [],
       overtime_minutes_override: override,

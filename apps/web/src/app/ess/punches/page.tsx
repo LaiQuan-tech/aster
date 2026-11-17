@@ -8,6 +8,7 @@ import { WFH_SUFFIX } from "@/lib/wfh-punch";
 import { getMeCached } from "@/lib/ess-state";
 import type { DayType, ShiftLike } from "@/lib/leave-hours";
 import { buildDayRows, fixPunchHref, type DayRow, type PunchHistoryRecord } from "@/lib/punch-history";
+import { getMySpecialDays } from "@/lib/special-leave-days-api";
 import {
   approvedCoverageByDate,
   calendarYearsOf,
@@ -152,6 +153,20 @@ interface Loaded {
   approved: ApprovedRequestLike[];
   /** 預設班別：判斷請假有沒有涵蓋整個上班時段。 */
   shift: ShiftLike;
+  /** 特殊假日（颱風假等，2026-11-17）：date → 「颱風假（無薪）」；只含自己適用的工作日。抓不到＝空。 */
+  specialByDate: Record<string, string>;
+}
+
+/** 自己適用的特殊假日（颱風假等）；失敗＝空，不擋打卡紀錄。 */
+async function loadSpecialDays(from: string, to: string): Promise<Record<string, string>> {
+  try {
+    const res = await getMySpecialDays(from, to);
+    const out: Record<string, string> = {};
+    for (const d of res?.days ?? []) if (d?.date && d.label) out[d.date] = d.label;
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 export default function PunchesPage() {
@@ -190,14 +205,15 @@ export default function PunchesPage() {
       // 三支參考資料各自最多等 CONTEXT_WAIT_MS：卡住就退回舊規則（行事曆用逾時當下已快取的年份、其餘週一～五；
       // 沒有核准單；預設班別），打卡紀錄照常顯示。
       const cache = contextCacheRef.current;
-      const [res, calendar, approved, shift] = await Promise.all([
+      const [res, calendar, approved, shift, specialByDate] = await Promise.all([
         getPunchRecords(f, t),
         settleWithin(loadCalendar(cache, f, t), CONTEXT_WAIT_MS, () => cachedCalendar(cache, f, t)),
         settleWithin(loadApproved(cache), CONTEXT_WAIT_MS, (): ApprovedRequestLike[] => []),
         settleWithin(loadShift(cache), CONTEXT_WAIT_MS, () => pickDefaultShift(null)),
+        settleWithin(loadSpecialDays(f, t), CONTEXT_WAIT_MS, (): Record<string, string> => ({})),
       ]);
       if (seq !== seqRef.current) return; // 已有更新的查詢，丟掉這筆舊回應
-      setLoaded({ from: f, to: t, records: res.records, ...calendar, approved, shift });
+      setLoaded({ from: f, to: t, records: res.records, ...calendar, approved, shift, specialByDate });
       setError(null);
     } catch (err) {
       if (seq !== seqRef.current) return;
@@ -238,7 +254,10 @@ export default function PunchesPage() {
             row,
             today,
             coverage?.get(row.date),
-            holidayLabelOf(loaded?.dayTypeByDate[row.date], loaded?.labelByDate[row.date]),
+            // 特殊假日（颱風假等）跟國定假日一樣：沒打卡不催補卡，標「颱風假（無薪）」。
+            holidayLabelOf(loaded?.dayTypeByDate[row.date], loaded?.labelByDate[row.date]) ??
+              loaded?.specialByDate[row.date] ??
+              null,
           ),
         ]),
       ),
@@ -251,8 +270,12 @@ export default function PunchesPage() {
   // 哪天是上班日照行事曆（補班日算上班日、平日的國定假日不算；抓不到＝週一～五），與上面補空列同一份裁定。
   // 匯出 CSV 一律吃完整的 rows，不受這個開關影響。
   const coveredDates = useMemo(
-    () => new Set(Array.from(coverage ?? []).flatMap(([date, day]) => (day.full ? [date] : []))),
-    [coverage],
+    () =>
+      new Set([
+        ...Array.from(coverage ?? []).flatMap(([date, day]) => (day.full ? [date] : [])),
+        ...Object.keys(loaded?.specialByDate ?? {}),
+      ]),
+    [coverage, loaded],
   );
   const partition = useMemo(
     () => partitionPunchRows(rows, showAll, today, loaded?.dayTypeByDate, coveredDates),

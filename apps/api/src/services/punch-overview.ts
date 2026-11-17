@@ -334,6 +334,8 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
     if (input.trip) status = input.trip
     else if (fullDayLeave) status = "leave"
     else if (wfh) status = "wfh"
+    // 特殊假日（颱風假等，2026-11-17）：不用來 → 休假日（狀態文字＝「颱風假（無薪）」），不算未打卡、不算應到。
+    else if (flags.specialDay) status = "off"
     else if (input.dayType !== "workday") status = "off"
     else if (input.unscheduledPartTime) status = "off"
     else if (input.date > input.today) status = "not_yet"
@@ -373,12 +375,15 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
   }
   if (wfh && status !== "wfh") tags.push({ code: "wfh", label: "在家", tone: "info" })
   if (input.trip && status !== input.trip) tags.push({ code: input.trip, label: STATUS_LABEL[input.trip], tone: "info" })
+  if (punched && flags.specialDay) tags.push({ code: "special_day_work", label: `${flags.specialDay.name}出勤`, tone: "warn" })
   if (punched && input.dayType !== "workday") tags.push({ code: "holiday_work", label: `${DAY_TYPE_LABEL[input.dayType]}出勤`, tone: "warn" })
   if (input.manualPunch) tags.push({ code: "manual", label: "補登", tone: "muted" })
 
   const statusLabel =
     status === "off"
-      ? input.dayType === "workday" && input.unscheduledPartTime
+      ? flags.specialDay && input.dayType === "workday"
+        ? flags.specialDay.label
+        : input.dayType === "workday" && input.unscheduledPartTime
         ? "未排班"
         : DAY_TYPE_LABEL[input.dayType]
       : STATUS_LABEL[status]

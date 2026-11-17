@@ -61,6 +61,7 @@ const SECTION_LABELS: Array<[string, string]> = [
   ["/fixed-allowances", "員工固定津貼"],
   ["/salary", "薪資結構"],
   ["/calendar", "行事曆"],
+  ["/special-leave-days", "特殊假日（颱風假等）"],
   ["/payroll-periods", "發薪期間（鎖定）"],
   ["/payroll-adjustments", "薪資加減項"],
   ["/payroll", "薪資計算"],

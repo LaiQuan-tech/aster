@@ -118,7 +118,8 @@ export async function scanMissingPunches(
       scheduledIdSet.add(empId)
     }
   }
-  const scheduledIds = Array.from(scheduledIdSet)
+  // 特殊假日（颱風假等，services/special-leave-days.ts）：當天不用來 → 不提醒缺卡（舊排班列與個人預設班別都一樣）。
+  const scheduledIds = Array.from(scheduledIdSet).filter((empId) => !dayTypes.specialFor(empId, date))
   if (scheduledIds.length === 0) return { missing: [], queued: 0 }
 
   // That day's punches for the scheduled employees.

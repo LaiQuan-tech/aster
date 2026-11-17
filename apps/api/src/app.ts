@@ -75,6 +75,7 @@ import { importsRouter } from "./routes/imports.js"
 import { overtimeSettlementsRouter } from "./routes/overtime-settlements.js"
 import { festivalBonusesRouter } from "./routes/festival-bonuses.js"
 import { dutyRostersRouter } from "./routes/duty-rosters.js"
+import { specialLeaveDaysRouter } from "./routes/special-leave-days.js"
 import { profileChangeRequestsRouter } from "./routes/profile-change-requests.js"
 import { internalCronRouter } from "./routes/internal-cron.js"
 // 2026-10-11 集團總覽
@@ -230,6 +231,7 @@ app.use(importsRouter) // /imports/:kind/template、/imports/:kind（批次匯�
 app.use(overtimeSettlementsRouter) // /my/overtime-cap、/overtime-settlements*（M1 加班超額另計；WP1）
 app.use(festivalBonusesRouter) // /festival-bonuses*（M6 三節獎金；WP7）
 app.use(dutyRostersRouter) // /duty-rosters*（M8 值日／總機；WP8）
+app.use(specialLeaveDaysRouter) // /special-leave-days*（2026-11-17 特殊假日：颱風假等，有薪／無薪）
 app.use(profileChangeRequestsRouter) // /profile-change-requests*（W6 員工改資料審核；WP8）
 app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/calendar/holiday-import（WP9；排程端點）
 // 2026-10-11 集團總覽
