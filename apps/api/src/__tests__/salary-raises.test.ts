@@ -1,7 +1,7 @@
 import type { Server } from "node:http"
 import express, { type NextFunction, type Request, type Response } from "express"
 import request from "supertest"
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
@@ -17,7 +17,6 @@ import { buildPayrollInputs, computeFromInputs } from "../services/payroll-input
 import {
   applyRaiseToSalaryRow,
   applySalaryRaises,
-  completedHourlyWage,
   negotiatedHourly,
   pickRaiseForPeriod,
   raiseAppliesTo,
@@ -136,7 +135,50 @@ beforeEach(() => {
   fake.db.salary_adjustments = []
   fake.db.insured_salary_changes = []
   fake.rpcHandlers.complete_salary_raise = completeSalaryRaiseFake
+  fake.rpcHandlers.start_salary_raise = startSalaryRaiseFake
+  // 租戶「今天」固定 2026-11-17（完成月份上界＝當月）；只假 Date，不動計時器。
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-11-17T04:00:00Z"))
 })
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+/** migration 0116 salary_hourly_is_derived：本薪 ÷ 除數 四捨五入到 0–4 位任一相等。 */
+function hourlyIsDerived(h: unknown, base: unknown, divisor: number): boolean {
+  const hv = Number(h)
+  const bv = Number(base)
+  if (!(hv > 0) || !(bv > 0)) return false
+  if (Math.abs(bv / divisor - hv) < 1e-9) return true
+  for (let k = 0; k <= 4; k += 1) if (Math.abs(Math.round((bv / divisor) * 10 ** k) / 10 ** k - hv) < 1e-9) return true
+  return false
+}
+
+/** migration 0116 start_salary_raise 的記憶體版（同員工序列化的檢查＋insert＋稽核）。 */
+function startSalaryRaiseFake(a: Row) {
+  const fail = (message: string, code: string) => ({ data: null, error: { message, code } })
+  if (a.p_actor_emp_id != null && !(fake.db.employees ?? []).some((e) => e.id === a.p_actor_emp_id && e.tenant_id === a.p_tenant_id)) return fail("actor_not_in_tenant", "42501")
+  if (!(fake.db.employees ?? []).some((e) => e.id === a.p_employee_id && e.tenant_id === a.p_tenant_id)) return fail("employee_not_found", "P0002")
+  const s = (fake.db.salary_structures ?? []).find((x) => x.tenant_id === a.p_tenant_id && x.employee_id === a.p_employee_id)
+  if (!s) return fail("salary_structure_missing", "P0002")
+  if ((s.method ?? "monthly") !== "monthly") return fail("monthly_only", "22023")
+  if (!(Number(s.base_salary) > 0)) return fail("base_salary_missing", "55000")
+  if (Math.round(Number(a.p_new_base) * 100) === Math.round(Number(s.base_salary) * 100)) return fail("same_base_salary", "22023")
+  const mine = (fake.db.salary_raises ?? []).filter((r) => r.tenant_id === a.p_tenant_id && r.employee_id === a.p_employee_id)
+  if (mine.some((r) => r.status === "pending")) return fail("raise_already_pending", "23505")
+  const start = String(a.p_effective_on).slice(0, 7)
+  const lastDone = mine.filter((r) => r.status === "completed").map((r) => String(r.completed_period)).sort().pop()
+  if (lastDone && start < lastDone) return fail("raise_overlaps_completed", "55000")
+  const id = `e0000000-0000-4000-8000-${String((fake.db.salary_raises ?? []).length + 1).padStart(12, "0")}`
+  fake.db.salary_raises.push({
+    id, tenant_id: a.p_tenant_id, employee_id: a.p_employee_id, status: "pending", effective_on: a.p_effective_on, start_period: start,
+    new_base_salary: String(a.p_new_base), new_labor_insured_salary: a.p_new_labor ?? null, new_health_insured_salary: a.p_new_health ?? null, new_pension_wage: a.p_new_pension ?? null,
+    prev_base_salary: s.base_salary, prev_hourly_wage: s.hourly_wage ?? null, prev_labor_insured_salary: Number(s.labor_insured_salary), prev_health_insured_salary: Number(s.health_insured_salary), prev_pension_wage: s.pension_wage ?? null,
+    note: a.p_note ?? null, created_by_emp_id: a.p_actor_emp_id, created_at: `2026-11-17T00:00:${String((fake.db.salary_raises ?? []).length).padStart(2, "0")}Z`, completed_period: null,
+  })
+  fake.db.audit_logs = [...(fake.db.audit_logs ?? []), { tenant_id: a.p_tenant_id, table_name: "salary_raises", action: "INSERT", record_id: id }]
+  return { data: { id, status: "pending", start_period: start }, error: null }
+}
 
 /**
  * migration 0115 complete_salary_raise 的記憶體版（同一交易語意：先全部檢查，最後一次寫入；任何錯誤都不改資料）。
@@ -150,17 +192,27 @@ function completeSalaryRaiseFake(a: Row) {
   const r = (fake.db.salary_raises ?? []).find((x) => x.id === a.p_raise_id && x.tenant_id === a.p_tenant_id && x.employee_id === a.p_employee_id)
   if (!r) return fail("salary_raise_not_found", "P0002")
   if (r.status !== "pending") return fail("salary_raise_not_pending", "55000")
-  if (period < String(r.start_period)) return fail("invalid_completed_period", "22023")
+  if (a.p_actor_emp_id != null && !(fake.db.employees ?? []).some((e) => e.id === a.p_actor_emp_id && e.tenant_id === a.p_tenant_id)) return fail("actor_not_in_tenant", "42501")
+  const current = "2026-11"
+  if (current < String(r.start_period)) return fail("raise_not_effective_yet", "55000")
+  if (period < String(r.start_period) || period > current) return fail("invalid_completed_period", "22023")
   const s = (fake.db.salary_structures ?? []).find((x) => x.tenant_id === a.p_tenant_id && x.employee_id === a.p_employee_id)
   if (!s) return fail("salary_structure_missing", "P0002")
   const prev = { ...s }
   const nextPension = a.p_pension ?? s.pension_wage
+  const divisor = Number(a.p_divisor) > 0 ? Number(a.p_divisor) : 240
+  let hourly = s.hourly_wage ?? null
+  let kept = false
+  if ((s.method ?? "monthly") === "monthly" && Number(s.hourly_wage) > 0) {
+    if (hourlyIsDerived(s.hourly_wage, s.base_salary, divisor)) hourly = String(Math.round((Number(r.new_base_salary) / divisor) * 10000) / 10000)
+    else kept = true
+  }
   Object.assign(s, {
     base_salary: String(r.new_base_salary),
     labor_insured_salary: String(a.p_labor),
     health_insured_salary: String(a.p_health),
     pension_wage: nextPension,
-    hourly_wage: a.p_hourly ?? s.hourly_wage,
+    hourly_wage: hourly,
   })
   let adjId: string | null = null
   if (Number(prev.base_salary) !== Number(r.new_base_salary)) {
@@ -178,15 +230,16 @@ function completeSalaryRaiseFake(a: Row) {
     completed_at: "2025-12-01T00:00:00Z",
     completed_by_emp_id: a.p_actor_emp_id,
     prev_base_salary: prev.base_salary,
+    prev_hourly_wage: prev.hourly_wage ?? null,
     prev_labor_insured_salary: Number(prev.labor_insured_salary),
     prev_health_insured_salary: Number(prev.health_insured_salary),
     prev_pension_wage: prev.pension_wage ?? null,
-    new_labor_insured_salary: r.new_labor_insured_salary ?? a.p_labor,
-    new_health_insured_salary: r.new_health_insured_salary ?? a.p_health,
-    new_pension_wage: r.new_pension_wage ?? a.p_pension ?? null,
+    new_labor_insured_salary: a.p_labor,
+    new_health_insured_salary: a.p_health,
+    new_pension_wage: a.p_pension != null ? a.p_pension : (r.new_pension_wage ?? null),
   })
   fake.db.audit_logs = [...(fake.db.audit_logs ?? []), { tenant_id: a.p_tenant_id, table_name: "salary_structures", action: "UPDATE", record_id: s.id }]
-  return { data: { id: r.id, status: "completed", completed_period: period, salary_adjustment_id: adjId, insured_change_id: insId }, error: null }
+  return { data: { id: r.id, status: "completed", completed_period: period, salary_adjustment_id: adjId, insured_change_id: insId, hourly_kept: kept, hourly_wage: hourly }, error: null }
 }
 
 const startRaise = (token: string = T.hr, over: Record<string, unknown> = {}) =>
@@ -278,7 +331,6 @@ describe("權限與輸入", () => {
     const ok = await startRaise(T.pa)
     expect(ok.status, JSON.stringify(ok.body)).toBe(201)
     expect(ok.body.raise).toMatchObject({ status: "pending", startPeriod: "2025-05", newBaseSalary: NEW, prevBaseSalary: OLD })
-    fake.injectError({ table: "salary_raises", action: "insert", error: { code: "23505", message: "duplicate key" } })
     expect((await startRaise(T.hr)).body.error).toBe("raise_already_pending")
   })
   it("稽核：開始／完成／取消各寫一筆 audit_logs", async () => {
@@ -300,6 +352,7 @@ describe("權限與輸入", () => {
     for (const action of ["select", "insert", "update"] as const)
       for (let i = 0; i < 5; i += 1)
         fake.injectError({ table: "salary_raises", action, error: { code: "PGRST205", message: "Could not find the table 'public.salary_raises'" } })
+    fake.rpcHandlers.start_salary_raise = () => ({ data: null, error: { code: "PGRST202", message: "Could not find the function public.start_salary_raise" } })
     const g = await as(T.hr).get(`/salary/${EMP}/raises`)
     expect(g.body).toEqual({ raises: [], pending: null, available: false })
     expect((await startRaise()).body.error).toBe("migration_required")
@@ -529,7 +582,7 @@ describe("驗收修正（2026-11-17）", () => {
     fake.rpcHandlers.complete_salary_raise = () => ({ data: null, error: { code: "XX000", message: "boom" } })
     const res = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2025-07" })
     expect(res.status).toBe(500)
-    expect(fake.db.salary_raises[0]).toMatchObject({ status: "pending", new_labor_insured_salary: NEW_INS, prev_base_salary: OLD })
+    expect(fake.db.salary_raises[0]).toMatchObject({ status: "pending", new_labor_insured_salary: NEW_INS, prev_base_salary: String(OLD) })
     expect(fake.db.salary_structures[0].base_salary).toBe(String(OLD))
     expect(fake.db.salary_adjustments).toHaveLength(0)
     expect(fake.rpcCalls.some((c) => c.name === "complete_salary_raise" && c.args.p_tenant_id === TENANT_ID && c.args.p_employee_id === EMP)).toBe(true)
@@ -560,11 +613,9 @@ describe("驗收修正（2026-11-17）", () => {
 
   it("建議 1：議定時薪（≠ 舊本薪÷240）調薪中照用、完成時不覆蓋；折算時薪照換算", async () => {
     expect(negotiatedHourly("monthly", "150", OLD)).toBe(false)
-    expect(negotiatedHourly("monthly", "150.005", OLD)).toBe(false)
+    expect(negotiatedHourly("monthly", "150.005", OLD)).toBe(true)
     expect(negotiatedHourly("monthly", "170", OLD)).toBe(true)
     expect(negotiatedHourly("monthly", null, OLD)).toBe(false)
-    expect(completedHourlyWage("monthly", "170", NEW, DEFAULT_RULE_CONFIG, OLD)).toBeNull()
-    expect(completedHourlyWage("monthly", "150", NEW, DEFAULT_RULE_CONFIG, OLD)).toBe(200)
     fake.db.salary_structures[0].hourly_wage = "170"
     const r = await startRaise()
     const g = await as(T.hr).get(`/salary/${EMP}/raises`)
@@ -614,5 +665,141 @@ describe("驗收修正（2026-11-17）", () => {
     expect(dangerOf("POST", `/salary/${EMP}/raises`, {})?.tier).toBe("high")
     expect(dangerOf("POST", `/salary/${EMP}/raises/x/complete`, {})?.tier).toBe("high")
     expect(dangerOf("POST", `/salary/${EMP}/raises/x/cancel`, {})).not.toBeNull()
+  })
+})
+
+describe("第三輪驗收（2026-11-17）", () => {
+  it("F1：完成後重跑「起始月之前」還沒結算的月份 → 整組舊值（本薪、時薪、勞健保）；沒有差額列；完成前的舊草稿定稿 409、重跑後可定稿", async () => {
+    const before = await baselineOld("2025-04")
+    expect((await runPayroll("2025-04")).status).toBe(201) // 完成前的草稿
+    const r = await startRaise()
+    const done = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2025-07" })
+    expect(done.status, JSON.stringify(done.body)).toBe(200)
+    expect(fake.db.salary_raises[0]).toMatchObject({ prev_hourly_wage: "150", prev_base_salary: String(OLD) })
+    // 舊草稿（沒有參照）→ 過期
+    expect((await finalize(String(slip("2025-04").id))).body.error).toBe("salary_raise_stale")
+    const inputs = await buildPayrollInputs(TENANT_ID, EMP, "2025-04")
+    expect(inputs.salary).toMatchObject({ baseSalary: OLD, hourlyWage: 150, laborInsuredSalary: OLD_INS, healthInsuredSalary: OLD_INS })
+    expect(inputs.salary?.salaryRaise).toBeUndefined()
+    await runPayroll("2025-04")
+    const b = bd("2025-04")
+    expect(b.base).toBe(OLD)
+    expect(b.hourlyWage).toBe(150)
+    expect(b.laborInsurance).toBe(before.laborInsurance)
+    expect(b.net).toBe(before.net)
+    expect(b.salaryRaise).toBeUndefined()
+    expect(b.salaryRaiseRef).toMatchObject({ id: r.body.raise.id, status: "completed", mode: "revert", prevBase: OLD })
+    expect((await finalize(String(slip("2025-04").id))).status).toBe(200)
+  })
+
+  it("R458-S4：生效月當月完成（預設完成月＝當月）→ 重跑上個月仍是舊薪", async () => {
+    const oct = await baselineOld("2026-10")
+    const r = await startRaise(T.hr, { effectiveDate: "2026-11-01" })
+    expect(r.status, JSON.stringify(r.body)).toBe(201)
+    const done = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({})
+    expect(done.status, JSON.stringify(done.body)).toBe(200)
+    expect(done.body.raise.completedPeriod).toBe("2026-11")
+    await runPayroll("2026-10")
+    expect(bd("2026-10").base).toBe(OLD)
+    expect(bd("2026-10").laborInsurance).toBe(oct.laborInsurance)
+    await runPayroll("2026-11")
+    expect(bd("2026-11").base).toBe(NEW)
+    expect(bd("2026-11").salaryRaise).toBeUndefined()
+  })
+
+  it("R458-S1／S2：沒有調薪的員工（含沒有參照欄位的舊草稿）定稿不誤擋", async () => {
+    await runPayroll("2026-10")
+    expect((await finalize(String(slip("2026-10").id))).status).toBe(200)
+    fake.db.payslips = []
+    await runPayroll("2026-09")
+    const s = slip("2026-09")
+    const b = { ...(s.breakdown as Row) }
+    delete b.salaryRaise
+    delete b.salaryRaiseRef
+    s.breakdown = b
+    expect((await finalize(String(s.id))).status).toBe(200)
+  })
+
+  it("2：完成月份上界＝租戶當月；[完成月, 當月] 有已結算月份 → 409 period_closed", async () => {
+    const r = await startRaise()
+    const future = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2026-12" })
+    expect(future.status).toBe(400)
+    expect(future.body.error).toBe("invalid_completed_period")
+    fake.db.period_closes = [{ tenant_id: TENANT_ID, period: "2026-10", status: "closed" }]
+    const closed = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2026-09" })
+    expect(closed.status).toBe(409)
+    expect(closed.body.error).toBe("period_closed")
+    expect(fake.db.salary_raises[0].status).toBe("pending")
+    // 結算月份在完成月之前 → 不影響
+    const ok = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2026-11" })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+  })
+
+  it("2：DB 函式回 raise_not_effective_yet／invalid_completed_period → 409／400", async () => {
+    const r = await startRaise()
+    fake.rpcHandlers.complete_salary_raise = () => ({ data: null, error: { code: "55000", message: "raise_not_effective_yet" } })
+    const a = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2025-07" })
+    expect(a.status).toBe(409)
+    expect(a.body).toMatchObject({ error: "raise_not_effective_yet", message: "生效月 2025-05 起才能標記完成" })
+    fake.rpcHandlers.complete_salary_raise = () => ({ data: null, error: { code: "22023", message: "invalid_completed_period" } })
+    expect((await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2025-07" })).status).toBe(400)
+  })
+
+  it("3（F2）：議定時薪判斷＝與本薪÷除數四捨五入到 0–4 位任一相等即為換算值", () => {
+    const cases: Array<[unknown, number, boolean]> = [
+      [166.6667, 40000, false],
+      [166.67, 40000, false],
+      [166.7, 40000, false],
+      [167, 40000, false],
+      [166.6, 40000, true],
+      [150, 36000, false],
+      [150.01, 36000, true],
+      ["0", 36000, false],
+    ]
+    for (const [h, b, want] of cases) expect(negotiatedHourly("monthly", h, b, 240), `${h}/${b}`).toBe(want)
+    expect(negotiatedHourly("monthly", 40000 / 174, 40000, 174)).toBe(false)
+    expect(negotiatedHourly("monthly", 40000 / 174, 40000, 240)).toBe(true)
+  })
+
+  it("4：開始調薪走 DB 函式；同員工第二筆 → 409 raise_already_pending；函式收到正確租戶／員工／操作者", async () => {
+    const a = await startRaise()
+    expect(a.status, JSON.stringify(a.body)).toBe(201)
+    const b = await startRaise(T.hr, { newBaseSalary: 50000 })
+    expect(b.status).toBe(409)
+    expect(b.body.error).toBe("raise_already_pending")
+    const call = fake.rpcCalls.find((c) => c.name === "start_salary_raise")!
+    expect(call.args).toMatchObject({ p_tenant_id: TENANT_ID, p_employee_id: EMP, p_actor_emp_id: HR, p_effective_on: "2025-05-01", p_new_base: NEW })
+    expect(fake.db.salary_raises).toHaveLength(1)
+  })
+
+  it("5（F3）：調薪完成實際填的投保值寫回 new_*，與薪資結構一致", async () => {
+    const r = await startRaise()
+    const done = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2025-07", laborInsuredSalary: 50600, healthInsuredSalary: 50600, pensionWage: 50600 })
+    expect(done.status, JSON.stringify(done.body)).toBe(200)
+    expect(done.body.raise).toMatchObject({ newLaborInsuredSalary: 50600, newHealthInsuredSalary: 50600, newPensionWage: 50600 })
+    expect(fake.db.salary_structures[0]).toMatchObject({ labor_insured_salary: "50600", health_insured_salary: "50600", pension_wage: 50600 })
+  })
+
+  it("6：時薪在 DB 函式內算（傳租戶除數）；議定時薪回 hourlyKept", async () => {
+    fake.db.rule_configs[0].config = { ...(fake.db.rule_configs[0].config as Row), payroll: { ...((fake.db.rule_configs[0].config as Row).payroll as Row), hourlyWageDivisor: 180 } }
+    fake.db.salary_structures[0].hourly_wage = "200" // 36000 ÷ 180 → 換算值
+    const r = await startRaise()
+    const done = await as(T.hr).post(`/salary/${EMP}/raises/${r.body.raise.id}/complete`).send({ completedPeriod: "2025-07" })
+    expect(done.status, JSON.stringify(done.body)).toBe(200)
+    expect(fake.rpcCalls.find((c) => c.name === "complete_salary_raise")!.args.p_divisor).toBe(180)
+    expect(done.body.hourlyKept).toBeUndefined()
+    expect(fake.db.salary_structures[0].hourly_wage).toBe(String(Math.round((NEW / 180) * 10000) / 10000))
+  })
+
+  it("R458-S8：沒有調薪時小結＋其他扣款＝實領", async () => {
+    fake.db.salary_structures[0].pension_voluntary_rate = "0.06"
+    await runPayroll("2026-10")
+    const m = moneyFromBreakdown(bd("2026-10"), "draft")!
+    const allow = Math.round((m.gross - m.base - m.overtimePay + (m.fixedAllowancesTaxFree ?? 0)) * 100) / 100
+    const sub = m.base - m.laborInsurance - m.healthInsurance + m.overtimePay - m.leaveDeduction + allow
+    const other = m.totalDeductions - m.laborInsurance - m.healthInsurance - m.leaveDeduction
+    expect(other).toBeGreaterThan(0)
+    expect(otherDeductionsNote(m)).toContain("勞退自提")
+    expect(Math.round((sub - other) * 100) / 100).toBe(Math.round((m.gross - m.totalDeductions + (m.fixedAllowancesTaxFree ?? 0)) * 100) / 100)
   })
 })

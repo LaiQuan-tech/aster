@@ -255,7 +255,7 @@ export function SalaryRaiseSection({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className={labelCls}>調薪完成月份</label>
-              <input type="month" className={inputCls} value={doneForm.completedPeriod} onChange={(e) => setDoneForm({ ...doneForm, completedPeriod: e.target.value })} />
+              <input type="month" className={inputCls} max={todayDateKey().slice(0, 7)} value={doneForm.completedPeriod} onChange={(e) => setDoneForm({ ...doneForm, completedPeriod: e.target.value })} />
             </div>
             <div>
               <label className={labelCls}>新勞保投保薪資</label>

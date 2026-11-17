@@ -16,7 +16,6 @@ import { resolveHourlyWageDivisor, resolvePensionWage } from "@hr/rules"
 import {
   SALARY_RAISE_COLS,
   SALARY_RAISE_TABLE,
-  completedHourlyWage,
   negotiatedHourly,
   toRaiseView,
   type SalaryRaiseRow,
@@ -68,6 +67,46 @@ function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null
   const x = typeof v === "number" ? v : Number(v)
   return Number.isFinite(x) ? x : null
+}
+
+/** 'YYYY-MM' from..to（含頭尾）的每個月份。 */
+function monthsBetween(from: string, to: string): string[] {
+  const out: string[] = []
+  let [y, m] = from.split("-").map(Number)
+  for (let i = 0; i < 240; i += 1) {
+    const p = `${y}-${String(m).padStart(2, "0")}`
+    if (p > to) break
+    out.push(p)
+    m += 1
+    if (m > 12) {
+      m = 1
+      y += 1
+    }
+  }
+  return out
+}
+
+/** start_salary_raise／complete_salary_raise 的錯誤碼（RAISE 訊息）→ HTTP 回應；不認得回 null（交給 500）。 */
+function mapRaiseFnError(error: { code?: string; message?: string }, startPeriod: string): { status: number; body: Record<string, unknown> } | null {
+  const msg = error.message ?? ""
+  if (error.code === "PGRST202" || (/(start|complete)_salary_raise/.test(msg) && /not find|does not exist/i.test(msg)) || isMissingTableError(error))
+    return { status: 409, body: { error: "migration_required", message: "調薪中資料表或函式尚未套用（migration 0112／0115／0116）" } }
+  const table: Array<[RegExp, number, string, string]> = [
+    [/raise_already_pending/, 409, "raise_already_pending", "此員工已有一筆「調薪中」，請先完成或取消"],
+    [/raise_overlaps_completed/, 409, "raise_overlaps_completed", "上一筆調薪較晚才完成，新的調薪生效月不可早於上一筆的完成月份"],
+    [/raise_not_effective_yet/, 409, "raise_not_effective_yet", `生效月 ${startPeriod} 起才能標記完成`],
+    [/salary_raise_not_pending/, 409, "raise_not_pending", "這筆調薪已被處理"],
+    [/salary_raise_not_found|employee_not_found/, 404, "not_found", "找不到"],
+    [/invalid_completed_period/, 400, "invalid_completed_period", `調薪完成月份須介於調薪中起始月份 ${startPeriod} 與本月之間`],
+    [/insured_required/, 400, "insured_required", "調薪完成需填新勞保投保薪資與新健保投保金額"],
+    [/salary_structure_missing/, 409, "salary_structure_missing", "此員工尚未設定薪資資料，請先儲存薪資資料"],
+    [/monthly_only/, 400, "monthly_only", "「調薪中」只適用月薪制員工"],
+    [/base_salary_missing/, 409, "base_salary_missing", "目前沒有本薪，無法標記調薪中；請直接儲存薪資資料"],
+    [/same_base_salary/, 400, "same_base_salary", "新本薪與目前本薪相同"],
+    [/actor_not_in_tenant/, 403, "forbidden", "操作者不屬於此租戶"],
+  ]
+  for (const [re, status, code, message] of table) if (re.test(msg)) return { status, body: { error: code, message } }
+  return null
 }
 
 async function employeeInTenant(tenantId: string, employeeId: string): Promise<boolean> {
@@ -214,60 +253,29 @@ salaryRaisesRouter.post(
       const startPeriod = d.effectiveDate.slice(0, 7)
       // 驗收 B-4：生效月不可是已結算／鎖定月份（PeriodClosedError → 409 period_closed）。
       await assertPeriodOpen(tenantId, startPeriod)
-      // 新調薪起始月不可早於前一筆已完成調薪的完成月（區間重疊會讓那幾個月的口徑不明）。
-      const { data: doneRows, error: doneErr } = await supabaseAdmin
-        .from(SALARY_RAISE_TABLE)
-        .select("id, completed_period")
-        .eq("tenant_id", tenantId)
-        .eq("employee_id", employeeId)
-        .eq("status", "completed")
-      if (doneErr && !isMissingTableError(doneErr)) throw new Error(`POST raises (completed): ${doneErr.message}`)
-      const lastDone = ((doneRows ?? []) as Array<{ completed_period: string | null }>)
-        .map((r) => r.completed_period ?? "")
-        .sort()
-        .pop()
-      if (lastDone && startPeriod < lastDone) {
-        res.status(409).json({ error: "raise_overlaps_completed", message: `上一筆調薪 ${lastDone} 起才完成，新的調薪生效月不可早於 ${lastDone}` })
-        return
-      }
-      const row = {
-        tenant_id: tenantId,
-        employee_id: employeeId,
-        status: "pending",
-        effective_on: d.effectiveDate,
-        start_period: startPeriod,
-        new_base_salary: d.newBaseSalary,
-        new_labor_insured_salary: d.newLaborInsuredSalary ?? null,
-        new_health_insured_salary: d.newHealthInsuredSalary ?? null,
-        new_pension_wage: d.newPensionWage ?? null,
-        prev_base_salary: prevBase,
-        prev_labor_insured_salary: num(s.labor_insured_salary),
-        prev_health_insured_salary: num(s.health_insured_salary),
-        prev_pension_wage: num(s.pension_wage),
-        note: d.note?.trim() || null,
-        created_by_emp_id: await callerEmpId(req, tenantId),
-      }
-      const { data, error } = await supabaseAdmin.from(SALARY_RAISE_TABLE).insert(row).select(SALARY_RAISE_COLS).single()
-      if (error) {
-        if (isMissingTableError(error)) {
-          res.status(409).json(MIGRATION_REQUIRED)
-          return
-        }
-        if ((error as { code?: string }).code === "23505") {
-          res.status(409).json({ error: "raise_already_pending", message: "此員工已有一筆「調薪中」，請先完成或取消" })
-          return
-        }
-        throw new Error(`POST raises: ${error.message}`)
-      }
-      const view = toRaiseView(data as unknown as SalaryRaiseRow)
-      await writeAuditLog({
-        tenantId,
-        tableName: SALARY_RAISE_TABLE,
-        recordId: view.id,
-        action: "INSERT",
-        newRow: row,
-        context: "POST /salary/:employeeId/raises — 標記調薪中",
+      // 開始調薪改走 DB 函式（migration 0116）：同員工 advisory lock 後檢查（已有調薪中、與已完成調薪重疊、月薪制、本薪）＋insert＋稽核。
+      const { data, error } = await supabaseAdmin.rpc("start_salary_raise", {
+        p_tenant_id: tenantId,
+        p_employee_id: employeeId,
+        p_actor_emp_id: await callerEmpId(req, tenantId),
+        p_effective_on: d.effectiveDate,
+        p_new_base: d.newBaseSalary,
+        p_new_labor: d.newLaborInsuredSalary ?? null,
+        p_new_health: d.newHealthInsuredSalary ?? null,
+        p_new_pension: d.newPensionWage ?? null,
+        p_note: d.note?.trim() || null,
       })
+      if (error) {
+        const mapped = mapRaiseFnError(error, startPeriod)
+        if (mapped) {
+          res.status(mapped.status).json(mapped.body)
+          return
+        }
+        throw new Error(`start_salary_raise: ${error.message}`)
+      }
+      const created = await loadRaise(tenantId, employeeId, String((data as { id?: string } | null)?.id ?? ""))
+      if (!created || created === "missing_table") throw new Error("start_salary_raise: 新增後讀不到")
+      const view = toRaiseView(created)
       res.status(201).json({ raise: view })
     } catch (err) {
       next(err)
@@ -313,10 +321,15 @@ salaryRaisesRouter.post(
         return
       }
       const completedPeriod = parsed.data.completedPeriod ?? current
-      if (completedPeriod < raise.start_period) {
-        res.status(400).json({ error: "invalid_completed_period", message: `調薪完成月份不可早於調薪中起始月份 ${raise.start_period}` })
+      // 第三輪驗收：起始月 ≤ 完成月 ≤ 租戶當月；[完成月, 當月] 不可有已結算月份（那些月份的薪資會被改口徑）。
+      if (completedPeriod < raise.start_period || completedPeriod > current) {
+        res.status(400).json({
+          error: "invalid_completed_period",
+          message: `調薪完成月份須介於調薪中起始月份 ${raise.start_period} 與本月 ${current} 之間`,
+        })
         return
       }
+      await assertPeriodOpen(tenantId, monthsBetween(completedPeriod, current))
       const labor = parsed.data.laborInsuredSalary ?? num(raise.new_labor_insured_salary)
       const health = parsed.data.healthInsuredSalary ?? num(raise.new_health_insured_salary)
       if (labor === null || health === null) {
@@ -328,17 +341,10 @@ salaryRaisesRouter.post(
         res.status(409).json({ error: "migration_required", message: "勞退月提繳工資欄位尚未套用（migration 0086）" })
         return
       }
-      const s = await loadStructure(tenantId, employeeId)
-      if (!s) {
-        res.status(409).json({ error: "salary_structure_missing", message: "此員工沒有薪資資料" })
-        return
-      }
-      const newBase = num(raise.new_base_salary) ?? 0
       const { rules } = await loadRuleConfigFor(tenantId, completedPeriod)
-      // 明示時薪只是舊本薪的折算 → 改成新本薪 ÷ 除數；議定時薪（≠ 舊本薪 ÷ 除數）不覆蓋。
-      const hourly = completedHourlyWage(s.method as string | null, s.hourly_wage, newBase, rules, num(s.base_salary))
+      const divisor = resolveHourlyWageDivisor(rules)
 
-      // 單一 DB 函式、同一交易（migration 0115）：鎖列、寫 prev_* 快照、改薪資結構、寫調薪／投保歷程、改狀態、寫稽核。
+      // 單一 DB 函式、同一交易（migration 0115／0116）：鎖列、算時薪、寫 prev_* 快照、改薪資結構、寫調薪／投保歷程、改狀態、寫稽核。
       const { data, error } = await supabaseAdmin.rpc("complete_salary_raise", {
         p_tenant_id: tenantId,
         p_employee_id: employeeId,
@@ -348,44 +354,25 @@ salaryRaisesRouter.post(
         p_labor: labor,
         p_health: health,
         p_pension: pensionInput ?? null,
-        p_hourly: hourly,
+        p_divisor: divisor,
         p_reason: raise.note?.trim() ? `調薪（${raise.note.trim()}）` : "調薪",
         p_note: `調薪完成（調薪中 ${raise.start_period} 起，${completedPeriod} 起套用新投保）`,
       })
       if (error) {
-        const msg = error.message ?? ""
-        if ((error as { code?: string }).code === "PGRST202" || (/complete_salary_raise/.test(msg) && /not find|does not exist/i.test(msg))) {
-          res.status(409).json({ error: "migration_required", message: "調薪完成函式尚未套用（migration 0115）" })
+        const mapped = mapRaiseFnError(error, raise.start_period)
+        if (mapped) {
+          res.status(mapped.status).json(mapped.body)
           return
         }
-        if (/salary_raise_not_pending/.test(msg)) {
-          res.status(409).json({ error: "raise_not_pending", message: "這筆調薪已被處理" })
-          return
-        }
-        if (/salary_raise_not_found/.test(msg)) {
-          res.status(404).json({ error: "not_found" })
-          return
-        }
-        if (/invalid_completed_period/.test(msg)) {
-          res.status(400).json({ error: "invalid_completed_period", message: `調薪完成月份不可早於調薪中起始月份 ${raise.start_period}` })
-          return
-        }
-        if (/insured_required/.test(msg)) {
-          res.status(400).json({ error: "insured_required", message: "調薪完成需填新勞保投保薪資與新健保投保金額" })
-          return
-        }
-        if (/salary_structure_missing/.test(msg)) {
-          res.status(409).json({ error: "salary_structure_missing", message: "此員工沒有薪資資料" })
-          return
-        }
-        throw new Error(`complete_salary_raise: ${msg}`)
+        throw new Error(`complete_salary_raise: ${error.message}`)
       }
       const after = await loadRaise(tenantId, employeeId, raise.id)
-      const result = (data ?? {}) as { salary_adjustment_id?: string | null; insured_change_id?: string | null }
+      const result = (data ?? {}) as { salary_adjustment_id?: string | null; insured_change_id?: string | null; hourly_kept?: boolean; hourly_wage?: number | string | null }
       res.status(200).json({
         raise: after && after !== "missing_table" ? toRaiseView(after) : null,
         history: { salaryAdjustmentId: result.salary_adjustment_id ?? null, insuredChangeId: result.insured_change_id ?? null, warnings: [] },
-        ...(hourly === null && negotiatedHourly(s.method as string | null, s.hourly_wage, num(s.base_salary)) ? { hourlyKept: num(s.hourly_wage) } : {}),
+        // 議定時薪（≠ 舊本薪 ÷ 租戶除數）沒有被改：提示 HR 確認。
+        ...(result.hourly_kept ? { hourlyKept: num(result.hourly_wage) } : {}),
       })
     } catch (err) {
       next(err)

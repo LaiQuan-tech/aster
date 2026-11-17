@@ -136,7 +136,7 @@ export function toSalaryStructure(row: SalaryRow, nhiDependents = 0, advance = 0
     // 適用勞退新制：只有明確 false 才是不適用（欄位未套用／NULL＝適用）。
     pensionNewSystem: row.pension_new_system === false ? false : undefined,
     advance,
-    ...(row.salary_raise ? { salaryRaise: { prevBase: row.salary_raise.prev_base, since: row.salary_raise.since } } : {}),
+    ...(row.salary_raise && row.salary_raise.mode !== "revert" ? { salaryRaise: { prevBase: row.salary_raise.prev_base, since: row.salary_raise.since } } : {}),
   }
 }
 

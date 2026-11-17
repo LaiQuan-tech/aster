@@ -43,6 +43,8 @@ export interface SalaryRaiseRow {
   prev_labor_insured_salary: number | null
   prev_health_insured_salary: number | null
   prev_pension_wage: number | null
+  /** 調薪完成時的舊時薪快照（migration 0116）。 */
+  prev_hourly_wage?: string | number | null
   note: string | null
   created_at: string
   completed_period: string | null
@@ -51,7 +53,7 @@ export interface SalaryRaiseRow {
 }
 
 export const SALARY_RAISE_COLS =
-  "id, employee_id, status, effective_on, start_period, new_base_salary, new_labor_insured_salary, new_health_insured_salary, new_pension_wage, prev_base_salary, prev_labor_insured_salary, prev_health_insured_salary, prev_pension_wage, note, created_at, completed_period, completed_at, cancelled_at"
+  "id, employee_id, status, effective_on, start_period, new_base_salary, new_labor_insured_salary, new_health_insured_salary, new_pension_wage, prev_base_salary, prev_labor_insured_salary, prev_health_insured_salary, prev_pension_wage, prev_hourly_wage, note, created_at, completed_period, completed_at, cancelled_at"
 
 /** 掛在記憶體內薪資列上的調薪中資訊（toSalaryStructure → SalaryStructure.salaryRaise）。 */
 export interface SalaryRowRaise {
@@ -59,6 +61,11 @@ export interface SalaryRowRaise {
   prev_base: number
   since: string
   status: SalaryRaiseStatus
+  /**
+   * raise＝調薪中口徑（新本薪＋舊投保，引擎拆「調薪差額」）；revert＝已完成調薪「起始月之前」的月份，整組還原成舊值
+   *（本薪、時薪、勞健保、勞退），不拆列、只用於定稿比對（2026-11-17 第三輪驗收 F1）。
+   */
+  mode?: "raise" | "revert"
 }
 
 function num(v: unknown): number | null {
@@ -88,6 +95,39 @@ export function pickRaiseForPeriod<T extends Pick<SalaryRaiseRow, "status" | "st
 }
 
 /**
+ * 已完成調薪對「起始月之前」月份的還原（純函式）：起始月份 > period 的已完成調薪中，取起始月最早的那筆
+ *（它的 prev_* 快照就是那個月份當時的薪資）。沒有回 null。
+ */
+export function pickRevertForPeriod<T extends Pick<SalaryRaiseRow, "status" | "start_period" | "created_at">>(
+  rows: readonly T[],
+  period: string,
+): T | null {
+  let best: T | null = null
+  for (const r of rows) {
+    if (r.status !== "completed" || !(r.start_period > period)) continue
+    if (!best || r.start_period < best.start_period || (r.start_period === best.start_period && r.created_at < best.created_at)) best = r
+  }
+  return best
+}
+
+/** 已完成調薪「起始月之前」的月份：薪資列整組換回完成時的舊值快照（純函式，不改傳入物件）。非月薪制原樣回傳。 */
+export function revertSalaryRow(row: SalaryRow, raise: SalaryRaiseRow): SalaryRow & { salary_raise?: SalaryRowRaise } {
+  if (row.method && row.method !== "monthly") return row
+  const prevBase = num(raise.prev_base_salary)
+  if (prevBase === null) return row
+  const out: SalaryRow & { salary_raise?: SalaryRowRaise } = {
+    ...row,
+    base_salary: String(prevBase),
+    hourly_wage: raise.prev_hourly_wage != null && raise.prev_hourly_wage !== "" ? String(raise.prev_hourly_wage) : null,
+    labor_insured_salary: raise.prev_labor_insured_salary != null ? String(raise.prev_labor_insured_salary) : null,
+    health_insured_salary: raise.prev_health_insured_salary != null ? String(raise.prev_health_insured_salary) : null,
+    salary_raise: { raise_id: raise.id, prev_base: prevBase, since: raise.start_period, status: raise.status, mode: "revert" },
+  }
+  if ("pension_wage" in row) out.pension_wage = raise.prev_pension_wage
+  return out
+}
+
+/**
  * 純函式：薪資列 ＋ 該月適用的調薪中 → 計薪用的薪資列（不改傳入的物件）。
  * 非月薪制、新本薪無效 → 原樣回傳。
  */
@@ -108,7 +148,7 @@ export function applyRaiseToSalaryRow(
     // 時薪基準＝新本薪 ÷ 240（引擎 resolveHourlyWage）：明示時薪若只是舊本薪的折算（＝舊本薪÷除數），調薪中期間不用；
     // 與舊本薪÷除數不同（差 > 0.01）＝議定時薪，照用手填值（驗收建議 1）。
     hourly_wage: negotiatedHourly(row.method, row.hourly_wage, prevBase, divisor) ? row.hourly_wage : null,
-    salary_raise: { raise_id: raise.id, prev_base: prevBase ?? 0, since: raise.start_period, status: raise.status },
+    salary_raise: { raise_id: raise.id, prev_base: prevBase ?? 0, since: raise.start_period, status: raise.status, mode: "raise" },
   }
   if (completed) {
     out.labor_insured_salary = raise.prev_labor_insured_salary != null ? String(raise.prev_labor_insured_salary) : null
@@ -140,7 +180,6 @@ export async function applySalaryRaises(
       .eq("tenant_id", tenantId)
       .in("employee_id", ids.slice(i, i + 100))
       .in("status", ["pending", "completed"])
-      .lte("start_period", period)
     if (error) {
       if (isMissingTableError(error)) {
         warnSchemaGapOnce("salary_raises", error)
@@ -157,10 +196,16 @@ export async function applySalaryRaises(
     byEmp.set(r.employee_id, list)
   }
   for (const [empId, rows] of byEmp) {
-    const raise = pickRaiseForPeriod(rows, period)
     const row = salaryByEmployee.get(empId)
-    if (!raise || !row) continue
-    salaryByEmployee.set(empId, applyRaiseToSalaryRow(row, raise, divisor))
+    if (!row) continue
+    const raise = pickRaiseForPeriod(rows, period)
+    if (raise) {
+      salaryByEmployee.set(empId, applyRaiseToSalaryRow(row, raise, divisor))
+      continue
+    }
+    // 已完成調薪「起始月之前」的月份（例：完成後重跑生效前還沒結算的月份）→ 還原舊值快照。
+    const revert = pickRevertForPeriod(rows, period)
+    if (revert) salaryByEmployee.set(empId, revertSalaryRow(row, revert))
   }
 }
 
@@ -172,8 +217,15 @@ export function negotiatedHourly(method: string | null | undefined, hourly: unkn
   if (method && method !== "monthly") return false
   const h = num(hourly)
   if (h === null || h <= 0) return false
-  if (base === null || base <= 0) return true
-  return Math.abs(h - base / divisor) > 0.01
+  if (base === null || base <= 0 || !(divisor > 0)) return true
+  // 換算值＝本薪 ÷ 除數 四捨五入到 0–4 位小數任一相等（第三輪驗收 F2；與 DB 函式 salary_hourly_is_derived 同規則）。
+  const exact = base / divisor
+  if (Math.abs(exact - h) < 1e-9) return false
+  for (let k = 0; k <= 4; k += 1) {
+    const f = 10 ** k
+    if (Math.abs(Math.round(exact * f) / f - h) < 1e-9) return false
+  }
+  return true
 }
 
 /** 某員工某月計薪實際用的薪資列（salary_structures ＋ 該月適用的調薪中；與 loadPayrollInputs 同一條路）。沒有薪資列回 null。 */
@@ -203,12 +255,20 @@ export interface SalaryRaiseRef {
   status: SalaryRaiseStatus
   prevBase: number
   newBase: number
+  /** revert＝已完成調薪起始月之前的月份（整組舊值）；省略＝raise。 */
+  mode?: "raise" | "revert"
 }
 
 export function salaryRaiseRefOf(row: (SalaryRow & { salary_raise?: SalaryRowRaise }) | null | undefined): SalaryRaiseRef | null {
   const r = row?.salary_raise
   if (!r) return null
-  return { id: r.raise_id, status: r.status, prevBase: r.prev_base, newBase: num(row?.base_salary) ?? 0 }
+  return {
+    id: r.raise_id,
+    status: r.status,
+    prevBase: r.prev_base,
+    newBase: num(row?.base_salary) ?? 0,
+    ...(r.mode === "revert" ? { mode: "revert" as const } : {}),
+  }
 }
 
 /**
@@ -223,26 +283,10 @@ export function salaryRaiseStale(breakdown: unknown, expected: SalaryRaiseRef | 
   return (
     ref.id !== expected.id ||
     ref.status !== expected.status ||
+    (ref.mode ?? "raise") !== (expected.mode ?? "raise") ||
     Math.round(Number(ref.prevBase) * 100) !== Math.round(expected.prevBase * 100) ||
     Math.round(Number(ref.newBase) * 100) !== Math.round(expected.newBase * 100)
   )
-}
-
-/** 調薪完成時，月薪制原本「明示」的時薪（加班費基準）改成新本薪 ÷ 除數（四捨五入到小數 4 位）；沒明示回 null＝不動。 */
-export function completedHourlyWage(
-  method: string | null | undefined,
-  prevHourly: unknown,
-  newBase: number,
-  rules: Parameters<typeof resolveHourlyWageDivisor>[0],
-  prevBase: number | null = null,
-): number | null {
-  if (method && method !== "monthly") return null
-  const h = num(prevHourly)
-  if (h === null || h <= 0) return null
-  const divisor = resolveHourlyWageDivisor(rules)
-  // 議定時薪（≠ 舊本薪 ÷ 除數）不覆蓋（驗收建議 1）。
-  if (prevBase !== null && negotiatedHourly(method, h, prevBase, divisor)) return null
-  return Math.round((newBase / divisor) * 10000) / 10000
 }
 
 /** API 回應用。 */
