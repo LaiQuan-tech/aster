@@ -1,5 +1,6 @@
 "use client";
 
+import { BOUND_SUBCONTRACT_LOCKED_NOTE, useCanManageBoundSubcontracts } from "@/lib/use-bound-subcontract-permission";
 import { Fragment, useState } from "react";
 import { MoneyInput } from "@/components/MoneyInput";
 import Link from "next/link";
@@ -95,6 +96,7 @@ export function SubcontractsCard({
 }: SubcontractsCardProps) {
   /** 正在送驗收確認的那一期（`subId:installmentNo`）。 */
   const [acceptingKey, setAcceptingKey] = useState<string | null>(null);
+  const canManageBound = useCanManageBoundSubcontracts();
   function patchSub(idx: number, patch: Partial<Subcontract>) {
     setSubDraft((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   }
@@ -351,7 +353,12 @@ export function SubcontractsCard({
                       ) : (
                         <span className="mr-2 text-xs text-gray-300" title="存檔後才能編輯期款">期款</span>
                       )}
-                      <button type="button" className="text-xs text-gray-400 hover:text-red-600" onClick={() => removeSubRow(idx)}>移除</button>
+                      {row.id && row.vendorId && !canManageBound ? (
+                        // S2 擴大（2026-11-17）：已綁定名冊廠商的副委託，刪除只限老闆／平台管理員。
+                        <span className="cursor-not-allowed text-xs text-gray-300" title={BOUND_SUBCONTRACT_LOCKED_NOTE}>移除</span>
+                      ) : (
+                        <button type="button" className="text-xs text-gray-400 hover:text-red-600" onClick={() => removeSubRow(idx)}>移除</button>
+                      )}
                     </td>
                   </tr>
                   <SubcontractHintRow row={row} payments={row.id ? paymentsDraft[row.id] : undefined} onClearRate={() => patchSub(idx, { withholdingRate: 0 })} />

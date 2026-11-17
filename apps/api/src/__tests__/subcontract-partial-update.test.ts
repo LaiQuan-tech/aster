@@ -197,6 +197,7 @@ describe("副委託整批 PUT：更新既有列只寫有帶的欄位", () => {
   })
 
   it("同時送 vendorId＋vendorName → 兩欄一起改", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR_EMP_ID } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     fake.db.vendors!.push({ id: VENDOR_ID_2, tenant_id: TENANT_ID, name: "測試另一家事務所", deleted_at: null })
     const res = await put([
       { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: "測試另一家事務所", rebindReason: "測試原因" },
@@ -207,6 +208,7 @@ describe("副委託整批 PUT：更新既有列只寫有帶的欄位", () => {
   })
 
   it("送 vendorId: null＋新 vendorName → 清掉 vendor_id、改名（非登錄廠商）", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR_EMP_ID } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     const res = await put([
       { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試臨時廠商", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000 },
@@ -329,6 +331,7 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
   })
 
   it("換 vendorId 配名冊名稱（前後空白不計）→ 200", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR_EMP_ID } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     addVendor2()
     const res = await put([
       { id: SUB_FIRM, amount: 100000, vendorId: VENDOR_ID_2, vendorName: " 測試乙廠商  ", rebindReason: "測試原因" },
@@ -371,6 +374,7 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
   })
 
   it("vendorId: null＋任意名稱（既有列與新建列）→ 200", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR_EMP_ID } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     const res = await put([
       { id: SUB_FIRM, amount: 100000, vendorId: null, vendorName: "測試隨便一家", rebindReason: "測試原因" },
       { id: SUB_PLAIN, amount: 30000, vendorId: null, vendorName: "測試另一個名字" },
@@ -456,6 +460,7 @@ describe("副委託整批 PUT：vendorId 與 vendorName 必須是名冊上同一
   })
 
   it("申請單整張表：發包單位改成名冊上的名稱（前端依名稱配到 vendorId）→ 200", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR_EMP_ID } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     addVendor2()
     // project-application-sheet-save.ts：vendorName 經 textOrNull（trim）後與 ctx.vendors 的 name 完全相同才配 vendorId。
     const res = await put([
@@ -535,6 +540,7 @@ describe("R1a：副委託已有放款單分攤時不可換廠商（2026-11-16）
   })
 
   it("放款單已作廢 → 可換廠商；廠商沒變（只改金額）→ 不擋", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR_EMP_ID } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     seed("void")
     expect((await changeVendor()).status).toBe(200)
     fake.db.disbursements = [{ id: DISB_ID, tenant_id: TENANT_ID, status: "draft" }]
@@ -546,6 +552,7 @@ describe("R1a：副委託已有放款單分攤時不可換廠商（2026-11-16）
   })
 
   it("舊格式分攤列只有 subcontract_payment_id（subcontract_id 為 null）→ 透過期款找到副委託，換廠商也 409", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR_EMP_ID } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     seed("draft")
     fake.db.project_subcontract_payments = [{ id: PAY_ID, tenant_id: TENANT_ID, subcontract_id: SUB_FIRM, installment_no: 1, paid_on: null }]
     fake.db.disbursement_allocations = [

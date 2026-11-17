@@ -213,6 +213,8 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "PATCH", path: "/disbursements/:id", tier: "high", label: "修改放款單收款銀行帳戶", when: hasBankKey },
   { method: "PATCH", path: "/disbursements/:id", label: "修改放款單" },
   { method: "PUT", path: "/projects/:id/subcontracts", tier: "high", label: "修改複委託（改綁／解除綁定名冊廠商，或確認名稱相近為不同公司）", when: rebindsSubcontractVendor },
+  // 業主決定（2026-11-17 S2 擴大）：批次 PUT 帶 deleteReason＝會刪除副委託（綁名冊廠商的只限老闆／平台管理員）→ 最高風險。
+  { method: "PUT", path: "/projects/:id/subcontracts", tier: "high", label: "刪除複委託", when: (b) => !!b && typeof b === "object" && typeof (b as Record<string, unknown>).deleteReason === "string" && ((b as Record<string, unknown>).deleteReason as string).trim() !== "" },
   { method: "POST", path: "/projects", tier: "high", label: "建立專案（副委託名稱與名冊廠商相近）", when: confirmsDistinctInitialSubcontract },
   { method: "PUT", path: "/projects/:id/subcontracts", label: "修改複委託" },
   { method: "POST", path: "/projects/:id/subcontracts/:sid/payments/:installmentNo/accept", label: "複委託付款驗收" },

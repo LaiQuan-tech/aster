@@ -1167,3 +1167,10 @@ describe("終驗：MCP 確認頁——廠商單只標以名冊為準、戶名保
     expect(holderText(long)).toBe(`「${"測".repeat(40)}…（共 45 字）」`)
   })
 })
+
+describe("2026-11-17 S2 擴大：MCP 副委託刪除最高風險", () => {
+  it("PUT /projects/:id/subcontracts 帶 deleteReason → high；沒帶 → 一般", () => {
+    expect(dangerOf("PUT", `/projects/${PROJECT}/subcontracts`, { subcontracts: [], deleteReason: "測試" })?.tier).toBe("high")
+    expect(dangerOf("PUT", `/projects/${PROJECT}/subcontracts`, { subcontracts: [] })?.tier).not.toBe("high")
+  })
+})

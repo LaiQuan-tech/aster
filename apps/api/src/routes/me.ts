@@ -200,6 +200,8 @@ meRouter.get(
         canSeeGroupOverview: canSeeGroupOverview({ role: data.role as string, status: data.status as string | null }),
         // 2026-11-17 驗收 S1／F5：能不能覆核廠商收款帳戶變更（在職的設定老闆或 platform_admin）；前端據此才顯示覆核區塊。
         canReviewVendorBankChanges: bossLookupOk && isBossOrPlatformAdmin(bossEmpId, self),
+        // 2026-11-17 S2 擴大：能不能解除／改綁／刪除已綁定名冊廠商的副委託（同上：在職的設定老闆或 platform_admin）。
+        canManageBoundSubcontracts: bossLookupOk && isBossOrPlatformAdmin(bossEmpId, self),
       })
     } catch (err) {
       next(err)

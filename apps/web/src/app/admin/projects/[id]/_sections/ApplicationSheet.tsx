@@ -1,5 +1,6 @@
 "use client";
 
+import { BOUND_SUBCONTRACT_LOCKED_NOTE, useCanManageBoundSubcontracts } from "@/lib/use-bound-subcontract-permission";
 import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Button, PrimaryButton } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
@@ -342,6 +343,8 @@ export function ApplicationSheet({
   const report = controlledReport !== undefined ? controlledReport : localReport;
   const setReport = onSaveReport ?? setLocalReport;
   const editable = canFinance && !print && !readOnly;
+  /** S2 擴大（2026-11-17）：已綁定名冊廠商的發包列，只有老闆／平台管理員能改單位（改綁／解綁）或移除。 */
+  const canManageBound = useCanManageBoundSubcontracts();
   /** 付款階段的「獎金分潤／發獎金日」兩欄（看得到才畫；列印與舊版檢視不畫）。 */
   const shareView: BillingSharesView = canFinance && !print && !readOnly && billingShares?.available ? billingShares : null;
   const showShares = !!shareView;
@@ -1121,6 +1124,8 @@ export function ApplicationSheet({
   const subTh = "border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-medium text-gray-600 print:px-1 print:py-0.5 print:text-[11px]";
   const subRowNodes = subRows.map((slot, idx) => {
     const n = idx + 1;
+    // S2 擴大：已綁定名冊廠商的列，非老闆／平台管理員不能改單位名稱（＝改綁／解綁）也不能移除。
+    const boundLocked = !!slot.sub?.vendorId && !canManageBound;
     const removed = !!slot.sub?.id && subRemoved.has(slot.sub.id);
     const paid = subcontractHasPaid(slot.sub);
     const rowLabel = `發包第 ${n} 列`;
@@ -1138,7 +1143,7 @@ export function ApplicationSheet({
           data-invalid={bad ? "true" : undefined}
           data-testid={`sheet-sub-${n}-${field}`}
         >
-          {editable && !removed ? (
+          {editable && !removed && !(field === "vendorName" && boundLocked) ? (
             <input
               aria-label={`${rowLabel}${header}`}
               className={`${cellInput} ${isAmount ? "text-right tabular-nums" : ""}`}
@@ -1154,7 +1159,10 @@ export function ApplicationSheet({
           ) : isAmount ? (
             slot.sub ? fmtMoney(slot.sub.amount) : ""
           ) : (
-            <span className="whitespace-normal break-words">{slot.sub?.[field] ?? ""}</span>
+            <span className="whitespace-normal break-words" title={field === "vendorName" && boundLocked ? BOUND_SUBCONTRACT_LOCKED_NOTE : undefined}>
+              {slot.sub?.[field] ?? ""}
+              {field === "vendorName" && boundLocked && editable && <span className="ml-1 text-[11px] text-gray-400 print:hidden">🔒</span>}
+            </span>
           )}
         </td>
       );
@@ -1171,6 +1179,8 @@ export function ApplicationSheet({
               </button>
             ) : slot.sub && paid ? (
               <span className="cursor-not-allowed text-xs text-gray-300" title="已有付款紀錄的發包不能移除；要移除請先到下方「副委託」撤銷付款">移除</span>
+            ) : boundLocked ? (
+              <span className="cursor-not-allowed text-xs text-gray-300" title={BOUND_SUBCONTRACT_LOCKED_NOTE}>移除</span>
             ) : (
               <button
                 type="button"

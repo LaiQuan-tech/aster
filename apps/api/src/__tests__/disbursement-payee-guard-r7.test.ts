@@ -245,6 +245,7 @@ describe("第七輪 H1：既有列解除名冊綁定（A → null）也要原因
     expect((await create(other("測試甲工程行"))).body.error).toBe("payee_is_registered_vendor")
   })
   it("第八輪：期款都已付 → 解除綁定也要原因；帶原因 → 200", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.subcontract_id === SA1 ? { ...p, paid_on: "2026-11-01" } : p))
     const res = await putSubs(P1, await subsBody(P1, (x) => (x.id === SA1 ? { ...x, vendorId: null, vendorName: "測試另一下包" } : x)))
     expect(res.status, r(res)).toBe(400)
@@ -421,5 +422,79 @@ describe("第七輪 MCP：副委託改綁／解除綁定升最高風險", () => 
     expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ id: "s1", vendorId: null, vendorName: "x", amount: 1 }] })?.tier).toBe("medium")
     expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ vendorId: null, vendorName: "x", amount: 1 }] })?.tier).toBe("medium")
     expect(dangerOf("PUT", "/projects/p1/subcontracts", { subcontracts: [{ id: "s1", amount: 1 }] })?.tier).toBe("medium")
+  })
+})
+
+describe("2026-11-17 S2 擴大（業主決定）：已綁定名冊廠商的副委託，解除／改綁／刪除一律限老闆或平台管理員", () => {
+  const ACC = "bbbbbbbb-0000-4000-8000-0000000000c1"
+  const PA = "bbbbbbbb-0000-4000-8000-0000000000c2"
+  const putAs = (token: string, project: string, body: Row) => request(app).put(`/projects/${project}/subcontracts`).set("Authorization", `Bearer ${token}`).send(body)
+  beforeEach(() => {
+    fake.db.employees!.push(
+      { id: ACC, tenant_id: TENANT_ID, user_id: "acc-user", role: "accountant", dept_id: null, name: "測試會計", status: "active", emp_no: null, created_at: "2026-01-01T00:00:00.000Z" },
+      { id: PA, tenant_id: TENANT_ID, user_id: "pa-user", role: "platform_admin", dept_id: null, name: "測試平台管理員", status: "active", emp_no: null, created_at: "2026-01-01T00:00:00.000Z" },
+    )
+  })
+  const unbind = (x: Row) => (x.id === SA1 ? { ...x, vendorId: null, vendorName: "測試另一下包", rebindReason: "測試" } : x)
+  const rebindToB = (x: Row) => (x.id === SA1 ? { ...x, vendorId: VB, vendorName: "測試乙工程行", rebindReason: "測試" } : x)
+  const subA1 = () => fake.db.project_subcontracts!.find((s) => s.id === SA1)!
+
+  it.each([["HR", "hr-user"], ["會計", "acc-user"]])("%s：解除綁定、改綁、刪除（省略列）、期款改 0／已付後解綁 → 403，副委託不動", async (_l, token) => {
+    const body = await subsBody(P1, (x) => x)
+    for (const change of [unbind, rebindToB]) {
+      const res = await putAs(token, P1, { subcontracts: (body.subcontracts as Row[]).map(change) })
+      expect(res.status).toBe(403)
+      expect(res.body.error).toBe("rebind_requires_boss")
+    }
+    const del = await putAs(token, P1, { subcontracts: (body.subcontracts as Row[]).filter((x) => x.id !== SA1), deleteReason: "測試刪除" })
+    expect(del.status).toBe(403)
+    expect(del.body.error).toBe("subcontract_delete_requires_boss")
+    // 期款金額改 0、或都標已付 → 仍 403（不再看有無未付）
+    fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.subcontract_id === SA1 ? { ...p, amount: "0" } : p))
+    expect((await putAs(token, P1, { subcontracts: (body.subcontracts as Row[]).map(unbind) })).status).toBe(403)
+    fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.subcontract_id === SA1 ? { ...p, amount: "1000", paid_on: "2026-11-01" } : p))
+    expect((await putAs(token, P1, { subcontracts: (body.subcontracts as Row[]).map(unbind) })).status).toBe(403)
+    expect(subA1()).toMatchObject({ vendor_id: VA, deleted_at: null })
+  })
+
+  it("刪除後重建（同一個 PUT 省略原列＋新增非登錄列）→ 403，原列不刪、也沒新增", async () => {
+    const body = await subsBody(P1, (x) => x)
+    const before = fake.db.project_subcontracts!.length
+    const res = await putAs("acc-user", P1, {
+      subcontracts: [...(body.subcontracts as Row[]).filter((x) => x.id !== SA1), { kind: "subcontract", vendorId: null, vendorName: "測試重建下包", amount: 1000 }],
+      deleteReason: "測試重建",
+    })
+    expect(res.status).toBe(403)
+    expect(fake.db.project_subcontracts!.length).toBe(before)
+    expect(subA1().deleted_at).toBeNull()
+  })
+
+  it("平台管理員可以解除綁定；設定的老闆（此處為 HR 角色）可以改綁與刪除", async () => {
+    const body = await subsBody(P1, (x) => x)
+    const res = await putAs("pa-user", P1, { subcontracts: (body.subcontracts as Row[]).map(unbind) })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(subA1().vendor_id).toBeNull()
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }]
+    const body2 = await subsBody(P1, (x) => x)
+    const rebind = await putAs("hr-user", P1, { subcontracts: (body2.subcontracts as Row[]).map((x) => (x.id === SB ? { ...x, vendorId: VA, vendorName: "測試甲工程行", rebindReason: "測試" } : x)) })
+    expect(rebind.status, JSON.stringify(rebind.body)).toBe(200)
+    // 已驗收的期別本來就不能刪（既有規則）；先撤銷驗收，驗證過得了老闆檢查。
+    fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.subcontract_id === SB ? { ...p, accepted_on: null } : p))
+    const body3 = await subsBody(P1, (x) => x)
+    const del = await putAs("hr-user", P1, { subcontracts: (body3.subcontracts as Row[]).filter((x) => x.id !== SB), deleteReason: "測試刪除" })
+    expect(del.status, JSON.stringify(del.body)).toBe(200)
+    expect(fake.db.project_subcontracts!.find((s) => s.id === SB)!.deleted_at).not.toBeNull()
+  })
+
+  it("第一次綁定（原本 vendor_id 為空）不受限；刪除非登錄列也不受限", async () => {
+    const body = await subsBody(P1, (x) => (x.id === SF ? { ...x, vendorId: VC, vendorName: "測試丙無帳戶行" } : x))
+    const res = await putAs("acc-user", P1, body)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(fake.db.project_subcontracts!.find((s) => s.id === SF)!.vendor_id).toBe(VC)
+    // 另建一筆非登錄列再刪
+    fake.db.project_subcontracts!.push(subRow("dddddddd-0000-4000-8000-0000000000f9", P1, null, "測試臨時下包"))
+    const b2 = await subsBody(P1, (x) => x)
+    const del = await putAs("acc-user", P1, { subcontracts: (b2.subcontracts as Row[]).filter((x) => x.id !== "dddddddd-0000-4000-8000-0000000000f9"), deleteReason: "測試" })
+    expect(del.status, JSON.stringify(del.body)).toBe(200)
   })
 })

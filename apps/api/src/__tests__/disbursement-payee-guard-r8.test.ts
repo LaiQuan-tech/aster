@@ -410,6 +410,7 @@ describe("第八輪 H1：改綁一律留原因", () => {
     expect(fake.db.project_subcontracts!.find((s) => s.id === SA1)!.vendor_id).toBe(VA)
   })
   it("沒有任何期款也要原因；帶了 → 200 且嚴格稽核", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.filter((p) => p.subcontract_id !== SB)
     const no = await putSubs(P1, await subsBody(P1, (x) => (x.id === SB ? { ...x, vendorId: VC, vendorName: "測試丙無帳戶行" } : x)))
     expect(no.status).toBe(400)

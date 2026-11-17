@@ -844,9 +844,10 @@ export async function serializeMany(tenantId: string, rows: DisbursementRow[]): 
  * 這是「解除綁定後改用其他收款繞過名冊帳戶確認」的樣態，請核准人確認收款對象。查詢失敗不擋顯示（記 log）。
  */
 async function attachRebindWarning(tenantId: string, items: SerializedDisbursement[]): Promise<void> {
-  const targets = items.filter((d) => d.payeeKind === "other" && d.allocations.some((a) => !!a.subcontractId))
+  const targets = items.filter((d) => d.payeeKind === "other" && d.allocations.length > 0)
   if (targets.length === 0) return
   const subIds = [...new Set(targets.flatMap((d) => d.allocations.map((a) => a.subcontractId).filter((v): v is string => !!v)))]
+  const projectIds = [...new Set(targets.flatMap((d) => d.allocations.map((a) => a.projectId).filter((v): v is string => !!v)))]
   try {
     const rebound = new Set<string>()
     for (let i = 0; i < subIds.length; i += 100) {
@@ -863,12 +864,31 @@ async function attachRebindWarning(tenantId: string, items: SerializedDisburseme
         if (r.record_id && typeof reason === "string" && reason.trim()) rebound.add(r.record_id.toLowerCase())
       }
     }
+    // S2 擴大（2026-11-17）：同專案曾刪除過綁定名冊廠商的副委託（刪掉再建非登錄的，就能改用手動帳戶收款）→ 也紅框。
+    const projectsWithDeletedBound = new Set<string>()
+    for (let i = 0; i < projectIds.length; i += 100) {
+      const { data, error } = await supabaseAdmin
+        .from("project_subcontracts")
+        .select("project_id")
+        .eq("tenant_id", tenantId)
+        .in("project_id", projectIds.slice(i, i + 100))
+        .not("deleted_at", "is", null)
+        .not("vendor_id", "is", null)
+      if (error) throw new Error(error.message)
+      for (const r of (data ?? []) as Array<{ project_id: string | null }>) if (r.project_id) projectsWithDeletedBound.add(r.project_id.toLowerCase())
+    }
     for (const d of targets) {
       const hit = d.allocations.map((a) => a.subcontractId).filter((v): v is string => !!v && rebound.has(v.toLowerCase()))
+      const deletedIn = d.allocations.map((a) => a.projectId).filter((v): v is string => !!v && projectsWithDeletedBound.has(v.toLowerCase()))
       if (hit.length > 0) {
         d.payeeRebindWarning = {
           message: "分攤的副委託曾解除或改綁名冊廠商，這張單改用手動輸入的帳戶收款，請確認收款對象與帳號",
           subcontractIds: [...new Set(hit)],
+        }
+      } else if (deletedIn.length > 0) {
+        d.payeeRebindWarning = {
+          message: "這個專案曾刪除過綁定名冊廠商的副委託，這張單改用手動輸入的帳戶收款，請確認收款對象與帳號",
+          subcontractIds: [],
         }
       }
     }

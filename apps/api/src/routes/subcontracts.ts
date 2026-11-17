@@ -1,5 +1,4 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
-import { subcontractsWithUnpaidInstallments } from "../services/vendor-unpaid.js"
 import { isBossOrPlatformAdmin, loadConfiguredBossEmpId } from "../lib/boss.js"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -614,6 +613,17 @@ subcontractsRouter.put(
           res.status(400).json({ error: "delete_reason_required", ids: removing.map((s) => s.id) })
           return
         }
+        // 業主決定（2026-11-17 S2 擴大）：目前綁定名冊廠商的副委託，刪除（含批次省略列）一律限在職的設定老闆或 platform_admin
+        // ——不論有無未付期款、金額是否為 0（刪掉再建一筆非登錄的，就能改用「其他」手動帳戶收款）。
+        const boundRemoving = removing.find((r) => !!r.vendor_id)
+        if (boundRemoving && !isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), scope.self)) {
+          res.status(403).json({
+            error: "subcontract_delete_requires_boss",
+            subcontractId: boundRemoving.id,
+            message: "這筆副委託已綁定名冊廠商，刪除只限老闆或平台管理員操作",
+          })
+          return
+        }
         const removingIds = removing.map((s) => s.id)
         const paidRows = await loadPayments(tenantId, removingIds)
         const paid = paidRows.find((p) => p.paid_on !== null || p.paid_amount !== null)
@@ -688,16 +698,15 @@ subcontractsRouter.put(
           })
           return
         }
-        // 驗收 S2（2026-11-17）：副委託仍有未付期款時，解除綁定或改綁另一家＝改變期款的收款對象（可改用「其他」手動帳戶繞過名冊帳戶確認）
-        // → 只限在職的設定老闆或 platform_admin 操作；其他人（含 HR、會計）帶 rebindReason 也 403 rebind_requires_boss。
-        const unpaidSubs = await subcontractsWithUnpaidInstallments(tenantId, rebinds.map((p) => p.id!), `PUT /projects/${projectId}/subcontracts (rebind)`)
-        if (unpaidSubs.size > 0 && !isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), scope.self)) {
-          const blocked = rebinds.find((p) => unpaidSubs.has(p.id!))!
+        // 業主決定（2026-11-17 S2 擴大）：目前綁定名冊廠商的副委託，解除綁定或改綁另一家（改變期款的收款對象）一律限在職的設定老闆
+        // 或 platform_admin——不論有無未付期款、金額是否為 0（「先標已付／改 0 再解綁」的繞過一併堵住）。第一次綁定不受限。
+        if (!isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), scope.self)) {
+          const blocked = rebinds[0]!
           res.status(403).json({
             error: "rebind_requires_boss",
             id: blocked.id,
             index: payload.indexOf(blocked),
-            message: "這筆副委託還有未付期款，解除或改綁名冊廠商（改變收款對象）只限老闆或平台管理員操作",
+            message: "這筆副委託已綁定名冊廠商，解除或改綁（改變收款對象）只限老闆或平台管理員操作",
           })
           return
         }

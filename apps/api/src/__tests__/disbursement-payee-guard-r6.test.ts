@@ -265,6 +265,7 @@ describe("第六輪第 4 項 F1：副委託改綁另一家登錄廠商", () => {
     expect(fake.db.project_subcontracts!.find((s) => s.id === SA1)!.vendor_id).toBe(VA)
   })
   it("第八輪：期款都已付（有付款日）也要原因；非登錄→登錄、登錄→同一家 不算改綁", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }] // 2026-11-17 S2 擴大：改綁限老闆，這裡以老闆身分驗原有規則
     fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.id === PC ? { ...p, paid_on: "2026-11-01" } : p))
     const body = await subsBody(P2, (x) => (x.id === SC ? { ...x, vendorId: VE, vendorName: "ABC Design Ltd" } : x))
     const res = await as(request(app).put(`/projects/${P2}/subcontracts`)).send(body)

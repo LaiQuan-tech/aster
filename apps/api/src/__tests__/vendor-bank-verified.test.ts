@@ -610,3 +610,21 @@ describe("驗收第六輪：harness 情境 a–i（後端）", () => {
     await expect(submitDisbursement(TENANT_ID, actor, DISB)).rejects.toMatchObject({ code: "payee_bank_changed" })
   })
 })
+
+describe("2026-11-17 S2 擴大：同專案曾刪除綁名冊廠商的副委託 → 其他收款單紅框", () => {
+  it("專案內有已刪除且綁廠商的副委託 → payeeRebindWarning（刪除）；沒有 → 不標", async () => {
+    fake.db.disbursement_approval_steps = [{
+      id: "99999999-0000-4000-8000-000000000001", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: HR,
+      candidate_emp_ids: [HR], step_kind: "manager", decision: "pending", comment: null, acted_at: null, acted_by_emp_id: null, created_at: "2026-11-01T00:00:00.000Z",
+    }]
+    fake.db.project_subcontracts!.push({ id: "dddddddd-0000-4000-8000-0000000000d9", tenant_id: TENANT_ID, project_id: PROJECT, deleted_at: "2026-11-10T00:00:00.000Z", kind: "subcontract", amount: "100", vendor_id: VENDOR_A, vendor_name: "測試甲工程行", created_at: "2026-01-01T00:00:00.000Z" })
+    fake.db.project_subcontracts![0]!.vendor_id = null
+    fake.db.disbursements = [header("", { payee_kind: "other", vendor_id: null, payee_name: "測試某人", payee_bank_account: "0009999 測試某人", status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT })]
+    fake.db.disbursement_allocations = [alloc()]
+    const res = await as("hr-user", request(app).get("/disbursements/pending-approvals"))
+    expect(res.body.disbursements[0].payeeRebindWarning?.message).toContain("曾刪除過綁定名冊廠商的副委託")
+    fake.db.project_subcontracts = fake.db.project_subcontracts!.filter((s) => s.id !== "dddddddd-0000-4000-8000-0000000000d9")
+    const res2 = await as("hr-user", request(app).get("/disbursements/pending-approvals"))
+    expect(res2.body.disbursements[0].payeeRebindWarning).toBeUndefined()
+  })
+})
