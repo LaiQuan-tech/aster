@@ -182,23 +182,8 @@ async function debitLeaveBalance(
 
   const bucket = await resolveBalanceBucket(supabase, tenantId, req.employee_id, leaveTypeId, startDate)
   if (bucket) {
-    let cur: { used: number; usedRaw: string | number | null } = { used: bucket.used, usedRaw: bucket.usedRaw }
-    for (let attempt = 0; attempt < DEBIT_CAS_ATTEMPTS; attempt += 1) {
-      let q = supabase
-        .from("leave_balances")
-        .update({ used: Math.round((cur.used + hours) * 100) / 100, updated_at: new Date().toISOString() })
-        .eq("id", bucket.id)
-      q = cur.usedRaw === null ? q.is("used", null) : q.eq("used", cur.usedRaw)
-      const { data, error: upErr } = await q.select("id")
-      if (upErr) throw new Error(`ledger debitLeaveBalance (update): ${upErr.message}`)
-      if ((data ?? []).length > 0) return
-      const { data: row, error: readErr } = await supabase.from("leave_balances").select("id, used").eq("id", bucket.id).maybeSingle()
-      if (readErr) throw new Error(`ledger debitLeaveBalance (reread): ${readErr.message}`)
-      if (!row) throw new Error("ledger debitLeaveBalance: bucket vanished")
-      const raw = ((row as { used?: string | number | null }).used ?? null) as string | number | null
-      cur = { used: numOr0(raw), usedRaw: raw }
-    }
-    throw new Error("ledger debitLeaveBalance: too many concurrent updates")
+    await addUsedWithCas(supabase, tenantId, req, bucket, hours)
+    return
   }
 
   // 一個桶都沒有 → 建曆年桶（舊行為）。期間欄已套就順手補上，這一列之後才搬得動
@@ -218,7 +203,60 @@ async function debitLeaveBalance(
     row.period_end = `${year}-12-31`
   }
   const { error: insErr } = await supabase.from("leave_balances").insert(row)
-  if (insErr) throw new Error(`ledger debitLeaveBalance (insert): ${insErr.message}`)
+  if (!insErr) return
+  // 建桶並發（2026-11-17 複驗）：另一個寫入者（另一張單核准、生理假併入）剛好先建了同一桶 →
+  // 唯一索引 leave_balances_tenant_emp_type_period_uq 擋下（23505）→ 重讀那個桶，改走樂觀鎖累加，不丟掉本單時數。
+  if ((insErr as { code?: string }).code === "23505") {
+    const existing = await resolveBalanceBucket(supabase, tenantId, req.employee_id, leaveTypeId, startDate)
+    if (existing) {
+      await addUsedWithCas(supabase, tenantId, req, existing, hours)
+      return
+    }
+  }
+  throw new Error(`ledger debitLeaveBalance (insert): ${insErr.message}`)
+}
+
+/**
+ * 樂觀鎖把 hours 加到某桶 used（見 debitLeaveBalance）。5 次都搶不到 → 結構化 error log（tenant、申請單、
+ * 員工、假別、桶、時數，方便人工補記）後丟錯。
+ */
+async function addUsedWithCas(
+  supabase: SupabaseClient,
+  tenantId: string,
+  req: ApprovedRequest,
+  bucket: BalanceBucket,
+  hours: number,
+): Promise<void> {
+  let cur: { used: number; usedRaw: string | number | null } = { used: bucket.used, usedRaw: bucket.usedRaw }
+  for (let attempt = 0; attempt < DEBIT_CAS_ATTEMPTS; attempt += 1) {
+    let q = supabase
+      .from("leave_balances")
+      .update({ used: Math.round((cur.used + hours) * 100) / 100, updated_at: new Date().toISOString() })
+      .eq("id", bucket.id)
+    q = cur.usedRaw === null ? q.is("used", null) : q.eq("used", cur.usedRaw)
+    const { data, error: upErr } = await q.select("id")
+    if (upErr) throw new Error(`ledger debitLeaveBalance (update): ${upErr.message}`)
+    if ((data ?? []).length > 0) return
+    const { data: row, error: readErr } = await supabase.from("leave_balances").select("id, used").eq("id", bucket.id).maybeSingle()
+    if (readErr) throw new Error(`ledger debitLeaveBalance (reread): ${readErr.message}`)
+    if (!row) throw new Error("ledger debitLeaveBalance: bucket vanished")
+    const raw = ((row as { used?: string | number | null }).used ?? null) as string | number | null
+    cur = { used: numOr0(raw), usedRaw: raw }
+  }
+  logger.error(
+    {
+      tenantId,
+      requestId: req.id,
+      employeeId: req.employee_id,
+      leaveTypeId: req.leave_type_id,
+      bucketId: bucket.id,
+      hours,
+      lastSeenUsed: cur.used,
+      attempts: DEBIT_CAS_ATTEMPTS,
+    },
+    "ledger debitLeaveBalance CAS exhausted — 假別餘額桶未扣，需人工補記（leave_balances.used += hours）",
+  )
+  throw new Error("ledger debitLeaveBalance: too many concurrent updates")
 }
 
 /**

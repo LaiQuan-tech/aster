@@ -38,12 +38,15 @@ import { resolveHours, type BalanceBucket } from "./ledger.js"
 import { bucketHasQuota, bucketRemaining, isCompLeaveType } from "./leave-balance-cap.js"
 import { sortLeaveTypes } from "./leave-overview.js"
 import {
+  estimatePendingMergeFrom,
   hoursByDate,
+  leaveRequestsHaveMenstrualMerge,
   leaveTypesHaveStatutoryKind,
   menstrualMergedByBucket,
-  mergedHoursByDate,
+  parseMergeEntries,
   statutoryKindOf,
   sumByPrefix,
+  type PendingMergeEstimate,
 } from "./menstrual-leave.js"
 
 export interface LeaveBalanceSummary {
@@ -163,11 +166,12 @@ export async function loadLeaveBalanceDetails(
 
   const employeeIds = Array.from(new Set(targets.map((r) => r.employee_id)))
 
-  const [tz, hoursPerDay, havePeriod, haveStatutory] = await Promise.all([
+  const [tz, hoursPerDay, havePeriod, haveStatutory, haveMerge] = await Promise.all([
     getTenantTimezone(tenantId),
     loadDailyRegularHours(tenantId),
     leaveBalancesHavePeriod(),
     leaveTypesHaveStatutoryKind(),
+    leaveRequestsHaveMenstrualMerge(),
   ])
 
   const [balRes, pendRes, typeRes] = await Promise.all([
@@ -178,7 +182,7 @@ export async function loadLeaveBalanceDetails(
       .in("employee_id", employeeIds),
     supabaseAdmin
       .from("leave_requests")
-      .select("id, employee_id, leave_type_id, hours, start_at, end_at, segments")
+      .select(haveMerge ? "id, employee_id, leave_type_id, hours, start_at, end_at, segments, menstrual_sick_merge" : "id, employee_id, leave_type_id, hours, start_at, end_at, segments")
       .eq("tenant_id", tenantId)
       .eq("kind", "leave")
       .eq("status", "pending")
@@ -199,9 +203,9 @@ export async function loadLeaveBalanceDetails(
     arr.push(b)
     bucketsByKey.set(k, arr)
   }
-  type PendingRow = { id: string; employee_id: string; leave_type_id: string; hours: string | number | null; start_at: string; end_at: string; segments?: unknown }
+  type PendingRow = { id: string; employee_id: string; leave_type_id: string; hours: string | number | null; start_at: string; end_at: string; segments?: unknown; menstrual_sick_merge?: unknown }
   const pendingByKey = new Map<string, PendingRow[]>()
-  for (const p of (pendRes.data ?? []) as PendingRow[]) {
+  for (const p of (pendRes.data ?? []) as unknown as PendingRow[]) {
     const k = key(p.employee_id, p.leave_type_id)
     const arr = pendingByKey.get(k) ?? []
     arr.push(p)
@@ -240,6 +244,7 @@ export async function loadLeaveBalanceDetails(
   // 沒有這種列就完全不查（其他假別的簽核卡片不回任何生理假資訊）。讀不到不影響摘要（顯示用加註）。
   let mergedByBucket = new Map<string, number>()
   const approvedMensByEmp = new Map<string, Map<string, number>>()
+  let estimateAvailable = true
   if (menstrualTargets.length > 0) {
     const mensEmpIds = Array.from(new Set(menstrualTargets.map((r) => r.employee_id)))
     try {
@@ -256,32 +261,47 @@ export async function loadLeaveBalanceDetails(
       .is("deleted_at", null)
       .in("employee_id", mensEmpIds)
       .in("leave_type_id", Array.from(menstrualIds))
-    if (error) throw new Error(`leave balance summary (approved menstrual): ${error.message}`)
-    for (const r of (data ?? []) as Array<{ employee_id: string; hours: string | number | null; start_at: string; end_at: string; segments?: unknown }>) {
-      const m = approvedMensByEmp.get(r.employee_id) ?? new Map<string, number>()
-      for (const [d, h] of hoursByDate(r, tz)) m.set(d, round2((m.get(d) ?? 0) + h))
-      approvedMensByEmp.set(r.employee_id, m)
+    if (error) {
+      // 讀不到已核准生理假：預估併入算不準 → 略過預估（不附 estimatedSickMergeHours／menstrualPendingMergeHours），
+      // 其餘摘要照回（比照 menstrualMergedByBucket，2026-11-17 複驗）。
+      logger.warn({ err: error, tenantId }, "leave balance summary: approved menstrual read failed — 略過生理假預估併入")
+      estimateAvailable = false
+    } else {
+      for (const r of (data ?? []) as Array<{ employee_id: string; hours: string | number | null; start_at: string; end_at: string; segments?: unknown }>) {
+        const m = approvedMensByEmp.get(r.employee_id) ?? new Map<string, number>()
+        for (const [d, h] of hoursByDate(r, tz)) m.set(d, round2((m.get(d) ?? 0) + h))
+        approvedMensByEmp.set(r.employee_id, m)
+      }
     }
   }
   const dayHours = hoursPerDay > 0 ? hoursPerDay : 8
-  /** 本單（生理假）＋其他簽核中生理假預估併入病假的逐日時數；mine＝本單自己那份。 */
-  const estimateFor = (r: SummarizableRow & { leave_type_id: string }) => {
+  /**
+   * 本單（生理假）＋其他簽核中生理假預估併入病假（同 menstrual-leave.estimatePendingMergeFrom：已有併入紀錄的單
+   * 只算標 reversed、再核准會補回的部分）；others＝其他簽核中、mine＝本單自己那份（本單排最後吃門檻）。
+   */
+  const estimateFor = (r: SummarizableRow & { leave_type_id: string }): { others: PendingMergeEstimate; mine: PendingMergeEstimate } => {
     const approved = approvedMensByEmp.get(r.employee_id) ?? new Map<string, number>()
-    const others = new Map<string, number>()
+    const others: Array<{ byDate: Map<string, number>; merge: ReturnType<typeof parseMergeEntries> }> = []
+    let self: PendingRow | null = null
     for (const id of menstrualIds) {
       for (const p of pendingByKey.get(key(r.employee_id, id)) ?? []) {
-        if (p.id === r.id) continue
-        for (const [d, h] of hoursByDate(p, tz)) others.set(d, round2((others.get(d) ?? 0) + h))
+        if (p.id === r.id) {
+          self = p
+          continue
+        }
+        others.push({ byDate: hoursByDate(p, tz), merge: parseMergeEntries(p.menstrual_sick_merge) })
       }
     }
-    const othersMerge = mergedHoursByDate(sumByPrefix(approved, 4), others, dayHours)
     const used = sumByPrefix(approved, 4)
-    for (const [y, h] of sumByPrefix(others, 4)) used.set(y, round2((used.get(y) ?? 0) + h))
-    const mine = mergedHoursByDate(used, hoursByDate({ hours: r.hours ?? null, start_at: r.start_at, end_at: r.end_at, segments: r.segments }, tz), dayHours)
-    const all = new Map(othersMerge)
-    for (const [d, h] of mine) all.set(d, round2((all.get(d) ?? 0) + h))
-    return { all, mine }
+    for (const o of others) for (const [y, h] of sumByPrefix(o.byDate, 4)) used.set(y, round2((used.get(y) ?? 0) + h))
+    const mineByDate = hoursByDate({ hours: r.hours ?? null, start_at: r.start_at, end_at: r.end_at, segments: r.segments }, tz)
+    return {
+      others: estimatePendingMergeFrom(sumByPrefix(approved, 4), others, dayHours),
+      mine: estimatePendingMergeFrom(used, [{ byDate: mineByDate, merge: parseMergeEntries(self?.menstrual_sick_merge) }], dayHours),
+    }
   }
+  const estTotal = (e: PendingMergeEstimate) =>
+    round2([...e.byDate.values(), ...e.byBucket.values()].reduce((a, b) => a + b, 0))
   const withMerged = (s: LeaveBalanceSummary, bucket: BalanceBucket | null): LeaveBalanceSummary => {
     const merged = bucket ? mergedByBucket.get(bucket.id) ?? 0 : 0
     return merged > 0 ? { ...s, menstrualMergedHours: round2(merged) } : s
@@ -336,18 +356,21 @@ export async function loadLeaveBalanceDetails(
     let own = summarizeOne(r.employee_id, r.leave_type_id, dateKey, r.id)
     let sickBucket: BalanceBucket | null = null
     let sickPendingMerge = 0
-    if (isMenstrual) {
+    if (isMenstrual && estimateAvailable) {
       const est = estimateFor(r)
-      const mineTotal = round2(Array.from(est.mine.values()).reduce((a, b) => a + b, 0))
+      const mineTotal = estTotal(est.mine)
       if (sickTypeId && mineTotal > 0) own = { ...own, estimatedSickMergeHours: mineTotal }
       if (sickTypeId) {
         sickBucket = pickBucket(bucketsByKey.get(key(r.employee_id, sickTypeId)) ?? [], dateKey, havePeriod)
-        for (const [d, h] of est.all) {
-          if (sickBucket ? bucketCovers(sickBucket, d) : d.slice(0, 4) === dateKey.slice(0, 4)) sickPendingMerge += h
+        for (const part of [est.others, est.mine]) {
+          for (const [d, h] of part.byDate) {
+            if (sickBucket ? bucketCovers(sickBucket, d) : d.slice(0, 4) === dateKey.slice(0, 4)) sickPendingMerge += h
+          }
+          if (sickBucket) sickPendingMerge += part.byBucket.get(sickBucket.id) ?? 0
         }
         sickPendingMerge = round2(sickPendingMerge)
       }
-    } else {
+    } else if (!isMenstrual) {
       own = stripMenstrual(own)
     }
     const byType: LeaveTypeBalanceEntry[] = []

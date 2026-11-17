@@ -6,6 +6,7 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { applyApprovalEffects, type ApprovedRequest } from "../services/ledger.js"
 import { adjustBucketUsed } from "../services/menstrual-leave.js"
+import { logger } from "../lib/logger.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
@@ -102,5 +103,47 @@ describe("debitLeaveBalance 樂觀鎖", () => {
     await applyApprovalEffects(client, TENANT_ID, leaveReq(8))
     // 5 次都被別人改過（+1×5），本單 8 小時沒有用舊值覆蓋掉別人的寫入
     expect(bucketRow().used).toBe(15)
+  })
+})
+
+describe("debitLeaveBalance 建桶並發（23505）", () => {
+  it("沒有桶 → 建桶時撞唯一索引（別人剛建好）→ 重讀那個桶、樂觀鎖累加，不丟時數", async () => {
+    fake.db.leave_balances = []
+    let raced = false
+    const client = {
+      from(table: string) {
+        const qb = fake.from(table) as unknown as Record<string, (...a: unknown[]) => unknown>
+        if (table === "leave_balances") {
+          const insert = qb.insert.bind(qb)
+          qb.insert = (payload: unknown) => {
+            if (!raced) {
+              raced = true
+              // 另一個寫入者剛建好同一桶（used=3），本次 insert 撞唯一索引
+              fake.db.leave_balances!.push({
+                id: BUCKET, tenant_id: TENANT_ID, employee_id: EMP, leave_type_id: LT_SICK, year: 2027,
+                period_start: "2027-01-01", period_end: "2027-12-31", entitled: 0, used: 3, deferred: 0, created_at: "2027-01-01T00:00:00.000Z",
+              })
+              fake.injectError({ table: "leave_balances", action: "insert", error: { message: "duplicate key value violates unique constraint \"leave_balances_tenant_emp_type_period_uq\"", code: "23505" } })
+            }
+            return insert(payload)
+          }
+        }
+        return qb
+      },
+    } as unknown as SupabaseClient
+    await applyApprovalEffects(client, TENANT_ID, leaveReq(8))
+    expect(fake.db.leave_balances).toHaveLength(1)
+    expect(bucketRow().used).toBe(11)
+  })
+
+  it("重試 5 次仍搶不到 → 結構化 error log（申請單、時數、桶）方便人工補記", async () => {
+    const spy = vi.spyOn(logger, "error")
+    const client = racingClient(99, () => {
+      bucketRow().used = Number(bucketRow().used) + 1
+    })
+    await applyApprovalEffects(client, TENANT_ID, leaveReq(8))
+    const call = spy.mock.calls.find((c) => typeof c[1] === "string" && (c[1] as string).includes("CAS exhausted"))
+    expect(call?.[0]).toMatchObject({ tenantId: TENANT_ID, requestId: "aaaaaaaa-0000-4000-8000-0000000000d1", bucketId: BUCKET, hours: 8, leaveTypeId: LT_SICK })
+    spy.mockRestore()
   })
 })

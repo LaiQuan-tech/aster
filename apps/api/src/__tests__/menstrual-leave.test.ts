@@ -11,11 +11,13 @@ import { leaveTypesRouter } from "../routes/leave-types.js"
 import {
   applyMenstrualOnFinalApproval,
   checkMenstrualForCreate,
+  estimatePendingMergeFrom,
   evaluateMonthlyCap,
   hoursByDate,
   inferStatutoryKind,
   mergedHoursByDate,
   parseMergeEntries,
+  pendingMenstrualMergeInSickBucket,
   reverseMenstrualSickMerge,
   splitMenstrualHours,
   statutoryKindOf,
@@ -549,7 +551,7 @@ describe("驗收修正（2026-11-17）", () => {
     expect(await reverseMenstrualSickMerge(TENANT_ID, r.id as string)).toBe(0)
   })
 
-  it("#3 多桶只部分失敗：只寫回失敗的那一筆", async () => {
+  it("#3 多桶只部分失敗：整份寫回，已沖回的標 reversed", async () => {
     fake.db.leave_balances = [sickBucket({ id: P1, used: 4 }), sickBucket({ id: P2, year: 2028, period_start: "2028-01-01", period_end: "2028-12-31", used: 8 })]
     const r = existing("2027-04-06", 12, "approved", { menstrual_sick_merge: [{ bucketId: P1, hours: 4 }, { bucketId: P2, hours: 8 }] })
     fake.db.leave_requests = [r]
@@ -557,7 +559,7 @@ describe("驗收修正（2026-11-17）", () => {
     await expect(reverseMenstrualSickMerge(TENANT_ID, r.id as string)).rejects.toThrow()
     expect(bucketRow(P1).used).toBe(0)
     expect(bucketRow(P2).used).toBe(8)
-    expect(r.menstrual_sick_merge).toEqual([{ bucketId: P2, hours: 8 }])
+    expect(r.menstrual_sick_merge).toEqual([{ bucketId: P1, hours: 4, reversed: true }, { bucketId: P2, hours: 8 }])
   })
 
   it("#2 隱私：本單不是生理假 → 各假別一覽不列生理假、病假列不帶併入註記（後端不回）；本單是生理假才有", async () => {
@@ -651,5 +653,126 @@ describe("驗收修正（2026-11-17）", () => {
     }
     expect(await count(rows.slice(0, 1))).toBe(3)
     expect(await count(rows)).toBe(3)
+  })
+})
+
+describe("複驗修正（2026-11-17）：部分沖回失敗後再核准／重試沖回", () => {
+  const P1 = "eeeeeeee-0000-4000-8000-0000000000d1"
+  const P2 = "eeeeeeee-0000-4000-8000-0000000000d2"
+  /** 已核准滿 3 日；本單 6/30 4 小時（併入 P1）＋7/1 4 小時（併入 P2）——兩個週年期間桶。 */
+  const setup = () => {
+    fake.db.leave_balances = [
+      sickBucket({ id: P1, year: 2026, period_start: "2026-07-01", period_end: "2027-06-30", used: 10 }),
+      sickBucket({ id: P2, year: 2027, period_start: "2027-07-01", period_end: "2028-06-30", used: 20 }),
+    ]
+    const r = existing("2027-06-30", 8, "approved", {
+      segments: [
+        { date: "2027-06-30", hours: 4 },
+        { date: "2027-07-01", hours: 4 },
+      ],
+    })
+    fake.db.leave_requests = [existing("2027-01-05", 8, "approved"), existing("2027-02-05", 8, "approved"), existing("2027-03-05", 8, "approved"), r]
+    return r
+  }
+  /** 沖回：第 1 個桶（P1）成功、第 2 個（P2）失敗。 */
+  const partialReverse = async (r: Row) => {
+    fake.injectError({ table: "leave_balances", action: "update", error: { message: "boom" }, skip: 1 })
+    await expect(reverseMenstrualSickMerge(TENANT_ID, r.id as string)).rejects.toThrow(/not reversed/)
+  }
+
+  it("A 成功 B 失敗 → 紀錄完整保留、A 標 reversed；再核准只補回 A，A、B 都正確（不重複、不少記）", async () => {
+    const r = setup()
+    expect(await applyMenstrualOnFinalApproval(target(r))).toEqual({ status: "ok", mergedHours: 8 })
+    expect([bucketRow(P1).used, bucketRow(P2).used]).toEqual([14, 24])
+    await partialReverse(r)
+    expect([bucketRow(P1).used, bucketRow(P2).used]).toEqual([10, 24])
+    expect(r.menstrual_sick_merge).toEqual([
+      { bucketId: P1, hours: 4, reversed: true },
+      { bucketId: P2, hours: 4 },
+    ])
+    // 退回待簽核後再核准
+    expect(await applyMenstrualOnFinalApproval(target(r))).toEqual({ status: "ok", mergedHours: 8 })
+    expect([bucketRow(P1).used, bucketRow(P2).used]).toEqual([14, 24])
+    expect(r.menstrual_sick_merge).toEqual([
+      { bucketId: P1, hours: 4 },
+      { bucketId: P2, hours: 4 },
+    ])
+    // 再跑一次仍冪等；完整沖回回到原點
+    expect(await applyMenstrualOnFinalApproval(target(r))).toEqual({ status: "ok", mergedHours: 8 })
+    expect(await reverseMenstrualSickMerge(TENANT_ID, r.id as string)).toBe(8)
+    expect([bucketRow(P1).used, bucketRow(P2).used]).toEqual([10, 20])
+  })
+
+  it("A 成功 B 失敗 → 重試沖回只沖 B、紀錄清空 → 再核准重新併入 A、B 各一次", async () => {
+    const r = setup()
+    await applyMenstrualOnFinalApproval(target(r))
+    await partialReverse(r)
+    expect(await reverseMenstrualSickMerge(TENANT_ID, r.id as string)).toBe(4)
+    expect([bucketRow(P1).used, bucketRow(P2).used]).toEqual([10, 20])
+    expect(r.menstrual_sick_merge).toBeNull()
+    expect(await reverseMenstrualSickMerge(TENANT_ID, r.id as string)).toBe(0)
+    expect(await applyMenstrualOnFinalApproval(target(r))).toEqual({ status: "ok", mergedHours: 8 })
+    expect([bucketRow(P1).used, bucketRow(P2).used]).toEqual([14, 24])
+  })
+
+  it("再核准補回 A 時病假額度不足 → blocked、這次補扣撤掉、紀錄不動", async () => {
+    const r = setup()
+    await applyMenstrualOnFinalApproval(target(r))
+    await partialReverse(r)
+    bucketRow(P1).entitled = 12 // P1 有額度：剩 12 − 10 = 2 < 4
+    const out = await applyMenstrualOnFinalApproval(target(r))
+    expect(out).toMatchObject({ status: "blocked", violation: { error: "menstrual_exceeds_sick_balance", mergedHours: 4, availableHours: 2 } })
+    expect([bucketRow(P1).used, bucketRow(P2).used]).toEqual([10, 24])
+    expect(r.menstrual_sick_merge).toEqual([
+      { bucketId: P1, hours: 4, reversed: true },
+      { bucketId: P2, hours: 4 },
+    ])
+  })
+
+  it("estimatePendingMergeFrom：有併入紀錄的簽核中單不再依日期預估，只算標 reversed 的（再核准會補回）", () => {
+    const est = estimatePendingMergeFrom(
+      new Map([["2027", 24]]),
+      [
+        { byDate: new Map([["2027-04-06", 8]]), merge: [{ bucketId: P1, hours: 8 }] },
+        { byDate: new Map([["2027-05-06", 8]]), merge: [{ bucketId: P1, hours: 4, reversed: true }, { bucketId: P2, hours: 4 }] },
+        { byDate: new Map([["2027-06-07", 8]]), merge: [] },
+      ],
+      8,
+    )
+    expect(Object.fromEntries(est.byDate)).toEqual({ "2027-06-07": 8 })
+    expect(Object.fromEntries(est.byBucket)).toEqual({ [P1]: 4 })
+  })
+
+  it("送單預估：簽核中單已有完整紀錄 → 0（已在桶 used 裡）；部分沖回 → 只算 reversed 那筆", async () => {
+    fake.db.leave_balances = [sickBucket({ entitled: 240, used: 8 })]
+    const pend = existing("2027-04-06", 8, "pending", { menstrual_sick_merge: [{ bucketId: SICK_BUCKET, hours: 8 }] })
+    fake.db.leave_requests = [existing("2027-01-05", 8, "approved"), existing("2027-02-05", 8, "approved"), existing("2027-03-05", 8, "approved"), pend]
+    const bucket = { id: SICK_BUCKET, used: 8, usedRaw: 8, entitled: 240, deferred: 0, periodStart: "2027-01-01", periodEnd: "2027-12-31", year: 2027 }
+    const t = { tenantId: TENANT_ID, employeeId: STAFF_ID, leaveTypeId: LT_SICK }
+    expect(await pendingMenstrualMergeInSickBucket(t, bucket)).toBe(0)
+    pend.menstrual_sick_merge = [{ bucketId: SICK_BUCKET, hours: 3, reversed: true }, { bucketId: SICK_BUCKET, hours: 5 }]
+    expect(await pendingMenstrualMergeInSickBucket(t, bucket)).toBe(3)
+    pend.menstrual_sick_merge = null
+    expect(await pendingMenstrualMergeInSickBucket(t, bucket)).toBe(8)
+  })
+
+  it("簽核畫面：已核准生理假查詢出錯 → 摘要照回、只略過預估併入（warn）", async () => {
+    fake.db.leave_balances = [sickBucket({ entitled: 240, used: 12 })]
+    const self = existing("2027-05-06", 8, "pending")
+    fake.db.leave_requests = [existing("2027-01-05", 8, "approved"), existing("2027-02-05", 8, "approved"), existing("2027-03-05", 8, "approved"), self]
+    // 暖快取並數 leave_requests 的讀取：最後一次是「已核准生理假」
+    await loadLeaveBalanceDetails(TENANT_ID, [self] as never)
+    fake.reads.length = 0
+    const ok = await loadLeaveBalanceDetails(TENANT_ID, [self] as never)
+    expect(ok.summaries.get(self.id as string)).toMatchObject({ estimatedSickMergeHours: 8 })
+    const n = fake.reads.filter((x) => x === "leave_requests").length
+    fake.injectError({ table: "leave_requests", action: "select", error: { message: "boom" }, skip: n - 1 })
+    const { summaries, byType } = await loadLeaveBalanceDetails(TENANT_ID, [self] as never)
+    const own = summaries.get(self.id as string)
+    expect(own).toBeDefined()
+    expect(own).not.toHaveProperty("estimatedSickMergeHours")
+    const sick = (byType.get(self.id as string) ?? []).find((e) => e.leaveTypeId === LT_SICK)!
+    expect(sick).toMatchObject({ usedHours: 12, pendingHours: 0 })
+    expect(sick).not.toHaveProperty("menstrualPendingMergeHours")
   })
 })
