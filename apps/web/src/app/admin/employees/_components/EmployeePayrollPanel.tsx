@@ -25,6 +25,7 @@ import { pensionWageHintText, pensionWageInputCheck, type FixedAllowanceSummary 
 import { FixedAllowancesCard } from "../../payroll/_components/FixedAllowancesCard";
 import { salaryFormChanges, todayDateKey, type SalaryFormValues } from "@/lib/salary-history";
 import { SalaryHistorySection } from "./SalaryHistorySection";
+import { SalaryRaiseSection } from "./SalaryRaiseSection";
 import { NhiDependentsCountField } from "./NhiDependentsCountField";
 import { dangerLinkCls, Disclosure, formBoxCls, LinkButton, ListRow } from "./payroll-ui";
 import { taxDependentsHeadline } from "@/lib/payroll-panel-text";
@@ -496,6 +497,18 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
             laborGrade={laborGrade}
             onSummary={setAllowanceSummary}
             reloadKey={allowanceReloadKey}
+          />
+
+          {/* 2026-11-17 調薪中：新本薪先發、勞健保照舊級距扣，政府端調整完成後按「調薪完成」。 */}
+          <SalaryRaiseSection
+            employeeId={empId}
+            method={loadedWage?.method ?? method}
+            currentBase={loadedValues.baseSalary}
+            onChanged={() => {
+              void loadEmployee(empId);
+              setAllowanceReloadKey((n) => n + 1);
+              setHistoryReloadKey((n) => n + 1);
+            }}
           />
 
           {/* 2026-11-10 調薪歷程＋勞健保調整歷程 → 合併成可收合的「歷程紀錄」 */}
