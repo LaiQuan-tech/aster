@@ -84,6 +84,8 @@ export interface AttendanceStatementSummary extends StatementSummary {
   leaveForm?: StatementGrid;
   expenseSheet?: StatementGrid;
   frozen?: boolean;
+  /** 2026-11-17：薪資單／核准快照的健保金額 ≠ 目前投保金額×眷屬數即時試算（shown＝表上、live＝即時）；舊 API 沒有。 */
+  healthMismatch?: { shown: number; live: number } | null;
   approvedAt?: string | null;
   lockedAt?: string | null;
   computedAt?: string | null;

@@ -619,15 +619,14 @@ describe("規則五 亞斯特 115-06 五份出勤表", () => {
         if (d.date === "2026-06-17") return { ...d, leaves: [{ code: "sick", minutes: 240, deductRate }] };
         return d;
       });
-    // 健保 2130 = 本人 + 二眷口。健保署級距表 45,800 級是「每人 710 → ×3 = 2130」
-    // (逐人取整後相乘);引擎的 nhiEmployeePremium 是總額一次取整
-    // (45800 × 5.17% × 30% × 3 = 2131.07 → 2131),兩者差 1 元。這裡用 45,780 讓
-    // 費率算出的總額剛好落在 2130,把表上的數字釘住;逐人/總額取整的差異另案處理。
+    // 健保 2130 = 本人 + 二眷口。健保署負擔金額表 45,800 級是「每人 710 → ×3 = 2130」
+    // (逐人取整後相乘)。2026-11-17 起 nhiEmployeePremium 改成同樣的逐人取整,直接用 45,800 級
+    // (舊的總額一次取整會算成 2131)。
     const salary: SalaryStructure = {
       method: "monthly",
       baseSalary: 45000,
       laborInsuredSalary: 45800, // 1145
-      healthInsuredSalary: 45780, // 45780 × 5.17% × 30% × (1 + 2) = 2130.14 → 2130
+      healthInsuredSalary: 45800, // round(45800 × 5.17% × 30%) = 710 → × (1 + 2) = 2130
       nhiDependents: 2,
     };
 

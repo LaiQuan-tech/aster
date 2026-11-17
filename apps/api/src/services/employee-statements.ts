@@ -1,4 +1,4 @@
-import { resolveOvertimeMealBreak, type OvertimeSegment, type RuleConfig } from "@hr/rules"
+import { nhiEmployeePremium, resolveOvertimeMealBreak, type OvertimeSegment, type RuleConfig } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
 import { resolveLetterhead } from "../lib/letterhead.js"
@@ -288,6 +288,29 @@ async function loadPayslipMoney(
   return moneyFromBreakdown(row.breakdown ?? {}, row.status ?? null)
 }
 
+/** 目前投保金額×目前眷屬數的員工自付健保費（與引擎同一支 nhiEmployeePremium）；算不出來＝null。 */
+function liveHealthInsuranceOf(inputs: Awaited<ReturnType<typeof buildPayrollInputs>>): number | null {
+  const ins = inputs.rules.insurance
+  const insured = inputs.salary?.healthInsuredSalary
+  if (!ins || !inputs.salary) return null
+  if (!insured) return 0
+  return nhiEmployeePremium(insured, inputs.salary.nhiDependents ?? 0, ins.health.rate, ins.health.employeeShare)
+}
+
+/**
+ * 出勤統計表的健保金額（薪資單或核准快照）與目前即時試算不一致 → 回兩個數字給前端顯示一行提示；
+ * 一致、即時試算（本來就即時）、看不到金額或算不出來 → null。
+ */
+export function healthMismatchOf(data: StatementData, canSeeMoney: boolean): { shown: number; live: number } | null {
+  if (!canSeeMoney || !data.money) return null
+  const snapshotLike = data.money.source === "payslip" || data.attendance?.frozen === true
+  if (!snapshotLike) return null
+  const live = data.salary?.liveHealthInsurance
+  if (live == null) return null
+  const shown = Number(data.money.healthInsurance ?? 0)
+  return shown === live ? null : { shown, live }
+}
+
 async function loadSalaryInfo(tenantId: string, employeeId: string, period: string): Promise<StatementSalaryInfo | null> {
   const inputs = await buildPayrollInputs(tenantId, employeeId, period)
   if (!inputs.salaryRow) return null
@@ -296,6 +319,7 @@ async function loadSalaryInfo(tenantId: string, employeeId: string, period: stri
     laborInsuredSalary: insured != null && Number(insured) > 0 ? Number(insured) : null,
     nhiDependents: inputs.salary?.nhiDependents ?? null,
     wageBasisMissing: inputs.salary ? engineRejects(inputs.salary) : false,
+    liveHealthInsurance: liveHealthInsuranceOf(inputs),
     // 2026-11-10 表尾「投保薪資調整」：生效日在該月底以前的最近 3 筆（表未套用＝空）。
     insuredAdjustments: await loadInsuredAdjustmentsForStatement(tenantId, employeeId, monthRangeKeys(period).to),
   }
@@ -485,6 +509,11 @@ export interface StatementSummary {
 export interface AttendanceStatementSummary extends StatementSummary {
   leaveForm: StatementGrid
   expenseSheet: StatementGrid
+  /**
+   * 2026-11-17：薪資單或核准快照的健保金額 ≠ 目前投保金額×眷屬數即時試算（例：之後才改了眷屬人數）。
+   * shown＝表上金額、live＝即時試算；一致或不適用＝null。
+   */
+  healthMismatch: { shown: number; live: number } | null
   /** 月表已核准／鎖定＝顯示核准快照（不隨後續紀錄變動、不重算）。 */
   frozen: boolean
   approvedAt: string | null
@@ -505,6 +534,7 @@ export function attendanceStatementOf(data: StatementData, canSeeMoney: boolean)
     moneySource: canSeeMoney ? (data.money?.source ?? null) : null,
     payslipStatus: canSeeMoney ? (data.money?.payslipStatus ?? null) : null,
     previewError: canSeeMoney && !data.money ? (data.previewError ?? null) : null,
+    healthMismatch: healthMismatchOf(data, canSeeMoney),
     frozen: view?.frozen === true,
     approvedAt: view?.approvedAt ?? null,
     lockedAt: view?.lockedAt ?? null,

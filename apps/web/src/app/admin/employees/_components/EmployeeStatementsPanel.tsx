@@ -14,6 +14,7 @@ import {
   type EmployeeStatements,
   type StatementGrid,
 } from "@/lib/statements-api";
+import { healthMismatchNote } from "@/lib/nhi-dependents-count";
 
 /**
  * 員工內頁的「出勤統計表／薪資明細表」分頁（2026-10-27 業主：格式跟公司現行 Excel 一模一樣）。
@@ -51,6 +52,9 @@ function sourceNote(data: EmployeeStatements, kind: StatementTab): string | null
       if (missing) notes.push(missing);
     }
     else if (summary.payslipStatus === "draft") notes.push("薪資單尚未定案（草稿）");
+    // 2026-11-17：表上健保（薪資單／核准快照）與目前眷屬數即時試算不一致 → 一行提示。
+    const hm = kind === "attendance" ? data.attendance?.healthMismatch : null;
+    if (hm) notes.push(healthMismatchNote(hm, summary.payslipStatus));
   } else if (kind === "attendance") {
     notes.push("金額欄位僅 HR 可見");
   }

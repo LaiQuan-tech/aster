@@ -513,7 +513,7 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
               </Button>
             </div>
             {/* 2026-11-17 眷屬人數直接輸入（填了以此為準；明細增刪後重讀筆數）。 */}
-            <NhiDependentsCountField employeeId={empId} reloadKey={nhiDeps} />
+            <NhiDependentsCountField employeeId={empId} reloadKey={nhiDeps.filter((d) => d.insured).map((d) => d.id).join(",")} />
             {/* hidden 掛在不帶 display 類別的外層 div（form 本身是 grid，直接掛會被蓋掉）。 */}
             <div id={nhiPanelId} hidden={!showNhiForm}>
               {/* form 的 onChange 會收到底下所有欄位冒泡上來的變更：改任何一欄就清掉錯誤。 */}

@@ -98,8 +98,12 @@ export function nonResidentWithholding(amount: number, rate: number = 0.18): num
 export const NHI_MAX_DEPENDENTS = 3
 
 /**
- * 受僱者健保自付額 = 投保金額 × 費率 × 自付比例 ×（1 + 計費眷口數）。
+ * 受僱者健保自付額 = round(投保金額 × 費率 × 自付比例) ×（1 + 計費眷口數）。
  * 眷口數超過 3 以 3 計。
+ *
+ * 取整方式依健保署「全民健康保險保險費負擔金額表」：**每人金額先四捨五入到元，再乘口數**
+ * （2026-11-17 起；之前是總額一次四捨五入，與負擔金額表會差 1 元，例 45,800 級加 2 口：表 2,130、舊算法 2,131）。
+ * 已定案的薪資單是存檔快照，不追溯重算。
  *
  * @param insuredSalary 投保金額
  * @param dependents 眷屬人數
@@ -114,6 +118,6 @@ export function nhiEmployeePremium(
 ): number {
   if (insuredSalary <= 0) return 0
   const billableDependents = Math.min(Math.max(0, Math.floor(dependents)), NHI_MAX_DEPENDENTS)
-  const perPerson = insuredSalary * rate * employeeShareRatio
-  return round(perPerson * (1 + billableDependents))
+  const perPerson = round(insuredSalary * rate * employeeShareRatio)
+  return perPerson * (1 + billableDependents)
 }

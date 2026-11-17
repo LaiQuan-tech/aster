@@ -12,7 +12,9 @@ import { periodClosedErrorHandler } from "../middleware/period-closed.js"
 import { payrollRouter } from "../routes/payroll.js"
 import { payrollTaxRouter } from "../routes/payroll-tax.js"
 import { buildPayrollInputs, computeFromInputs, loadPayrollInputs } from "../services/payroll-inputs.js"
-import { resolveNhiDependents } from "../services/nhi-dependents-count.js"
+import { previousPeriod, resolveNhiDependents } from "../services/nhi-dependents-count.js"
+import { attendanceStatementOf, healthMismatchOf, loadStatementData } from "../services/employee-statements.js"
+import type { StatementData } from "../lib/statements/types.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
@@ -50,8 +52,9 @@ const FOREIGN_EMP = "b1000000-0000-4000-8000-000000000009"
 const T = { hr: "u-hr", emp: "u-emp" } as const
 const OCT = "2030-10"
 const INSURED = 40100
-// 40,100 × 5.17% × 30% = 621.951 → 每口 622；×(1+眷口) 後整數四捨五入
-const premium = (deps: number) => Math.round(INSURED * 0.0517 * 0.3 * (1 + Math.min(deps, 3)))
+// 健保署「保險費負擔金額表」（5.17%、自付 30%）40,100 級公告固定值：本人 622、+1 口 1,244、+2 口 1,866、+3 口 2,488（第 4 口起免繳）。
+const TABLE_40100: Record<number, number> = { 0: 622, 1: 1244, 2: 1866, 3: 2488, 5: 2488 }
+const premium = (deps: number) => TABLE_40100[deps]
 
 const as = (token: string) => ({
   get: (path: string) => request(server).get(path).set("Authorization", `Bearer ${token}`),
@@ -197,8 +200,18 @@ describe("出勤統計表健保欄：同投保金額，眷屬 0／1／3／5 人�
     })
   }
 
-  it("金額確認：0→622、1→1,244、3→2,488、5→2,488（第 4 口起免繳）", () => {
-    expect([0, 1, 3, 5].map(premium)).toEqual([622, 1244, 2488, 2488])
+  it("負擔金額表其他級距（每人先四捨五入再乘口數）：45,800＋1 口＝1,420；48,200＋3 口＝2,992", async () => {
+    fake.db.salary_structures = [
+      { ...salary(EMP), labor_insured_salary: "45800", health_insured_salary: "45800" },
+      { ...salary(EMP2), labor_insured_salary: "48200", health_insured_salary: "48200" },
+    ]
+    setOverride(EMP, 1)
+    setOverride(EMP2, 3)
+    expect(computeFromInputs([], await buildPayrollInputs(TENANT_ID, EMP, OCT))?.healthInsurance).toBe(1420)
+    expect(computeFromInputs([], await buildPayrollInputs(TENANT_ID, EMP2, OCT))?.healthInsurance).toBe(2992)
+    await runPayroll()
+    expect((slipOf(EMP).breakdown as Row).healthInsurance).toBe(1420)
+    expect((slipOf(EMP2).breakdown as Row).healthInsurance).toBe(2992)
   })
 
   it("沒填直接輸入時用明細：明細 2 筆投保中 → 健保 = 622×3 = 1,866；改成直接輸入 0 → 622", async () => {
@@ -247,6 +260,24 @@ describe("GET／PUT /nhi-dependents-count/:employeeId", () => {
     expect(audits()).toHaveLength(2)
   })
 
+  it("PUT 回應帶本月與上月的薪資單／月表狀態（存檔後提示用）", async () => {
+    const cur = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit" }).format(new Date()).slice(0, 7)
+    const prev = previousPeriod(cur)
+    fake.db.payslips = [{ id: "p1", tenant_id: TENANT_ID, employee_id: EMP, period: cur, status: "draft", breakdown: {} }]
+    fake.db.attendance_sheets = [{ id: "a1", tenant_id: TENANT_ID, employee_id: EMP, period: prev, status: "approved" }]
+    const res = await as(T.hr).put(`/nhi-dependents-count/${EMP}`).send({ count: 2 })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.impacts).toEqual([
+      { period: cur, payslipStatus: "draft", sheetStatus: null },
+      { period: prev, payslipStatus: null, sheetStatus: "approved" },
+    ])
+  })
+
+  it("previousPeriod：跨年", () => {
+    expect(previousPeriod("2031-01")).toBe("2030-12")
+    expect(previousPeriod("2030-11")).toBe("2030-10")
+  })
+
   it("範圍驗證：負數、11、小數、字串、缺欄位 → 400，不寫入", async () => {
     for (const body of [{ count: -1 }, { count: 11 }, { count: 1.5 }, { count: "2" }, {}]) {
       const res = await as(T.hr).put(`/nhi-dependents-count/${EMP}`).send(body)
@@ -287,5 +318,42 @@ describe("GET／PUT /nhi-dependents-count/:employeeId", () => {
     })
     const put = await as(T.hr).put(`/nhi-dependents-count/${EMP}`).send({ count: 2 })
     expect(put.status).toBe(503)
+  })
+})
+
+describe("出勤統計表 healthMismatch：薪資單／核准快照的健保 ≠ 目前即時試算", () => {
+  const data = (over: { source: "payslip" | "preview"; frozen?: boolean; shown: number; live: number | null }) =>
+    ({
+      money: { source: over.source, healthInsurance: over.shown },
+      attendance: { frozen: over.frozen ?? false },
+      salary: { liveHealthInsurance: over.live },
+    }) as unknown as StatementData
+
+  it("薪資單 622、目前改成 1 口（1,244）→ 回兩個數字", () => {
+    expect(healthMismatchOf(data({ source: "payslip", shown: 622, live: 1244 }), true)).toEqual({ shown: 622, live: 1244 })
+  })
+  it("核准快照（frozen 的試算）不一致 → 也提示", () => {
+    expect(healthMismatchOf(data({ source: "preview", frozen: true, shown: 1244, live: 2488 }), true)).toEqual({ shown: 1244, live: 2488 })
+  })
+  it("一致、即時試算（未凍結）、看不到金額、算不出即時值 → null", () => {
+    expect(healthMismatchOf(data({ source: "payslip", shown: 622, live: 622 }), true)).toBeNull()
+    expect(healthMismatchOf(data({ source: "preview", shown: 622, live: 1244 }), true)).toBeNull()
+    expect(healthMismatchOf(data({ source: "payslip", shown: 622, live: 1244 }), false)).toBeNull()
+    expect(healthMismatchOf(data({ source: "payslip", shown: 622, live: null }), true)).toBeNull()
+  })
+})
+
+describe("出勤統計表（loadStatementData → attendanceStatementOf）實際接線", () => {
+  it("已有薪資單草稿（健保 622），之後改成 1 口 → healthMismatch {622, 1244}；改回 0 → null", async () => {
+    fake.db.payslips = [
+      { id: "p1", tenant_id: TENANT_ID, employee_id: EMP, period: OCT, status: "draft", breakdown: { gross: 40000, healthInsurance: 622 } },
+    ]
+    setOverride(EMP, 1)
+    let data = await loadStatementData(TENANT_ID, EMP, OCT, { includeMoney: true })
+    expect(data?.salary?.liveHealthInsurance).toBe(1244)
+    expect(attendanceStatementOf(data!, true).healthMismatch).toEqual({ shown: 622, live: 1244 })
+    setOverride(EMP, 0)
+    data = await loadStatementData(TENANT_ID, EMP, OCT, { includeMoney: true })
+    expect(attendanceStatementOf(data!, true).healthMismatch).toBeNull()
   })
 })

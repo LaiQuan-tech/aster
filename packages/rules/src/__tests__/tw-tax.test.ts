@@ -66,16 +66,30 @@ describe("健保費（本人 + 眷屬）", () => {
   const rate = 0.0517
   const share = 0.3
 
-  // 每人 30000 * 0.0517 * 0.3 = 465.3；於總額一次四捨五入（非逐人取整）。
-  it("本人無眷屬 → round(465.3) = 465", () => {
+  // 依健保署負擔金額表：每人金額先四捨五入到元，再 ×（1 + 計費眷口）。每人 30000 × 0.0517 × 0.3 = 465.3 → 465。
+  it("本人無眷屬 → 465", () => {
     expect(nhiEmployeePremium(30_000, 0, rate, share)).toBe(465)
   })
 
-  it("2 名眷屬 → round(465.3 × 3) = 1396", () => {
-    expect(nhiEmployeePremium(30_000, 2, rate, share)).toBe(1396)
+  it("2 名眷屬 → 465 × 3 = 1395（不是總額取整的 1396）", () => {
+    expect(nhiEmployeePremium(30_000, 2, rate, share)).toBe(1395)
   })
 
-  it("眷屬超過 3 口以 3 口封頂 (本人+3 = ×4) → round(465.3 × 4) = 1861", () => {
-    expect(nhiEmployeePremium(30_000, 5, rate, share)).toBe(1861)
+  it("眷屬超過 3 口以 3 口封頂 (本人+3 = ×4) → 465 × 4 = 1860", () => {
+    expect(nhiEmployeePremium(30_000, 5, rate, share)).toBe(1860)
+  })
+
+  // 健保署「全民健康保險保險費負擔金額表」（費率 5.17%、受僱者自付 30%）公告固定值，不用同公式自驗。
+  it("負擔金額表：45,800 級 本人＋1 口 = 1,420；＋2 口 = 2,130", () => {
+    expect(nhiEmployeePremium(45_800, 1, rate, share)).toBe(1420)
+    expect(nhiEmployeePremium(45_800, 2, rate, share)).toBe(2130)
+  })
+
+  it("負擔金額表：48,200 級 本人＋3 口 = 2,992", () => {
+    expect(nhiEmployeePremium(48_200, 3, rate, share)).toBe(2992)
+  })
+
+  it("負擔金額表：40,100 級 本人 622、＋1 口 1,244、＋2 口 1,866、＋3 口 2,488；＋5 口仍 2,488", () => {
+    expect([0, 1, 2, 3, 5].map((n) => nhiEmployeePremium(40_100, n, rate, share))).toEqual([622, 1244, 1866, 2488, 2488])
   })
 })

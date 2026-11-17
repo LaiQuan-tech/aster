@@ -37,14 +37,14 @@
       }
     ],
     "laborInsurance": 1050,
-    "healthInsurance": 1954,
+    "healthInsurance": 1953,
     "pensionVoluntary": 1260,
     "advance": 500,
     "leaveDeduction": 687.23,
     "lateEarlyDeduction": 48.68,
-    "totalDeductions": 5820.91,
+    "totalDeductions": 5819.91,
     "expenses": 1234.5,
-    "net": 42010.34,
+    "net": 42011.34,
     "lines": [
       {
         "label": "本俸(月薪)",
@@ -80,7 +80,7 @@
       },
       {
         "label": "健保費",
-        "amount": -1954
+        "amount": -1953
       },
       {
         "label": "勞工自願提繳退休金",

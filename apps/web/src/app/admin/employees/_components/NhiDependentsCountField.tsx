@@ -3,14 +3,15 @@
 /**
  * 員工資料頁「健保眷屬投保資料」上方的「眷屬人數（直接輸入）」欄（2026-11-17）。
  * 填了以此為準，留空＝依下方明細投保中的筆數；健保費計費上限 3 口。規則見 lib/nhi-dependents-count.ts。
- * reloadKey：明細增刪後由父元件換值，重新讀「明細筆數／計算採用」。
+ * reloadKey：明細投保中筆數或 id 串（父元件傳字串），變了才重讀「明細筆數／計算採用」；輸入框有未存修改時不覆蓋。
  */
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ErrorText } from "@/components/admin-ui";
-import { apiErrorMessage } from "@/lib/api-client";
 import {
   getNhiDependentsCount,
+  nhiCountErrorMessage,
   nhiCountSummary,
+  nhiSaveNotices,
   NHI_COUNT_MAX,
   NHI_COUNT_MIN,
   parseNhiCountInput,
@@ -21,24 +22,34 @@ import {
 const inputCls =
   "w-24 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 
-export function NhiDependentsCountField({ employeeId, reloadKey }: { employeeId: string; reloadKey?: unknown }) {
+const asInput = (d: NhiDependentsCount) => (d.override == null ? "" : String(d.override));
+
+export function NhiDependentsCountField({ employeeId, reloadKey }: { employeeId: string; reloadKey?: string | number }) {
   const inputId = useId();
   const [data, setData] = useState<NhiDependentsCount | null>(null);
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [notices, setNotices] = useState<string[] | null>(null);
+  // 輸入框有未存的修改？（重讀時不覆蓋使用者正在打的值）
+  const dirtyRef = useRef(false);
+
+  useEffect(() => {
+    dirtyRef.current = false;
+    setValue("");
+    setData(null);
+    setNotices(null);
+  }, [employeeId]);
 
   useEffect(() => {
     let alive = true;
-    setError(null);
     getNhiDependentsCount(employeeId)
       .then((d) => {
         if (!alive) return;
         setData(d);
-        setValue(d.override == null ? "" : String(d.override));
+        if (!dirtyRef.current) setValue(asInput(d));
       })
-      .catch((err) => alive && setError(apiErrorMessage(err, "讀取眷屬人數失敗")));
+      .catch((err) => alive && setError(nhiCountErrorMessage(err, "讀取")));
     return () => {
       alive = false;
     };
@@ -53,23 +64,25 @@ export function NhiDependentsCountField({ employeeId, reloadKey }: { employeeId:
     }
     setSaving(true);
     setError(null);
-    setSaved(false);
+    setNotices(null);
     try {
       const d = await saveNhiDependentsCount(employeeId, parsed.value);
       setData(d);
-      setValue(d.override == null ? "" : String(d.override));
-      setSaved(true);
+      dirtyRef.current = false;
+      setValue(asInput(d));
+      setNotices(nhiSaveNotices(d.impacts));
     } catch (err) {
-      setError(apiErrorMessage(err, "儲存眷屬人數失敗"));
+      setError(nhiCountErrorMessage(err, "儲存"));
     } finally {
       setSaving(false);
     }
   }
 
-  const disabled = saving || (data != null && !data.available);
+  const unavailable = data != null && !data.available;
 
   return (
-    <form onSubmit={onSave} className="mb-3 rounded-xl bg-slate-50 p-3">
+    // noValidate：不用瀏覽器內建（英文／各家不一）的數字驗證，改由 parseNhiCountInput 給中文提示。
+    <form onSubmit={onSave} noValidate className="mb-3 rounded-xl bg-slate-50 p-3">
       <label htmlFor={inputId} className="mb-1 block text-xs font-medium text-gray-500">
         眷屬人數（直接輸入，填了以此為準；留空＝依明細）
       </label>
@@ -84,26 +97,36 @@ export function NhiDependentsCountField({ employeeId, reloadKey }: { employeeId:
           step={1}
           value={value}
           onChange={(event) => {
+            dirtyRef.current = true;
             setValue(event.target.value);
             setError(null);
-            setSaved(false);
+            setNotices(null);
           }}
           placeholder="留空"
-          disabled={data != null && !data.available}
+          disabled={unavailable}
+          aria-invalid={error ? true : undefined}
         />
         <button
           type="submit"
-          disabled={disabled}
+          disabled={saving || unavailable}
           className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50"
           style={{ color: "var(--brand)" }}
         >
           {saving ? "儲存中…" : "儲存"}
         </button>
-        {saved && <span className="text-xs text-green-700">已儲存</span>}
+        {notices && <span className="text-xs text-green-700">已儲存</span>}
       </div>
       {data && <p className="mt-1 text-xs text-gray-500">{nhiCountSummary(data)}</p>}
-      {data && !data.available && (
-        <p className="mt-1 text-xs text-amber-700">資料庫尚未支援直接輸入人數，目前依明細計算。</p>
+      {data?.override != null && (
+        <p className="mt-1 text-xs font-medium text-amber-700">目前以直接輸入的人數計費，下方明細僅供參考。</p>
+      )}
+      {unavailable && <p className="mt-1 text-xs text-amber-700">資料庫尚未支援直接輸入人數，目前依明細計算。</p>}
+      {notices && notices.length > 0 && (
+        <ul className="mt-1 list-disc pl-4 text-xs text-amber-700">
+          {notices.map((n) => (
+            <li key={n}>{n}</li>
+          ))}
+        </ul>
       )}
       {error && <ErrorText className="mt-1">{error}</ErrorText>}
     </form>

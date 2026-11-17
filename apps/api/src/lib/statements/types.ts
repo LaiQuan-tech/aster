@@ -96,6 +96,11 @@ export interface StatementSalaryInfo {
   insuredAdjustments?: Array<{ effectiveOn: string; laborInsuredSalary: number }>
   /** 2026-11-17：薪資結構缺本薪或時薪（時薪制缺時薪；其他制兩者皆空／0）：引擎拒算，試算與跑薪資都會略過此人。 */
   wageBasisMissing?: boolean
+  /**
+   * 2026-11-17：以「目前」健保投保金額與眷屬數（直接輸入優先，否則明細投保中筆數）即時算出的員工自付健保費；
+   * 沒有薪資結構／沒設保險規則＝null。出勤統計表拿它比對薪資單或核准快照的健保金額（healthMismatch）。
+   */
+  liveHealthInsurance?: number | null
 }
 
 /** 行事曆當日（tenant_calendar_days）：假日名稱（雙十節、颱風假…）與日別。 */

@@ -58,20 +58,21 @@ describe("健保自付額：眷口數與 3 口上限", () => {
     expect(slip.healthInsurance).toBe(Math.round(PER_PERSON));
   });
 
-  it("眷屬 2 口 → 本人 + 2 口，共 3 份 1777", () => {
+  // 2026-11-17 起依健保署負擔金額表：每人先四捨五入（592）再乘份數。
+  it("眷屬 2 口 → 本人 + 2 口，共 3 份 592 × 3 = 1776", () => {
     const slip = computePayslip(oneNormalDay, { ...baseSalary, nhiDependents: 2 }, makeRules());
-    expect(slip.healthInsurance).toBe(Math.round(PER_PERSON * 3));
+    expect(slip.healthInsurance).toBe(1776);
   });
 
-  it("眷屬 3 口 → 本人 + 3 口，共 4 份 2370", () => {
+  it("眷屬 3 口 → 本人 + 3 口，共 4 份 592 × 4 = 2368", () => {
     const slip = computePayslip(oneNormalDay, { ...baseSalary, nhiDependents: 3 }, makeRules());
-    expect(slip.healthInsurance).toBe(Math.round(PER_PERSON * 4));
+    expect(slip.healthInsurance).toBe(2368);
   });
 
   it("★ 眷屬 5 口 → 仍以 3 口計（第 4 口起免繳），不得等於 6 份", () => {
     const slip = computePayslip(oneNormalDay, { ...baseSalary, nhiDependents: 5 }, makeRules());
-    expect(slip.healthInsurance).toBe(Math.round(PER_PERSON * 4)); // 2370
-    expect(slip.healthInsurance).not.toBe(Math.round(PER_PERSON * 6)); // 未裁切會是 3555
+    expect(slip.healthInsurance).toBe(2368);
+    expect(slip.healthInsurance).not.toBe(592 * 6); // 未裁切會是 3552
   });
 
   it("nhiDependents 未提供 → 視為 0 口，不可當成 NaN 或誤放大", () => {

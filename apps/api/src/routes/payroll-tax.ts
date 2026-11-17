@@ -17,8 +17,11 @@ import { isMissingColumnError } from "../lib/schema-compat.js"
 import {
   NHI_DEPENDENTS_OVERRIDE_MAX,
   NHI_DEPENDENTS_OVERRIDE_MIN,
+  loadNhiPeriodImpacts,
   resolveNhiDependents,
 } from "../services/nhi-dependents-count.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { todayKey } from "../lib/tz.js"
 
 export const payrollTaxRouter = Router()
 
@@ -149,7 +152,8 @@ hrCrud({
 
 /* ---- 健保眷屬人數「直接輸入」nhi-dependents-count（2026-11-17，migration 0108）----
  * GET  /nhi-dependents-count/:employeeId → { override, detailCount, effective, billable, available }
- * PUT  /nhi-dependents-count/:employeeId { count: 0–10 | null } → 寫 employees.nhi_dependents_override（null＝清除，回到明細筆數）
+ * PUT  /nhi-dependents-count/:employeeId { count: 0–10 | null } → 寫 employees.nhi_dependents_override（null＝清除，回到明細筆數）；
+ *      回應另帶 impacts：本月與上月（租戶時區）的 payslipStatus／sheetStatus，前端據以提示要不要重跑薪資
  * 權限同眷屬明細（requireHrAdmin）；PUT 寫 audit_logs。計算採用規則見 services/nhi-dependents-count.ts。 */
 const NHI_BILLABLE_MAX = 3
 const nhiCountBody = z.object({
@@ -277,7 +281,10 @@ payrollTaxRouter.put(
           context: "PUT /nhi-dependents-count/:employeeId — 健保眷屬人數直接輸入",
         })
       }
-      res.status(200).json({ ...(await nhiCountView(tenantId, employeeId, next_)), available: true })
+      // 存檔後提示：本月／上月已有薪資單（需重跑薪資才套用）或月表已核准（快照金額不變，跑薪資時套用）。
+      const currentPeriod = todayKey(await getTenantTimezone(tenantId)).slice(0, 7)
+      const impacts = await loadNhiPeriodImpacts(tenantId, employeeId, currentPeriod)
+      res.status(200).json({ ...(await nhiCountView(tenantId, employeeId, next_)), available: true, impacts })
     } catch (err) {
       next(err)
     }

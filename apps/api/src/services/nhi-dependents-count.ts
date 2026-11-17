@@ -52,3 +52,57 @@ export async function loadNhiDependentsOverrides(
   }
   return out
 }
+
+/* ── 存檔後提示（2026-11-17 驗收）：本月／上月的薪資單與月表狀態 ─────────────────────────── */
+
+export interface NhiPeriodImpact {
+  period: string
+  /** 該月薪資單狀態：draft／finalized；沒有薪資單＝null。 */
+  payslipStatus: string | null
+  /** 該月出勤月表狀態（draft／submitted／…／approved／locked）；沒有月表＝null。 */
+  sheetStatus: string | null
+}
+
+/** 'YYYY-MM' 的上一個月。 */
+export function previousPeriod(period: string): string {
+  const [y, m] = period.split("-").map(Number)
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`
+}
+
+/**
+ * 該員工本月與上月（依租戶時區）的薪資單／月表狀態，給前端存檔後提示「需重跑薪資才會套用」等。
+ * 查詢失敗不擋存檔：回空陣列（呼叫端照常回 200）。
+ */
+export async function loadNhiPeriodImpacts(
+  tenantId: string,
+  employeeId: string,
+  currentPeriod: string,
+): Promise<NhiPeriodImpact[]> {
+  const periods = [currentPeriod, previousPeriod(currentPeriod)]
+  try {
+    const [slips, sheets] = await Promise.all([
+      supabaseAdmin
+        .from("payslips")
+        .select("period, status")
+        .eq("tenant_id", tenantId)
+        .eq("employee_id", employeeId)
+        .in("period", periods),
+      supabaseAdmin
+        .from("attendance_sheets")
+        .select("period, status")
+        .eq("tenant_id", tenantId)
+        .eq("employee_id", employeeId)
+        .in("period", periods),
+    ])
+    if (slips.error || sheets.error) return []
+    const slipOf = new Map(((slips.data ?? []) as Array<{ period: string; status: string | null }>).map((r) => [r.period, r.status]))
+    const sheetOf = new Map(((sheets.data ?? []) as Array<{ period: string; status: string | null }>).map((r) => [r.period, r.status]))
+    return periods.map((period) => ({
+      period,
+      payslipStatus: slipOf.get(period) ?? null,
+      sheetStatus: sheetOf.get(period) ?? null,
+    }))
+  } catch {
+    return []
+  }
+}
