@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   BOSS_SETTING_BOOTSTRAP_NOTE,
-  BOSS_SETTING_HANDOVER_NOTE,
   BOSS_SETTING_LOCKED_NOTE,
   CREDENTIALS_LOCKED_NOTE,
   PLATFORM_ADMIN_ASSIGN_NOTE,
@@ -53,23 +52,25 @@ describe("privilegePolicyOf — 從 branding.features 取老闆與解鎖人", ()
 });
 
 describe("① 換老闆設定", () => {
-  it("有老闆：只有老闆本人與 platform_admin 能換；HR 不行。沒有老闆：HR 可做第一次設定。登入者未載入先不鎖", () => {
+  it("2026-11-17：只有平台管理員能設定或更換老闆——老闆本人、HR（有無老闆都一樣）不行；登入者未載入先鎖", () => {
     expect(canChangeBossSetting(hr, BOSS)).toBe(false);
-    expect(canChangeBossSetting(boss, BOSS)).toBe(true);
-    expect(canChangeBossSetting({ id: BOSS.toUpperCase(), role: "hr_admin" }, BOSS)).toBe(true);
+    expect(canChangeBossSetting(boss, BOSS)).toBe(false);
+    expect(canChangeBossSetting({ id: BOSS.toUpperCase(), role: "hr_admin" }, BOSS)).toBe(false);
     expect(canChangeBossSetting(pa, BOSS)).toBe(true);
-    expect(canChangeBossSetting(hr, null)).toBe(true);
-    expect(canChangeBossSetting(hr, "")).toBe(true);
-    expect(canChangeBossSetting(null, BOSS)).toBe(true);
+    expect(canChangeBossSetting(pa, null)).toBe(true);
+    expect(canChangeBossSetting(hr, null)).toBe(false);
+    expect(canChangeBossSetting(hr, "")).toBe(false);
+    expect(canChangeBossSetting(null, BOSS)).toBe(false);
   });
 
-  it("bossSettingNote：HR 看到『只有平台管理員（老闆）…』、沒老闆時看到可先設定、老闆本人看到交棒提醒、平台管理員不需要提醒", () => {
+  it("bossSettingNote：非平台管理員一律唯讀＋說明（有老闆／沒老闆兩種文案），平台管理員不需要提醒", () => {
     expect(bossSettingNote(hr, BOSS)).toEqual({ tone: "locked", text: BOSS_SETTING_LOCKED_NOTE });
-    expect(bossSettingNote(hr, null)).toEqual({ tone: "bootstrap", text: BOSS_SETTING_BOOTSTRAP_NOTE });
-    expect(bossSettingNote(boss, BOSS)).toEqual({ tone: "handover", text: BOSS_SETTING_HANDOVER_NOTE });
+    expect(bossSettingNote(hr, null)).toEqual({ tone: "locked", text: BOSS_SETTING_BOOTSTRAP_NOTE });
+    expect(bossSettingNote(boss, BOSS)).toEqual({ tone: "locked", text: BOSS_SETTING_LOCKED_NOTE });
     expect(bossSettingNote(pa, BOSS)).toBeNull();
     expect(bossSettingNote(null, BOSS)).toBeNull();
-    expect(BOSS_SETTING_LOCKED_NOTE).toContain("老闆");
+    expect(BOSS_SETTING_LOCKED_NOTE).toBe("只有平台管理員可設定或更換老闆");
+    expect(BOSS_SETTING_BOOTSTRAP_NOTE).toContain("只有平台管理員可設定或更換老闆");
   });
 
   it("needsBossHandoverConfirm：只有老闆本人把老闆換成別人／清除時才要先確認；沒變、platform_admin、HR 都不用", () => {

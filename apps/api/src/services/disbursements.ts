@@ -39,7 +39,7 @@ import { writeAuditLog, writeAuditLogStrict } from "./audit.js"
 import { firstNewlyPickedInactive } from "./company-lifecycle.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { isHrRole } from "../middleware/scope.js"
-import { composeAccountSnapshot, holderSegment, maskBankAccount, normalizeAccountNumber, normalizeAccountSnapshot, splitAccountSnapshot, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
+import { composeAccountSnapshot, holderSegment, maskBankAccount, normalizeAccountNumber, splitAccountSnapshot, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
 
 /**
  * 放款專區——匯款紀錄（disbursements）× 分攤（disbursement_allocations）×
@@ -126,8 +126,13 @@ export function disbursementsHaveApproval(): Promise<boolean> {
 }
 /** 讀 disbursements 時要帶的欄位（已套用簽核欄位就一起帶回來）。 */
 export async function disbursementCols(): Promise<string> {
-  if (!(await disbursementsHaveApproval())) return DISBURSEMENT_COLS
-  return (await disbursementsHaveEditors()) ? DISBURSEMENT_COLS_APPROVAL_EDITORS : DISBURSEMENT_COLS_APPROVAL
+  const split = (await disbursementsHaveSplitAccount()) ? ", payee_bank_account_number, payee_account_holder" : ""
+  if (!(await disbursementsHaveApproval())) return DISBURSEMENT_COLS + split
+  return ((await disbursementsHaveEditors()) ? DISBURSEMENT_COLS_APPROVAL_EDITORS : DISBURSEMENT_COLS_APPROVAL) + split
+}
+/** disbursements 的收款帳號／戶名分欄（migration 0106）是否已套用。 */
+export function disbursementsHaveSplitAccount(): Promise<boolean> {
+  return columnsExist("disbursements", "payee_bank_account_number, payee_account_holder")
 }
 /** `project_subcontract_payments` 的驗收欄位（migration 0050）是否已套用。 */
 export function paymentsHaveAcceptance(): Promise<boolean> {
@@ -149,6 +154,9 @@ export type DisbursementRow = {
   payee_bank_name: string | null
   payee_bank_account: string | null
   payee_bank_code: string | null
+  /** 0106：收款帳號（只含數字）與戶名分欄；欄位未套用或舊單為 undefined／null（改讀 payee_bank_account 快照）。 */
+  payee_bank_account_number?: string | null
+  payee_account_holder?: string | null
   paying_company_id: string
   paying_company_name: string | null
   paying_bank_account: string | null
@@ -558,6 +566,8 @@ export type SerializedDisbursement = {
   payeeAccountMasked?: string | null
   /** 帳戶來源：roster＝照名冊（登錄廠商）／manual＝手動輸入（非登錄收款方）。 */
   payeeAccountSource?: "roster" | "manual"
+  /** 0106：收款帳號（只含數字）。完整帳號——簽核端點遮成 null（routes/disbursements.ts maskPayeeBank）。 */
+  payeeBankAccountNumber?: string | null
   /** 驗收 M2：真正的帳戶戶名（登錄廠商取名冊 account_holder；手動取快照「帳號 戶名」的戶名段）；查不到 null。 */
   payeeAccountHolder?: string | null
   /** 登錄廠商的名冊收款帳戶是否經第二人確認（0104 bank_verified_at）；未確認時送審／核准／付款 409 vendor_bank_unverified。 */
@@ -696,9 +706,10 @@ export function serializeDisbursement(
     payeeBankName: d.payee_bank_name,
     payeeBankAccount: d.payee_bank_account,
     payeeBankCode: d.payee_bank_code,
-    payeeAccountMasked: maskBankAccount(d.payee_bank_account),
+    payeeBankAccountNumber: d.payee_bank_account_number ?? null,
+    payeeAccountMasked: d.payee_bank_account_number ? `****${d.payee_bank_account_number.slice(-4)}` : maskBankAccount(d.payee_bank_account),
     payeeAccountSource: d.payee_kind === "vendor" && d.vendor_id ? "roster" : "manual",
-    payeeAccountHolder: holderSegment(d.payee_bank_account),
+    payeeAccountHolder: d.payee_bank_account_number || d.payee_account_holder ? (d.payee_account_holder ?? null) : holderSegment(d.payee_bank_account),
     payingCompanyId: d.paying_company_id,
     payingCompanyName: d.paying_company_name ?? companies.get(d.paying_company_id)?.name ?? null,
     payingBankAccount: d.paying_bank_account,
@@ -897,7 +908,8 @@ async function attachVendorBankStatus(tenantId: string, items: SerializedDisburs
       d.vendorBankChangePending = pending.has(key)
       if (verified.has(key)) d.vendorBankVerified = verified.get(key)
       const holder = holders.get(key)
-      if (holder) {
+      // 有分欄的單：戶名與末 4 碼直接用分欄（不再解析快照）。
+      if (holder && !d.payeeBankAccountNumber) {
         d.payeeAccountHolder = holder
         // 快照是「帳號 戶名」：知道戶名後重新遮，避免戶名開頭數字混進末 4 碼。
         if (d.payeeBankAccount) d.payeeAccountMasked = maskBankAccount(d.payeeBankAccount, holder)
@@ -1985,7 +1997,7 @@ function bankNameSnapshotMatchesVendor(v: VendorLite, snapshot: string | null | 
  */
 export async function assertPayeeBankStillMatchesVendor(
   tenantId: string,
-  current: Pick<DisbursementRow, "payee_kind" | "vendor_id" | "payee_bank_account" | "payee_bank_code" | "payee_bank_name"> & { method?: DisbursementMethod | null },
+  current: Pick<DisbursementRow, "payee_kind" | "vendor_id" | "payee_bank_account" | "payee_bank_code" | "payee_bank_name" | "payee_bank_account_number" | "payee_account_holder"> & { method?: DisbursementMethod | null },
 ): Promise<void> {
   if (current.payee_kind !== "vendor" || !current.vendor_id) return
   // 2026-11-17 雙人覆核：廠商帳戶變更待覆核期間，這家廠商的單不能送審／核准／付款（避免覆核期間把錢匯出去）。
@@ -2016,7 +2028,11 @@ export async function assertPayeeBankStillMatchesVendor(
   }
   const ok =
     !!vendor &&
-    bankSnapshotMatchesVendor(vendor, "payeeBankAccount", current.payee_bank_account) &&
+    // 驗收第四輪：有分欄就用分欄比對（帳號＝名冊帳號正規化、戶名＝名冊戶名或空），沒有才比舊快照。
+    (current.payee_bank_account_number
+      ? current.payee_bank_account_number === normalizeAccountNumber(vendor.bank_account) &&
+        (current.payee_account_holder == null || current.payee_account_holder === rosterAccountHolder(vendor))
+      : bankSnapshotMatchesVendor(vendor, "payeeBankAccount", current.payee_bank_account)) &&
     bankSnapshotMatchesVendor(vendor, "payeeBankCode", current.payee_bank_code) &&
     bankNameSnapshotMatchesVendor(vendor, current.payee_bank_name)
   if (!ok) {
@@ -2047,6 +2063,9 @@ type ResolvedHeader = {
   payee_bank_name: string | null
   payee_bank_account: string | null
   payee_bank_code: string | null
+  /** 0106 分欄（欄位未套用時寫入前剔除，見 headerRow）。 */
+  payee_bank_account_number?: string | null
+  payee_account_holder?: string | null
   paying_company_id: string
   paying_company_name: string | null
   paying_bank_account: string | null
@@ -2079,6 +2098,101 @@ function companyBankAccount(c: CompanyLite): string | null {
  * （400 `company_inactive`）。`stored` 是單據上目前已存的兩個欄位（修改草稿時帶入）：
  * 與已存值相同＝沿用，放行——不然舊草稿上的公司後來被停用，這張單連備註都改不了。
  */
+/* ── 0106 收款帳號／戶名分欄 ─────────────────────────────────────── */
+
+const CONTROL_CHARS = /[\p{Cc}\p{Cf}\u2028\u2029]/u
+
+/** 帳號：NFKC 後只收數字、空白、連字號（否則 400 invalid_payee_bank_account），存成純數字；空回 null。 */
+export function validatePayeeAccountNumber(raw: string | null | undefined): string | null {
+  const t = String(raw ?? "").normalize("NFKC").trim()
+  if (!t) return null
+  if (!/^[\d\s\-‐–—]+$/.test(t)) {
+    throw new DisbursementError(400, "invalid_payee_bank_account", { message: "收款帳號只能有數字（可含空白或連字號）" })
+  }
+  const digits = t.replace(/\D/g, "")
+  if (digits.length > 40) throw new DisbursementError(400, "invalid_payee_bank_account", { message: "收款帳號太長" })
+  return digits || null
+}
+
+/** 戶名：原樣（trim），拒收控制字元／格式字元／換行（H1：複製匯款資訊與匯出不可被注入換行），最長 120 字；空回 null。 */
+export function validatePayeeAccountHolder(raw: string | null | undefined): string | null {
+  const t = String(raw ?? "").trim()
+  if (!t) return null
+  if (CONTROL_CHARS.test(t)) {
+    throw new DisbursementError(400, "invalid_payee_account_holder", { message: "帳戶戶名不可含換行或不可見字元" })
+  }
+  if (t.length > 120) throw new DisbursementError(400, "invalid_payee_account_holder", { message: "帳戶戶名最多 120 字" })
+  return t
+}
+
+/** 名冊帳號 → 分欄帳號（只含數字才採用；名冊有其他字元就不寫分欄、只留快照）。 */
+function rosterAccountNumber(v: VendorLite): string | null {
+  const n = normalizeAccountNumber(v.bank_account)
+  return /^\d{1,40}$/.test(n) ? n : null
+}
+function rosterAccountHolder(v: VendorLite): string | null {
+  const h = String(v.account_holder ?? "").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "").trim()
+  return h ? h.slice(0, 120) : null
+}
+
+/**
+ * 決定這張單的收款帳號（分欄＋相容快照）。
+ * - 登錄廠商：沒有送帳戶（或已因 bankTouched 清掉）→ 照名冊（帳號正規化、戶名＝名冊 account_holder）；
+ *   送回的快照與 DB 現值相同 → 原樣保留（含分欄）。
+ * - 其他：送了分欄（payeeBankAccountNumber／payeeAccountHolder）→ 只送其中一欄時另一欄沿用 DB 現值（storedSplit；
+ *   舊單沒有分欄才解析舊快照）；只送舊的單一字串 → 與 DB 現值相同就原樣保留，否則解析後驗證再分欄存。
+ */
+function resolvePayeeAccount(
+  vendor: VendorLite | null,
+  input: Omit<DisbursementInput, "status" | "allocations">,
+  opts: { storedBank?: Partial<Record<PayeeBankField, string | null>>; storedSplit?: { number: string | null; holder: string | null } },
+): { number: string | null; holder: string | null; snapshot: string | null } {
+  const stored = opts.storedBank?.payeeBankAccount ?? null
+  const storedParts = (): { number: string | null; holder: string | null } => {
+    if (opts.storedSplit && (opts.storedSplit.number !== null || opts.storedSplit.holder !== null)) return opts.storedSplit
+    if (!stored) return { number: null, holder: null }
+    const p = splitAccountSnapshot(stored, vendor?.account_holder ?? null)
+    const n = normalizeAccountNumber(p.account)
+    return { number: /^\d{1,40}$/.test(n) ? n : null, holder: p.holder }
+  }
+  const sameAsStored = (sent: string | null | undefined) => stored !== null && sent !== undefined && (sent ?? "").trim() === stored.trim()
+  if (vendor) {
+    const sent = input.payeeBankAccount
+    if (sent === undefined) {
+      const number = rosterAccountNumber(vendor)
+      const holder = rosterAccountHolder(vendor)
+      return { number, holder, snapshot: vendorBankDefault(vendor, "payeeBankAccount") }
+    }
+    if (sameAsStored(sent)) return { ...storedParts(), snapshot: stored }
+    if (!(sent ?? "").trim()) return { number: null, holder: null, snapshot: null }
+    const p = splitAccountSnapshot(sent, vendor.account_holder)
+    const number = validatePayeeAccountNumber(p.account)
+    const holder = validatePayeeAccountHolder(p.holder ?? vendor.account_holder)
+    return { number, holder, snapshot: composeAccountSnapshot(number, holder) }
+  }
+  if (input.payeeBankAccountNumber !== undefined || input.payeeAccountHolder !== undefined) {
+    const base = storedParts()
+    const number = input.payeeBankAccountNumber !== undefined ? validatePayeeAccountNumber(input.payeeBankAccountNumber) : base.number
+    const holder = input.payeeAccountHolder !== undefined ? validatePayeeAccountHolder(input.payeeAccountHolder) : base.holder
+    return { number, holder, snapshot: composeAccountSnapshot(number, holder) }
+  }
+  const sent = input.payeeBankAccount
+  if (sent === undefined) return { ...storedParts(), snapshot: stored }
+  if (sameAsStored(sent)) return { ...storedParts(), snapshot: stored }
+  if (!(sent ?? "").trim()) return { number: null, holder: null, snapshot: null }
+  const p = splitAccountSnapshot(sent)
+  const number = validatePayeeAccountNumber(p.account)
+  const holder = validatePayeeAccountHolder(p.holder)
+  return { number, holder, snapshot: composeAccountSnapshot(number, holder) }
+}
+
+/** 寫入用的單頭：0106 分欄未套用時剔除分欄鍵（schema-compat）。 */
+async function headerRow(header: ResolvedHeader): Promise<Record<string, unknown>> {
+  if (await disbursementsHaveSplitAccount()) return { ...header }
+  const { payee_bank_account_number: _n, payee_account_holder: _h, ...rest } = header
+  return rest
+}
+
 async function resolveHeader(
   tenantId: string,
   input: Omit<DisbursementInput, "status" | "allocations">,
@@ -2087,6 +2201,8 @@ async function resolveHeader(
     checkPayeeName?: boolean
     checkBankFields?: Iterable<PayeeBankField>
     storedBank?: Partial<Record<PayeeBankField, string | null>>
+    /** 0106：DB 現有的分欄值（PATCH 只送其中一欄時，另一欄沿用這裡）。 */
+    storedSplit?: { number: string | null; holder: string | null }
     /** 這次有送／改到任一銀行欄位（未給＝看 input 有沒有送）：登錄廠商時三欄整組照名冊帶入。 */
     bankTouched?: boolean
   } = {},
@@ -2149,26 +2265,17 @@ async function resolveHeader(
   const amount = roundMoney(input.amount)
   const withheld = roundMoney(input.withheldAmount ?? 0)
   if (amount < 0 || withheld < 0) throw new DisbursementError(400, "invalid_amount")
+  const account = resolvePayeeAccount(vendor, input, opts)
 
   return {
     payee_kind: input.payeeKind,
     vendor_id: vendor?.id ?? null,
     payee_name: payeeName,
     payee_bank_name: input.payeeBankName !== undefined ? (input.payeeBankName ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankName") : null,
-    // 驗收 F2／第三輪：
-    // - 分欄送（payeeBankAccountNumber／payeeAccountHolder）→ 帳號正規化、戶名原樣組快照，不再拆字串；
-    // - 單一字串且與 DB 現有快照相同（草稿整份回送）→ 原樣保留，不改寫既有快照（避免舊快照的戶名被併進帳號）；
-    // - 其他單一字串 → 拆開後帳號段正規化（登錄廠商依名冊戶名精確拆）。
-    payee_bank_account:
-      !vendor && (input.payeeBankAccountNumber !== undefined || input.payeeAccountHolder !== undefined)
-        ? composeAccountSnapshot(input.payeeBankAccountNumber, input.payeeAccountHolder)
-        : input.payeeBankAccount !== undefined && opts.storedBank?.payeeBankAccount != null &&
-            (input.payeeBankAccount ?? "").trim() === (opts.storedBank.payeeBankAccount ?? "").trim()
-          ? opts.storedBank.payeeBankAccount
-          : normalizeAccountSnapshot(
-              input.payeeBankAccount !== undefined ? (input.payeeBankAccount ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankAccount") : null,
-              vendor?.account_holder ?? null,
-            ),
+    // 驗收第四輪：帳號與戶名分欄存（resolvePayeeAccount），payee_bank_account 仍寫「帳號 戶名」相容快照。
+    payee_bank_account: account.snapshot,
+    payee_bank_account_number: account.number,
+    payee_account_holder: account.holder,
     payee_bank_code: input.payeeBankCode !== undefined ? (input.payeeBankCode ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankCode") : null,
     paying_company_id: paying.id,
     paying_company_name: paying.name,
@@ -2796,7 +2903,7 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
         tenant_id: tenantId,
         disbursement_no: disbursementNo,
         status: input.status,
-        ...header,
+        ...(await headerRow(header)),
         paid_by_emp_id: input.status === "paid" ? actor.empId : null,
         created_by_emp_id: actor.empId,
       })
@@ -3095,6 +3202,7 @@ export async function updateDisbursement(
         checkPayeeName: payeeChanged || payeeNameChanged,
         checkBankFields: bankFieldsToCheck,
         storedBank,
+        storedSplit: { number: current.payee_bank_account_number ?? null, holder: current.payee_account_holder ?? null },
         bankTouched: payeeChanged || bankFieldsToCheck.length > 0,
       },
     )
@@ -3179,7 +3287,7 @@ export async function updateDisbursement(
     const claimedAt = await guardedUpdate({ updated_at: nowIso, ...editorsPatch() }, "draft claim", current.updated_at ?? null)
     // 分攤先寫：唯一預期中的失敗（409 allocation_not_removable）發生在還沒動到單頭之前。
     if (patch.allocations !== undefined) await replaceAllocations(tenantId, id, allocations)
-    await guardedUpdate({ ...header, updated_at: nowIso }, "draft", claimedAt)
+    await guardedUpdate({ ...(await headerRow(header)), updated_at: nowIso }, "draft", claimedAt)
   }
 
   await writeAuditLog({

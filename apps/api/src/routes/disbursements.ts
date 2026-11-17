@@ -203,7 +203,7 @@ async function actorOf(tenantId: string, req: Request): Promise<Actor> {
  */
 export function maskPayeeBank<T>(d: T): T {
   if (!d || typeof d !== "object") return d
-  return { ...d, payeeBankAccount: null }
+  return { ...d, payeeBankAccount: null, payeeBankAccountNumber: null }
 }
 
 function handleError(err: unknown, res: Response, next: NextFunction): void {

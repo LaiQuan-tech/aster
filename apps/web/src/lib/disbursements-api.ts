@@ -70,6 +70,8 @@ export interface Disbursement {
   payeeBankAccount: string | null
   /** 收款方銀行代碼，與 payeeBankName／payeeBankAccount 同組快照。 */
   payeeBankCode: string | null
+  /** 0106：收款帳號（只含數字）分欄；簽核端點為 null。舊單／舊 API 沒有。 */
+  payeeBankAccountNumber?: string | null
   /** 2026-11-17：帳號末 4 碼（****1234，後端遮好）。簽核端點的 payeeBankAccount 一律 null，只有這個。舊 API 沒帶。 */
   payeeAccountMasked?: string | null
   /** 帳戶來源：roster＝照名冊／manual＝手動輸入（非登錄廠商）。 */
@@ -190,7 +192,7 @@ export interface DisbursementInput {
   payeeName?: string
   payeeBankName?: string | null
   payeeBankAccount?: string | null
-  /** 驗收第三輪：「其他」收款分欄送帳號與戶名（API 組快照：帳號正規化、戶名原樣）。 */
+  /** 驗收第三輪：「其他」收款分欄送帳號與戶名（API 分欄存：帳號正規化、戶名原樣）。 */
   payeeBankAccountNumber?: string | null
   payeeAccountHolder?: string | null
   payeeBankCode?: string | null
@@ -628,6 +630,8 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   vendor_bank_missing: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶。",
   payee_is_registered_vendor: "收款對象與名冊廠商名稱相同，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
   payee_name_similar: "收款名稱與名冊廠商相近；若是同一家請改選登錄廠商，若確為不同公司請填寫說明。",
+  invalid_payee_bank_account: "收款帳號只能有數字（可含空白或連字號）。",
+  invalid_payee_account_holder: "帳戶戶名不可含換行或不可見字元，最多 120 字。",
   vendor_bank_unverified: "此廠商的收款帳戶尚未確認，請老闆或平台管理員確認（在廠商名冊核准收款帳戶）後再送審、核准或付款。",
   vendor_bank_change_pending: "此廠商的收款帳戶變更正在等待覆核（老闆／平台管理員），覆核完成前不能送審、核准或付款。",
   payee_bank_changed: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出；已核准的單請先撤回簽核再編輯。",

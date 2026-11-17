@@ -44,6 +44,9 @@ export interface DisbursementFormInitial {
   payeeName?: string;
   payeeBankName?: string | null;
   payeeBankAccount?: string | null;
+  /** 0106 分欄（有就優先，沒有才解析 payeeBankAccount 舊快照）。 */
+  payeeBankAccountNumber?: string | null;
+  payeeAccountHolder?: string | null;
   payeeBankCode?: string | null;
   payingCompanyId?: string | null;
   method?: DisbursementMethod;
@@ -146,8 +149,9 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
     payeeName: d?.payeeName ?? "",
     payeeBankName: d?.payeeBankName ?? "",
     // 手動收款：既有快照「帳號 戶名」拆成兩欄顯示（沒改就原樣回送，不改寫既有快照）。
-    payeeBankAccount: d?.payeeKind === "other" ? splitAccountSnapshot(d?.payeeBankAccount).account : (d?.payeeBankAccount ?? ""),
-    payeeAccountHolder: d?.payeeKind === "other" ? (splitAccountSnapshot(d?.payeeBankAccount).holder ?? "") : "",
+    // 驗收第四輪：帳號與戶名分欄（廠商單與其他單都是）；舊單沒有分欄才解析舊快照。
+    payeeBankAccount: d?.payeeBankAccountNumber ?? (d?.payeeAccountHolder != null ? "" : splitAccountSnapshot(d?.payeeBankAccount).account),
+    payeeAccountHolder: d?.payeeAccountHolder ?? (d?.payeeBankAccountNumber != null ? "" : (splitAccountSnapshot(d?.payeeBankAccount).holder ?? "")),
     payeeBankCode: d?.payeeBankCode ?? "",
     payingCompanyId: d?.payingCompanyId ?? "",
     method: d?.method ?? "transfer",
@@ -243,6 +247,7 @@ export default function DisbursementForm({
       payeeName: v ? v.name : s.payeeName,
       payeeBankName: v ? (v.bankName ?? "") : s.payeeBankName,
       payeeBankAccount: v ? (v.bankAccount ?? "") : s.payeeBankAccount,
+      payeeAccountHolder: v ? (v.accountHolder ?? "") : s.payeeAccountHolder,
       payeeBankCode: v ? (v.bankCode ?? "") : s.payeeBankCode,
     }));
   }
@@ -304,6 +309,7 @@ export default function DisbursementForm({
       ...s,
       payeeBankName: selectedVendor.bankName ?? "",
       payeeBankAccount: selectedVendor.bankAccount ?? "",
+      payeeAccountHolder: selectedVendor.accountHolder ?? "",
       payeeBankCode: selectedVendor.bankCode ?? "",
     }));
   }
@@ -351,7 +357,7 @@ export default function DisbursementForm({
       payeeBankName: state.payeeBankName.trim() || null,
       ...(state.payeeKind === "other"
         ? initial?.id && !manualAccountDirty && initial.payeeKind === "other"
-          ? { payeeBankAccount: initial.payeeBankAccount ?? null } // 沒動帳號／戶名 → 原樣回送既有快照
+          ? {} // 沒動帳號／戶名 → 不送（後端沿用 DB 現值）
           : { payeeBankAccountNumber: state.payeeBankAccount.trim() || null, payeeAccountHolder: state.payeeAccountHolder.trim() || null }
         : { payeeBankAccount: state.payeeBankAccount.trim() || null }),
       payeeBankCode: state.payeeBankCode.trim() || null,
@@ -459,9 +465,13 @@ export default function DisbursementForm({
                             payeeName: v.name,
                             payeeBankName: v.bankName ?? "",
                             payeeBankAccount: v.bankAccount ?? "",
+                            payeeAccountHolder: v.accountHolder ?? "",
                             payeeBankCode: v.bankCode ?? "",
                           }
-                        : { ...s, payeeKind: k };
+                        : k === "other" && s.payeeKind === "vendor"
+                          // 廠商 → 其他：名冊帶來的帳戶不沿用（兩欄清空，由使用者重填）。
+                          ? { ...s, payeeKind: k, payeeBankName: "", payeeBankCode: "", payeeBankAccount: "", payeeAccountHolder: "" }
+                          : { ...s, payeeKind: k };
                     })
                   }
                 />
@@ -520,17 +530,16 @@ export default function DisbursementForm({
           <label className={labelCls}>收款帳號</label>
           <input className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`} value={state.payeeBankAccount} onChange={(e) => { setManualAccountDirty(true); set("payeeBankAccount", e.target.value); }} readOnly={state.payeeKind === "vendor"} />
         </div>
-        {state.payeeKind === "other" && (
-          <div>
-            <label className={labelCls}>帳戶戶名</label>
-            <input
-              className={inputCls}
-              value={state.payeeAccountHolder}
-              onChange={(e) => { setManualAccountDirty(true); set("payeeAccountHolder", e.target.value); }}
-              placeholder="存摺上的戶名（與帳號分開填）"
-            />
-          </div>
-        )}
+        <div>
+          <label className={labelCls}>帳戶戶名</label>
+          <input
+            className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`}
+            value={state.payeeAccountHolder}
+            onChange={(e) => { setManualAccountDirty(true); set("payeeAccountHolder", e.target.value); }}
+            readOnly={state.payeeKind === "vendor"}
+            placeholder={state.payeeKind === "vendor" ? "照名冊帶入" : "存摺上的戶名（與帳號分開填）"}
+          />
+        </div>
         {/* 2026-11-17：名冊帳戶尚未經老闆／平台管理員 確認（或變更待覆核）→ 可以存草稿，但送審／核准／付款會被擋。 */}
         {selectedVendor && selectedVendor.bankChangePending === true && (
           <div className="col-span-full rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800" role="alert">

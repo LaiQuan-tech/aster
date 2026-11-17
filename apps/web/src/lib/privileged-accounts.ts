@@ -30,10 +30,9 @@ export interface PrivilegeTarget {
 }
 
 /** 設定頁唯讀時、以及後端回 403 not_boss（換老闆）時都顯示這句。 */
-export const BOSS_SETTING_LOCKED_NOTE = "只有平台管理員（老闆）可以更換老闆設定";
-/** 還沒有老闆時的提示（HR 可以先做第一次設定）。 */
-export const BOSS_SETTING_BOOTSTRAP_NOTE =
-  "目前還沒有設定老闆，可以先指定一位；設定之後要換人，只有平台管理員（老闆）能改。";
+export const BOSS_SETTING_LOCKED_NOTE = "只有平台管理員可設定或更換老闆";
+/** 還沒有老闆時的提示（2026-11-17 起第一次設定也只限平台管理員）。 */
+export const BOSS_SETTING_BOOTSTRAP_NOTE = "目前還沒有設定老闆；只有平台管理員可設定或更換老闆，請聯絡平台管理員。";
 /** 老闆本人看到的提示（交棒後自己就不能再改回來）。 */
 export const BOSS_SETTING_HANDOVER_NOTE = "你是目前的老闆，可以交棒給別人；交棒之後就不能再自己改回來。";
 /** 員工列表：重設密碼、寄重設／邀請信這幾個動作被停用時的說明。 */
@@ -57,26 +56,23 @@ export function privilegePolicyOf(features: Record<string, unknown> | null | und
 }
 
 /**
- * ① 能不能更換老闆設定：還沒有老闆 → 任何 HR；有老闆 → 老闆本人或 platform_admin。
- * 登入者資料還沒載入（null）→ 先不鎖（後端才是守門員，被擋會回 403 並顯示說明），免得 /me 取不到時整個欄位永遠鎖死。
+ * ① 能不能設定／更換老闆（2026-11-17 起與 API services/privileged-accounts.ts canChangeBoss 一致）：只限在職 platform_admin——
+ * 老闆本人交棒、沒有老闆時 HR 第一次設定都不行（HR 可藉此造出覆核收款帳戶的「老闆」）。
+ * 登入者資料還沒載入（null）→ 先鎖（後端才是守門員；寧可多鎖不放）。
  */
-export function canChangeBossSetting(viewer: PrivilegeViewer | null | undefined, bossEmpId: string | null | undefined): boolean {
-  if (!viewer) return true;
-  if (!bossEmpId) return true;
-  return canEditUnlockList(viewer, bossEmpId);
+export function canChangeBossSetting(viewer: PrivilegeViewer | null | undefined, _bossEmpId?: string | null | undefined): boolean {
+  if (!viewer) return false;
+  return lower(viewer.role) === PLATFORM_ADMIN;
 }
 
-/** 老闆設定區要顯示哪一句說明；沒有要顯示的回 null。 */
+/** 老闆設定區要顯示哪一句說明；platform_admin 不需要說明（回 null）。 */
 export function bossSettingNote(
   viewer: PrivilegeViewer | null | undefined,
   bossEmpId: string | null | undefined,
 ): { tone: "locked" | "bootstrap" | "handover"; text: string } | null {
   if (!viewer) return null;
-  if (!bossEmpId) return { tone: "bootstrap", text: BOSS_SETTING_BOOTSTRAP_NOTE };
-  if (!canEditUnlockList(viewer, bossEmpId)) return { tone: "locked", text: BOSS_SETTING_LOCKED_NOTE };
-  // 老闆本人（不是 platform_admin）才需要「交棒後不能改回來」的提醒。
-  if (lower(viewer.role) !== PLATFORM_ADMIN) return { tone: "handover", text: BOSS_SETTING_HANDOVER_NOTE };
-  return null;
+  if (lower(viewer.role) === PLATFORM_ADMIN) return null;
+  return { tone: "locked", text: bossEmpId ? BOSS_SETTING_LOCKED_NOTE : BOSS_SETTING_BOOTSTRAP_NOTE };
 }
 
 /** 老闆本人（不是 platform_admin）要把老闆換成「別人」或清除時，要先確認「交棒後不能自己改回來」。 */

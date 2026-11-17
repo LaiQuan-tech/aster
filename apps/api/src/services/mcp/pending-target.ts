@@ -156,10 +156,11 @@ export async function describeTarget(get: UserGet, method: string, path: string,
         return { ok: true, summary: `批次放款／AI 送出的清單 ${ids.length} 張` }
       }
       if (!seg[1]) {
-        const account = b.payeeBankAccount ?? b.payee_bank_account
+        const account = b.payeeBankAccountNumber ?? b.payee_bank_account_number ?? b.payeeBankAccount ?? b.payee_bank_account
+        const holder = b.payeeAccountHolder ?? b.payee_account_holder
         return {
           ok: true,
-          summary: `新增放款單／AI 送出的受款人${aiText(b.payeeName ?? b.payee_name)}・金額 ${money(b.amount)}${typeof account === "string" && account ? `・收款帳號 ${maskAccount(account)}` : ""}${bankCodeNameChanges(b).map((c) => `・${c}`).join("")}`,
+          summary: `新增放款單／AI 送出的受款人${aiText(b.payeeName ?? b.payee_name)}・金額 ${money(b.amount)}${typeof account === "string" && account ? `・收款帳號 ${maskAccount(account)}` : ""}${typeof holder === "string" && holder.trim() ? `・帳戶戶名${aiText(holder)}` : ""}${bankCodeNameChanges(b).map((c) => `・${c}`).join("")}`,
         }
       }
       if (!isUuid(id)) return { ok: true, summary: null }
@@ -176,8 +177,11 @@ export async function describeTarget(get: UserGet, method: string, path: string,
         const vendorId = b.vendorId ?? b.vendor_id
         if (vendorId !== undefined) changes.push(vendorId ? "AI 要更換收款廠商" : "AI 要移除收款廠商")
         changes.push(...bankCodeNameChanges(b))
-        const account = b.payeeBankAccount ?? b.payee_bank_account
+        // 驗收第四輪 H2：分欄（帳號只露末 4 碼＋戶名）優先。
+        const account = b.payeeBankAccountNumber ?? b.payee_bank_account_number ?? b.payeeBankAccount ?? b.payee_bank_account
         if (account !== undefined) changes.push(typeof account === "string" && account.trim() ? `AI 要改成的收款帳號 ${maskAccount(account)}` : "AI 要清空收款帳號（將照名冊帶入）")
+        const holder = b.payeeAccountHolder ?? b.payee_account_holder
+        if (holder !== undefined) changes.push(typeof holder === "string" && holder.trim() ? `AI 要改成的帳戶戶名${aiText(holder)}` : "AI 要清空帳戶戶名")
       }
       return {
         ok: true,

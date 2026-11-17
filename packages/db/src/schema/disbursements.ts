@@ -69,6 +69,9 @@ export const disbursements = pgTable(
     payeeName: text("payee_name").notNull(),
     payeeBankName: text("payee_bank_name"),
     payeeBankAccount: text("payee_bank_account"),
+    /** 收款帳號（只含數字，0106）與戶名（0106）分欄；payee_bank_account 仍寫「帳號 戶名」相容快照。 */
+    payeeBankAccountNumber: text("payee_bank_account_number"),
+    payeeAccountHolder: text("payee_account_holder"),
     /** 收款方銀行代碼，與 payeeBankName／payeeBankAccount 同組快照。 */
     payeeBankCode: text("payee_bank_code"),
     payingCompanyId: uuid("paying_company_id")

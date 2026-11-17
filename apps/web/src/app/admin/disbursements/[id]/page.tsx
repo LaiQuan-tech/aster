@@ -232,6 +232,8 @@ export default function DisbursementDetailPage() {
         payeeBankName: disbursement.payeeBankName,
         payeeBankCode: disbursement.payeeBankCode,
         payeeBankAccount: disbursement.payeeBankAccount,
+        payeeBankAccountNumber: disbursement.payeeBankAccountNumber,
+        payeeAccountHolder: disbursement.payeeAccountHolder,
         amount: disbursement.amount,
       }),
     );
@@ -309,6 +311,8 @@ export default function DisbursementDetailPage() {
     payeeName: d.payeeName,
     payeeBankName: d.payeeBankName,
     payeeBankAccount: d.payeeBankAccount,
+    payeeBankAccountNumber: d.payeeBankAccountNumber,
+    payeeAccountHolder: d.payeeAccountHolder,
     payeeBankCode: d.payeeBankCode,
     payingCompanyId: d.payingCompanyId,
     method: d.method,

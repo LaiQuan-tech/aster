@@ -104,6 +104,8 @@ export default function RecordsView({
         payeeBankName: d.payeeBankName,
         payeeBankCode: d.payeeBankCode,
         payeeBankAccount: d.payeeBankAccount,
+        payeeBankAccountNumber: d.payeeBankAccountNumber,
+        payeeAccountHolder: d.payeeAccountHolder,
         amount: d.amount,
       }),
     );

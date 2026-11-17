@@ -27,16 +27,26 @@ export interface RemittanceInfo {
   payeeBankName: string | null | undefined;
   payeeBankCode: string | null | undefined;
   payeeBankAccount: string | null | undefined;
+  /** 0106 分欄（放款單有就優先）：帳號只含數字、真正的帳戶戶名。 */
+  payeeBankAccountNumber?: string | null;
+  payeeAccountHolder?: string | null;
   /** 金額；廠商頁沒有金額時省略，該行不輸出。 */
   amount?: number | null;
 }
 
+/** 驗收第四輪 H1：輸出前去掉控制字元／格式字元／換行，避免戶名或帳號被注入多一行（後端也已拒收）。 */
+export function sanitizeRemittanceField(v: string | null | undefined): string {
+  return String(v ?? "").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
 /** 「複製匯款資訊」的文字組裝（純函式，不碰 DOM／clipboard，方便單元測試）。 */
 export function buildRemittanceText(d: RemittanceInfo): string {
+  const holder = sanitizeRemittanceField(d.payeeAccountHolder) || sanitizeRemittanceField(d.payeeName);
+  const account = sanitizeRemittanceField(d.payeeBankAccountNumber) || sanitizeRemittanceField(d.payeeBankAccount);
   const lines = [
-    `戶名：${d.payeeName || "—"}`,
-    `銀行：${formatBankLine(d.payeeBankName, d.payeeBankCode) || "—"}`,
-    `帳號：${d.payeeBankAccount || "—"}`,
+    `戶名：${holder || "—"}`,
+    `銀行：${sanitizeRemittanceField(formatBankLine(d.payeeBankName, d.payeeBankCode)) || "—"}`,
+    `帳號：${account || "—"}`,
   ];
   if (d.amount !== undefined && d.amount !== null) lines.push(`金額：${d.amount.toLocaleString()}`);
   return lines.join("\n");
