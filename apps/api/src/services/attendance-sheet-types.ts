@@ -172,6 +172,11 @@ export interface SheetMoney {
   overtimeHourlyBase?: number
   overtimeBaseIncludesAllowances?: boolean
   overtimeBaseIncludesAttendanceBonus?: boolean
+  /**
+   * 調薪中（2026-11-17）：base 是新本薪；prevBase＝調薪前本薪（出勤統計表「薪資」欄顯示它），diff＝新−舊。
+   * 沒有調薪中不帶。
+   */
+  salaryRaise?: { prevBase: number; newBase: number; diff: number; since?: string }
 }
 
 /** 月表金額試算失敗的原因代碼（見 SheetView.previewError）。 */

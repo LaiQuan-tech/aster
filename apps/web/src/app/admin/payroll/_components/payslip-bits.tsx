@@ -134,7 +134,8 @@ table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6p
 <h1>薪資單　${esc(name)}</h1>
 <div class="muted">期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${hourlyRateText(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${hourlyRateText(b.overtimeHourlyBase)}${overtimeBaseNote(b)}` : ""}</div>
 <h2>應發</h2><table>
-<tr><td>本薪</td><td style="text-align:right">${money(n(p.base))}</td></tr>
+${b.salaryRaise ? `<tr><td>本薪</td><td style="text-align:right">${money(n(b.salaryRaise.prevBase))}</td></tr>
+<tr><td>調薪差額（調薪中）</td><td style="text-align:right">${money(n(b.salaryRaise.diff))}</td></tr>` : `<tr><td>本薪</td><td style="text-align:right">${money(n(p.base))}</td></tr>`}
 <tr><td>加班費</td><td style="text-align:right">${money(n(p.overtime_pay))}</td></tr>
 <tr><td>夜間加給</td><td style="text-align:right">${money(n(p.night_pay))}</td></tr>
 <tr><td>全勤獎金</td><td style="text-align:right">${money(n(p.attendance_bonus))}</td></tr>

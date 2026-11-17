@@ -1935,6 +1935,8 @@ export function beyondCapSettlementAmount(
 function toMoney(breakdown: ReturnType<typeof computePayslip>, rules: RuleConfig): SheetMoney {
   return {
     base: breakdown.base,
+    // 調薪中（2026-11-17）：base 已是新本薪，另帶調薪前本薪與差額（出勤統計表「薪資」欄顯示舊數字＋差額行）。
+    ...(breakdown.salaryRaise ? { salaryRaise: breakdown.salaryRaise } : {}),
     hourlyWage: breakdown.hourlyWage,
     // 加班類給付的時薪基數（月薪制含計入的固定津貼；2026-11-08）。沒有＝同 hourlyWage。
     ...(breakdown.overtimeHourlyBase !== undefined

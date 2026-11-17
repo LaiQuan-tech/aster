@@ -216,6 +216,12 @@ export interface SalaryStructure {
   pensionNewSystem?: boolean;
   /** 本期預支金額 (扣項)。 */
   advance?: number;
+  /**
+   * 調薪中 (2026-11-17,salary_raises):baseSalary 已是**新本薪** (本俸、請假／加班時薪、實領都用新的),
+   * 但政府端投保調整未完成 → 勞健保投保薪資由呼叫端帶舊值;勞退自動算時以 prevBase 為基數 (舊級距)。
+   * 薪資單 lines 的本俸列顯示 prevBase,另列「調薪差額」= 新 − 舊,breakdown.salaryRaise 記兩個數字。只對月薪制有效。
+   */
+  salaryRaise?: { prevBase: number; since?: string };
 }
 
 /**
@@ -328,6 +334,11 @@ export interface PayslipAdjustmentLine {
 export interface PayslipBreakdown {
   /** 本俸 (月薪 baseSalary 或 出勤天數×dailyWage)。 */
   base: number;
+  /**
+   * 調薪中 (2026-11-17):base 是新本薪;prevBase = 調薪前本薪 (出勤統計表「薪資」欄、薪資單本俸列顯示它),
+   * diff = base − prevBase (薪資單另列「調薪差額」)。since = 調薪中起始月份 'YYYY-MM'。沒有調薪中不帶。
+   */
+  salaryRaise?: { prevBase: number; newBase: number; diff: number; since?: string };
   /** 與 base 同義的別名,保留供報表使用。 */
   regularPay?: number;
   /**

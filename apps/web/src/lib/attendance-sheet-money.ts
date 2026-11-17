@@ -18,7 +18,13 @@ export function sheetMoneySections(
     {
       title: "應發",
       rows: [
-        ["本薪", m.base],
+        // 調薪中（2026-11-17）：本薪列＝原本薪，另列調薪差額（兩列加總＝新本薪）。
+        ...(m.salaryRaise
+          ? ([
+              ["本薪（原）", m.salaryRaise.prevBase],
+              ["調薪差額（調薪中）", m.salaryRaise.diff],
+            ] as Array<[string, number | undefined]>)
+          : ([["本薪", m.base]] as Array<[string, number | undefined]>)),
         [`加班費 ${tierLabels[0]}`, m.otPayByTier.tier1],
         [`加班費 ${tierLabels[1]}`, m.otPayByTier.tier2],
         [`加班費 ${tierLabels[2]}`, m.otPayByTier.tier3],

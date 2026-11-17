@@ -1971,6 +1971,8 @@ export interface PayrollReport {
 
 /** 引擎 PayslipResult 存進 payslips.breakdown 的部分欄位（薪資明細表用）。 */
 export interface PayslipBreakdown {
+  /** 調薪中（2026-11-17）：本薪列顯示 prevBase，另列調薪差額 diff（base＝新本薪）。 */
+  salaryRaise?: { prevBase: number; newBase: number; diff: number; since?: string };
   allowances?: number;
   laborInsurance?: number;
   healthInsurance?: number;

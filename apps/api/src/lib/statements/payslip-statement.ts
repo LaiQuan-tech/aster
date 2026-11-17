@@ -252,7 +252,13 @@ export function insuranceRows(money: StatementMoney | null): AmountRow[] {
 
 /** 應發項目左欄：工資（本薪＋夜間加給）、福利（全勤獎金、定額補貼、課稅補發）。 */
 export function earningRows(money: StatementMoney | null): { wages: AmountRow[]; welfare: AmountRow[] } {
-  const wages: AmountRow[] = [{ label: "本薪", amount: money ? money.base : null }]
+  // 調薪中（2026-11-17）：本薪列＝調薪前本薪，另列「調薪差額」（兩列加總＝新本薪＝引擎 base）。
+  const wages: AmountRow[] = money?.salaryRaise
+    ? [
+        { label: "本薪", amount: money.salaryRaise.prevBase },
+        { label: "調薪差額", amount: money.salaryRaise.diff },
+      ]
+    : [{ label: "本薪", amount: money ? money.base : null }]
   const welfare: AmountRow[] = []
   if (money) {
     if (money.nightPay) wages.push({ label: "夜間加給", amount: money.nightPay })

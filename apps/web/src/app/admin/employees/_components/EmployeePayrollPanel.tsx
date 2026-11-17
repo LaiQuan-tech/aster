@@ -30,6 +30,7 @@ import { dangerLinkCls, Disclosure, formBoxCls, LinkButton, ListRow } from "./pa
 import { taxDependentsHeadline } from "@/lib/payroll-panel-text";
 import { apiErrorMessage } from "@/lib/api-client";
 import { salaryFormError, wageFieldsChanged, type WageFormValues } from "@/lib/salary-completeness";
+import { buildSalaryPutBody, salaryFormFromStructure } from "@/lib/salary-form";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -103,36 +104,22 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
     // Structure may 404 for a new employee — treat as blank.
     try {
       const { salary } = await getSalaryStructure(id);
-      setMethod(salary.method);
-      setBaseSalary(salary.base_salary ?? "");
-      setDailyWage(salary.daily_wage ?? "");
-      setHourlyWage(salary.hourly_wage ?? "");
-      setAgreedHoursPerWeek(salary.agreed_hours_per_week ?? "");
-      setAgreedDaysPerWeek(salary.agreed_days_per_week ?? "");
-      setLaborGrade(salary.labor_insured_salary ?? "");
-      setHealthGrade(salary.health_insured_salary ?? "");
-      setPensionPct(
-        salary.pension_voluntary_rate != null
-          ? String(Math.round(Number(salary.pension_voluntary_rate) * 10000) / 100)
-          : "",
-      );
-      const wage = salary.pension_wage != null && Number(salary.pension_wage) > 0 ? String(Number(salary.pension_wage)) : "";
-      const newSystem = salary.pension_new_system !== false;
-      setPensionWage(wage);
-      setPensionNewSystem(newSystem);
-      setLoadedPension({ wage, newSystem });
-      setLoadedWage({
-        method: salary.method,
-        baseSalary: salary.base_salary ?? "",
-        dailyWage: salary.daily_wage ?? "",
-        hourlyWage: salary.hourly_wage ?? "",
-      });
-      setLoadedValues({
-        baseSalary: salary.base_salary ?? "",
-        laborGrade: salary.labor_insured_salary ?? "",
-        healthGrade: salary.health_insured_salary ?? "",
-        pensionWage: wage,
-      });
+      // 2026-11-17：一律先轉成表單字串（PostgREST numeric 可能回數字，直接放進 state 會讓存檔比對 .trim() 丟錯、按了沒反應）。
+      const f = salaryFormFromStructure(salary);
+      setMethod(f.method);
+      setBaseSalary(f.baseSalary);
+      setDailyWage(f.dailyWage);
+      setHourlyWage(f.hourlyWage);
+      setAgreedHoursPerWeek(f.agreedHoursPerWeek);
+      setAgreedDaysPerWeek(f.agreedDaysPerWeek);
+      setLaborGrade(f.laborGrade);
+      setHealthGrade(f.healthGrade);
+      setPensionPct(f.pensionPct);
+      setPensionWage(f.pensionWage);
+      setPensionNewSystem(f.pensionNewSystem);
+      setLoadedPension({ wage: f.pensionWage, newSystem: f.pensionNewSystem });
+      setLoadedWage({ method: f.method, baseSalary: f.baseSalary, dailyWage: f.dailyWage, hourlyWage: f.hourlyWage });
+      setLoadedValues({ baseSalary: f.baseSalary, laborGrade: f.laborGrade, healthGrade: f.healthGrade, pensionWage: f.pensionWage });
     } catch {
       setMethod("monthly");
       setBaseSalary("");
@@ -163,6 +150,15 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
     if (!empId || saving) return;
     setSalaryMsg(null);
     setInsuredHint(null);
+    try {
+      await submitSalaryForm();
+    } catch (err) {
+      // 2026-11-17：任何未預期的錯誤都要在按鈕旁顯示，不能按了沒反應。
+      setSalaryMsg(`儲存失敗：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function submitSalaryForm() {
     // 2026-11-17：月薪制本薪 > 0、時薪制時薪 > 0、按出勤天數制日薪 > 0 且有時薪／本薪基準（API 也會擋）。
     // 計薪方式與三個薪資欄位都沒改（例如舊資料不完整、這次只改勞健保／工時／勞退）→ 不檢查、也不送這四欄。
     const wageError = wageFieldsChanged(loadedWage, { method, baseSalary, dailyWage, hourlyWage })
@@ -206,25 +202,26 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
       // M12：投保級距留空＝不帶欄位，API 會依「投保級距表」以投保基數自動選一級
       //（月薪制基數＝本薪；時薪制＝時薪 × 每週約定時數 × 52 ÷ 12），並把選到的值回來。
       // 填了就完全照填的存，手動覆寫永遠優先。
-      const wageChanged = wageFieldsChanged(loadedWage, { method, baseSalary, dailyWage, hourlyWage });
-      const res = await putSalaryStructure(empId, {
-        ...(wageChanged
-          ? {
-              method,
-              baseSalary: baseSalary ? Number(baseSalary) : null,
-              dailyWage: dailyWage ? Number(dailyWage) : null,
-              hourlyWage: hourlyWage ? Number(hourlyWage) : 0,
-            }
-          : {}),
-        agreedHoursPerWeek: agreedHoursPerWeek ? Number(agreedHoursPerWeek) : null,
-        agreedDaysPerWeek: agreedDaysPerWeek ? Number(agreedDaysPerWeek) : null,
-        ...(laborGrade ? { laborInsuredSalary: Number(laborGrade) } : {}),
-        ...(healthGrade ? { healthInsuredSalary: Number(healthGrade) } : {}),
-        pensionVoluntaryRate: pensionPct ? Number(pensionPct) / 100 : null,
-        ...(pensionWage.trim() !== loadedPension.wage ? { pensionWage: pensionWage.trim() ? Math.round(Number(pensionWage)) : null } : {}),
-        ...(pensionNewSystem !== loadedPension.newSystem ? { pensionNewSystem } : {}),
-        ...(change ? { change } : {}),
-      });
+      const res = await putSalaryStructure(
+        empId,
+        buildSalaryPutBody(
+          {
+            method,
+            baseSalary,
+            dailyWage,
+            hourlyWage,
+            agreedHoursPerWeek,
+            agreedDaysPerWeek,
+            laborGrade,
+            healthGrade,
+            pensionPct,
+            pensionWage,
+            pensionNewSystem,
+          },
+          { wage: loadedWage, pension: loadedPension },
+          change,
+        ),
+      );
       setLoadedPension({ wage: pensionWage.trim(), newSystem: pensionNewSystem });
       setLoadedWage({ method, baseSalary, dailyWage, hourlyWage });
       setAllowanceReloadKey((n) => n + 1);
@@ -355,7 +352,7 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
               <MoneyInput allowDecimal className={inputCls} value={dailyWage} onValueChange={(v) => setDailyWage(v)} />
             </div>
             <div>
-              <label className={labelCls}>{method === "hourly" ? "時薪（本俸＋加班費基準）" : "時薪（加班費基準）"}</label>
+              <label className={labelCls}>{method === "hourly" ? "時薪（本俸＋加班費基準）" : "時薪（加班費基準；0／留空＝依本薪自動換算）"}</label>
               <MoneyInput allowDecimal className={inputCls} value={hourlyWage} onValueChange={(v) => setHourlyWage(v)} />
             </div>
             {method === "hourly" && (

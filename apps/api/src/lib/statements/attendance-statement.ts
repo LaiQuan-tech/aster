@@ -306,7 +306,9 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
     ] as Array<[string, number, number?]>
   ).forEach(([label, c, span]) => g.set(H, c, { value: label, ...center, ...(span ? { colSpan: span } : {}) }))
   g.set(H + 1, 0, { value: name, ...center })
-  g.set(H + 1, 1, moneyCell(money?.base ?? null, { format: "acct" }))
+  // 調薪中（2026-11-17）：「薪資」欄顯示調薪前本薪；實領照新本薪 → 下一列註明差額，加總才對得上。
+  const raise = money?.salaryRaise
+  g.set(H + 1, 1, moneyCell(raise ? raise.prevBase : (money?.base ?? null), { format: "acct" }))
   g.set(H + 1, 2, moneyCell(money?.laborInsurance ?? null, { format: "intSp", ...center }))
   g.set(H + 1, 3, moneyCell(money?.healthInsurance ?? null, { format: "intSp", ...center }))
   g.set(H + 1, 4, moneyCell(money?.overtimePay ?? null, { format: "intSp", ...center }))
@@ -315,6 +317,8 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
   g.set(H + 1, 10, moneyCell(money ? allowanceTotal(money) || null : null, { format: "intSp", colSpan: 3, ...center }))
   g.set(H + 1, 13, moneyCell(money ? netPay(money) : null, { format: "intSp", bold: true, color: RED, ...center }))
   g.thinGrid(H, 0, H + 1, LAST)
+  const raiseNote = salaryRaiseNote(raise)
+  if (raiseNote) g.set(H + 2, 0, { value: raiseNote, colSpan: LAST + 1, align: "left", color: RED, size: 10, money: true })
 
   // 列 44：支出／薪資+支出
   const S = H + 3 // 43
@@ -384,6 +388,14 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
       printArea: "A1:N47",
     },
   }
+}
+
+/** 「含調薪差額 ＋2,000 元（調薪中：新本薪 40,000 − 原本薪 38,000）」；沒有調薪中回 null。 */
+export function salaryRaiseNote(raise: { prevBase: number; newBase: number; diff: number } | null | undefined): string | null {
+  if (!raise) return null
+  const fmt = (n: number) => Math.round(n).toLocaleString("en-US")
+  const sign = raise.diff >= 0 ? "＋" : "−"
+  return `含調薪差額 ${sign}${fmt(Math.abs(raise.diff))} 元（調薪中：新本薪 ${fmt(raise.newBase)} − 原本薪 ${fmt(raise.prevBase)}）`
 }
 
 /** 「投保薪資調整：114.3.26 33000、115.4.21 38200」；沒有紀錄回 null。最多取最後 3 筆（呼叫端已排序舊→新）。 */

@@ -64,6 +64,8 @@ export interface PayslipBreakdownLike {
   net?: number
   overtimeSegments?: Array<{ when: string; multiplier: number; hours: number; amount: number }>
   lines?: Array<{ label: string; amount: number }>
+  /** 調薪中（2026-11-17）：本薪列顯示 prevBase，另列「調薪差額」diff（base＝新本薪）。 */
+  salaryRaise?: { prevBase: number; newBase: number; diff: number; since?: string }
   /** 一次性加減項（前期更正）；只有本期有加減項的薪資單才有。 */
   adjustments?: PayslipAdjustmentLike[]
   /** 員工固定津貼（2026-11-08）；只有本期有有效津貼的薪資單才有。 */
@@ -199,7 +201,12 @@ function sections(p: PayslipLike, b: PayslipBreakdownLike): Array<{ title: strin
     {
       title: "應發",
       rows: [
-        ["本薪", money(n(p.base))],
+        ...(b.salaryRaise
+          ? ([
+              ["本薪", money(n(b.salaryRaise.prevBase))],
+              ["調薪差額（調薪中）", money(n(b.salaryRaise.diff))],
+            ] as Row[])
+          : ([["本薪", money(n(p.base))]] as Row[])),
         ["加班費", money(n(p.overtime_pay))],
         ["夜間加給", money(n(p.night_pay))],
         ["全勤獎金", money(n(p.attendance_bonus))],

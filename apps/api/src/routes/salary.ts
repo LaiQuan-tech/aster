@@ -19,6 +19,7 @@ import { monthRangeKeys, todayKey } from "../lib/tz.js"
 import { getRequestContext } from "../lib/request-context.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { recordSalarySaveHistory, type SaveHistoryResult } from "../services/salary-history.js"
+import { pendingRaiseOf } from "../services/salary-raises.js"
 import {
   SALARY_STRUCTURE_ISSUE_LABELS,
   SALARY_STRUCTURE_ISSUE_MESSAGES,
@@ -321,6 +322,26 @@ salaryRouter.put(
       } catch (err) {
         next(err)
         return
+      }
+      // 2026-11-17 調薪中：本薪改動或改成非月薪制會讓「原本薪／新本薪」對不上 → 先完成或取消調薪中。
+      if (
+        (parsed.data.baseSalary !== undefined && numOrNull(parsed.data.baseSalary) !== numOrNull(pw?.base_salary)) ||
+        (parsed.data.method !== undefined && parsed.data.method !== "monthly")
+      ) {
+        let pending: Awaited<ReturnType<typeof pendingRaiseOf>> = null
+        try {
+          pending = await pendingRaiseOf(tenantId, String(employeeId))
+        } catch (err) {
+          next(err)
+          return
+        }
+        if (pending) {
+          res.status(409).json({
+            error: "salary_raise_pending",
+            message: "此員工「調薪中」：調薪中期間不能直接改本薪或計薪方式，請先按「調薪完成」或「取消調薪中」",
+          })
+          return
+        }
       }
       const issue = salaryStructureIssue({
         method: parsed.data.method ?? ((pw?.method as string | null | undefined) ?? null),

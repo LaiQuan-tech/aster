@@ -22,6 +22,7 @@ import { loadFixedAllowancesByEmployee } from "./fixed-allowances.js"
 import { leaveDeductRate, loadLeaveTypes } from "./settlement.js"
 import { applyNightPolicy, loadEmployeeFeaturesMap, type EmployeeFeatures } from "./employee-features.js"
 import { asDayTypeOrWorkday } from "./day-type.js"
+import { applySalaryRaises, type SalaryRowRaise } from "./salary-raises.js"
 
 /**
  * Payroll inputs — everything `computePayslip` needs besides the AttendanceDay[]
@@ -53,6 +54,8 @@ export interface SalaryRow {
   /** migration 0086（2026-11-08）：勞退月提繳工資（NULL＝自動算）、是否適用勞退新制。正式庫沒套前不存在 → undefined。 */
   pension_wage?: string | number | null
   pension_new_system?: boolean | null
+  /** 調薪中（2026-11-17，services/salary-raises.ts applySalaryRaises 掛上；不是 DB 欄位）。 */
+  salary_raise?: SalaryRowRaise
 }
 
 export const SALARY_COLS =
@@ -133,6 +136,7 @@ export function toSalaryStructure(row: SalaryRow, nhiDependents = 0, advance = 0
     // 適用勞退新制：只有明確 false 才是不適用（欄位未套用／NULL＝適用）。
     pensionNewSystem: row.pension_new_system === false ? false : undefined,
     advance,
+    ...(row.salary_raise ? { salaryRaise: { prevBase: row.salary_raise.prev_base, since: row.salary_raise.since } } : {}),
   }
 }
 
@@ -437,6 +441,8 @@ export async function loadPayrollInputs(
   if (salErr) throw new Error(`loadPayrollInputs (salaries): ${salErr.message}`)
   const salaryByEmployee = new Map<string, SalaryRow>()
   for (const row of (salData ?? []) as unknown as SalaryRow[]) salaryByEmployee.set(row.employee_id, row)
+  // 調薪中（2026-11-17）：該月適用的員工改用新本薪＋舊投保（services/salary-raises.ts）。
+  await applySalaryRaises(tenantId, period, salaryByEmployee)
 
   const scopeIds = employeeIds ?? Array.from(salaryByEmployee.keys())
   const empty: PayrollInputs = {

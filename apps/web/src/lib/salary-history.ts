@@ -81,9 +81,11 @@ export function todayDateKey(now: Date = new Date()): string {
   return `${y}-${m}-${d}`;
 }
 
-/** 表單字串 → 數字（空白＝null）。 */
-export function numOrNull(v: string | null | undefined): number | null {
-  if (v === null || v === undefined || v.trim() === "") return null;
+/** 表單字串 → 數字（空白＝null）。2026-11-17：PostgREST 讀進來的 numeric 可能是數字（不是字串），也收。 */
+export function numOrNull(v: string | number | null | undefined): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (String(v).trim() === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }

@@ -146,9 +146,10 @@ export interface WageFormValues {
   hourlyWage: string
 }
 
-function sameAmount(a: string, b: string): boolean {
-  const x = a.trim()
-  const y = b.trim()
+function sameAmount(a: string | number | null | undefined, b: string | number | null | undefined): boolean {
+  // 2026-11-17：讀進來的值可能是數字（PostgREST numeric），不能直接 .trim()（曾讓存檔靜默失敗）。
+  const x = a === null || a === undefined ? "" : String(a).trim()
+  const y = b === null || b === undefined ? "" : String(b).trim()
   if (x === "" || y === "") return x === y
   return Number(x) === Number(y)
 }

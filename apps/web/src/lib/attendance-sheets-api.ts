@@ -159,6 +159,8 @@ export function otTierLabelsOf(totals: Pick<SheetTotals, "otTierLabels">): [stri
 export interface SheetMoney {
   /** Missing in pre-parity approval snapshots; do not infer from gross. */
   base?: number;
+  /** 調薪中（2026-11-17）：base 是新本薪；prevBase＝原本薪、diff＝新−舊。沒有調薪中不帶。 */
+  salaryRaise?: { prevBase: number; newBase: number; diff: number; since?: string };
   hourlyWage: number;
   otPay: number;
   otPayByTier: { tier1: number; tier2: number; tier3: number };

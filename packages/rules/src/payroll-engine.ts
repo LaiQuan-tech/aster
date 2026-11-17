@@ -171,9 +171,12 @@ export function resolvePensionWage(
     return { wage: Math.min(Math.round(salary.pensionWage), max), source: "manual" };
   }
   const method = opts.method ?? salary.method ?? "monthly";
+  // 調薪中 (2026-11-17):勞退提繳工資的申報同勞健保未完成 → 自動算以調薪前本薪為基數。
+  const monthlyBase =
+    method === "monthly" && salary.salaryRaise && salary.salaryRaise.prevBase > 0 ? salary.salaryRaise.prevBase : salary.baseSalary;
   const base =
-    method === "monthly" && salary.baseSalary !== undefined && salary.baseSalary > 0
-      ? salary.baseSalary
+    method === "monthly" && monthlyBase !== undefined && monthlyBase > 0
+      ? monthlyBase
       : opts.actualBase !== undefined && opts.actualBase > 0
         ? opts.actualBase
         : 0;
@@ -518,7 +521,14 @@ export function computePayslip(
   // --- gross + 逐項稽核明細 ---------------------------------------------
   const baseLabel =
     method === "by_attendance_days" ? "本俸(出勤天數)" : method === "hourly" ? "本俸(時薪)" : "本俸(月薪)";
-  const lines: PayslipLine[] = [{ label: baseLabel, amount: base }];
+  // 調薪中 (2026-11-17):本俸列顯示調薪前本薪,緊接一列「調薪差額」(新 − 舊);兩列加總 = base,lines 加總 = gross 不變。
+  const raise =
+    method === "monthly" && salary.salaryRaise && salary.salaryRaise.prevBase >= 0 && round(salary.salaryRaise.prevBase) !== base
+      ? { prevBase: round(salary.salaryRaise.prevBase), newBase: base, diff: round(base - round(salary.salaryRaise.prevBase)), ...(salary.salaryRaise.since ? { since: salary.salaryRaise.since } : {}) }
+      : null;
+  const lines: PayslipLine[] = raise
+    ? [{ label: baseLabel, amount: raise.prevBase }, { label: "調薪差額", amount: raise.diff }]
+    : [{ label: baseLabel, amount: base }];
   if (overtimePay !== 0) lines.push({ label: "加班費", amount: overtimePay });
   if (nightPay !== 0) lines.push({ label: "夜間加給", amount: nightPay });
   // 全勤以「基準 − 扣款」兩條呈現,淨額即 attendanceBonus,且 lines 加總 = gross。
@@ -694,6 +704,7 @@ export function computePayslip(
 
   return {
     base,
+    ...(raise ? { salaryRaise: raise } : {}),
     regularPay: base,
     hourlyWage,
     // 只有月薪制且有計入加班基數的固定津貼時才帶（加班費／夜間加給用這個時薪；沒有就與以前相同）。

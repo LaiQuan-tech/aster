@@ -66,6 +66,19 @@ const num = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0
 }
 
+/** breakdown.salaryRaise／SheetMoney.salaryRaise（調薪中，2026-11-17）→ StatementMoney.salaryRaise；沒有或格式不對＝undefined。 */
+export function salaryRaiseOf(v: unknown): StatementMoney["salaryRaise"] {
+  if (!v || typeof v !== "object") return undefined
+  const r = v as Record<string, unknown>
+  if (typeof r.prevBase !== "number" || typeof r.newBase !== "number") return undefined
+  return {
+    prevBase: r.prevBase,
+    newBase: r.newBase,
+    diff: typeof r.diff === "number" ? r.diff : Math.round((r.newBase - r.prevBase) * 100) / 100,
+    ...(typeof r.since === "string" ? { since: r.since } : {}),
+  }
+}
+
 /** payslips.breakdown（引擎 PayslipBreakdown）→ StatementMoney。缺欄位一律當 0（舊薪資單可能是 {}）。 */
 export function moneyFromBreakdown(breakdown: Record<string, unknown>, status: string | null): StatementMoney | null {
   if (!breakdown || typeof breakdown !== "object" || breakdown.gross === undefined) return null
@@ -87,6 +100,7 @@ export function moneyFromBreakdown(breakdown: Record<string, unknown>, status: s
     source: "payslip",
     payslipStatus: status,
     base: num(breakdown.base),
+    ...(salaryRaiseOf(breakdown.salaryRaise) ? { salaryRaise: salaryRaiseOf(breakdown.salaryRaise) } : {}),
     hourlyWage: num(breakdown.hourlyWage),
     ...(typeof breakdown.overtimeHourlyBase === "number" ? { overtimeHourlyBase: breakdown.overtimeHourlyBase } : {}),
     ...(typeof breakdown.overtimeBaseIncludesAllowances === "boolean" ? { overtimeBaseIncludesAllowances: breakdown.overtimeBaseIncludesAllowances } : {}),
@@ -128,6 +142,7 @@ export function moneyFromPreview(m: SheetMoney): StatementMoney {
     source: "preview",
     payslipStatus: null,
     base: num(m.base),
+    ...(salaryRaiseOf(m.salaryRaise) ? { salaryRaise: salaryRaiseOf(m.salaryRaise) } : {}),
     hourlyWage: num(m.hourlyWage),
     ...(typeof m.overtimeHourlyBase === "number" ? { overtimeHourlyBase: m.overtimeHourlyBase } : {}),
     ...(typeof m.overtimeBaseIncludesAllowances === "boolean" ? { overtimeBaseIncludesAllowances: m.overtimeBaseIncludesAllowances } : {}),
