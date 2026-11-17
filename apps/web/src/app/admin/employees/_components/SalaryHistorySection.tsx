@@ -24,12 +24,12 @@ import {
   todayDateKey,
   type SalaryHistory,
 } from "@/lib/salary-history";
+import { countText, historyTitle } from "@/lib/payroll-panel-text";
+import { dangerLinkCls, Disclosure, formBoxCls, LinkButton, ListRow, SectionRow } from "./payroll-ui";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
-const thCls = "whitespace-nowrap px-2 py-1.5 text-left text-xs font-medium text-gray-500";
-const tdCls = "whitespace-nowrap px-2 py-1.5 text-sm text-gray-700";
 
 const EMPTY_SALARY = { effectiveDate: "", prevSalary: "", newSalary: "", reason: "" };
 const EMPTY_INSURED = { effectiveOn: "", labor: "", health: "", pension: "", prevLabor: "", prevHealth: "", prevPension: "", note: "" };
@@ -117,201 +117,152 @@ export function SalaryHistorySection({ employeeId, reloadKey }: { employeeId: st
   const insuredAvailable = history?.available.insured !== false;
 
   return (
-    <div className="mt-6 space-y-6" data-testid="salary-history">
-      {loadError && <ErrorText>{loadError}</ErrorText>}
+    <div data-testid="salary-history" className="py-3">
+      <Disclosure title={historyTitle(salaryRows.length, insuredRows.length)} testId="salary-history-disclosure">
+        {loadError && <ErrorText>{loadError}</ErrorText>}
 
-      {/* 調薪歷程 */}
-      <section>
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-          <h3 className="text-sm font-medium text-gray-600">調薪歷程</h3>
-          <Button
-            variant="secondary"
-            size="sm"
-            type="button"
-            onClick={() => {
-              setShowSalaryForm((open) => !open);
-              setSalaryForm((f) => (f.effectiveDate ? f : { ...f, effectiveDate: todayDateKey() }));
-            }}
-            aria-expanded={showSalaryForm}
-            aria-controls={salaryPanelId}
-          >
-            {showSalaryForm ? "收合" : "＋ 補登調薪紀錄"}
-          </Button>
-        </div>
-        <div id={salaryPanelId} hidden={!showSalaryForm}>
-          <form
-            onSubmit={onAddSalary}
-            onChange={() => setSalaryError(null)}
-            className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-4"
-          >
-            <p className="text-xs text-gray-500 sm:col-span-4">只寫一筆歷史紀錄，不會改目前的本薪。</p>
-            <div>
-              <label className={labelCls}>生效日</label>
-              <input type="date" className={inputCls} value={salaryForm.effectiveDate} onChange={(e) => setSalaryForm({ ...salaryForm, effectiveDate: e.target.value })} />
-            </div>
-            <div>
-              <label className={labelCls}>原本薪（選填）</label>
-              <MoneyInput className={inputCls} value={salaryForm.prevSalary} onValueChange={(v) => setSalaryForm({ ...salaryForm, prevSalary: v })} />
-            </div>
-            <div>
-              <label className={labelCls}>新本薪</label>
-              <MoneyInput className={inputCls} value={salaryForm.newSalary} onValueChange={(v) => setSalaryForm({ ...salaryForm, newSalary: v })} />
-            </div>
-            <div>
-              <label className={labelCls}>原因（選填）</label>
-              <input className={inputCls} maxLength={500} value={salaryForm.reason} onChange={(e) => setSalaryForm({ ...salaryForm, reason: e.target.value })} />
-            </div>
-            <div className="sm:col-span-4">
-              <button type="submit" disabled={busy} className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50" style={{ color: "var(--brand)" }}>
-                {busy ? "儲存中…" : "補登調薪紀錄"}
-              </button>
-            </div>
-            {salaryError && <ErrorText className="sm:col-span-4">{salaryError}</ErrorText>}
-          </form>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-100">
-            <thead>
-              <tr>
-                <th className={thCls}>生效日</th>
-                <th className={thCls}>原本薪 → 新本薪</th>
-                <th className={thCls}>差額</th>
-                <th className={thCls}>原因</th>
-                <th className={thCls}>登錄人</th>
-                <th className={thCls}>登錄時間</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {salaryRows.map((r) => (
-                <tr key={r.id} data-testid="salary-adjustment-row">
-                  <td className={tdCls}>{r.effectiveDate}</td>
-                  <td className={tdCls}>
-                    {fmtAmount(r.prevSalary)} → {fmtAmount(r.newSalary)}
-                  </td>
-                  <td className={`${tdCls} ${r.diff !== null && r.diff < 0 ? "text-rose-600" : ""}`}>{diffText(r.diff)}</td>
-                  <td className={`${tdCls} whitespace-normal`}>{r.reason ?? "—"}</td>
-                  <td className={tdCls}>{r.createdByName ?? "—"}</td>
-                  <td className={tdCls}>{fmtDateTime(r.createdAt)}</td>
-                </tr>
-              ))}
-              {salaryRows.length === 0 && (
-                <tr>
-                  <td className={`${tdCls} text-gray-400`} colSpan={6}>
-                    無
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* 勞健保調整歷程 */}
-      <section>
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-          <h3 className="text-sm font-medium text-gray-600">勞健保調整歷程</h3>
-          {insuredAvailable && (
-            <Button
-              variant="secondary"
-              size="sm"
-              type="button"
+        {/* 調薪歷程 */}
+        <SectionRow
+          title="調薪歷程"
+          tip="存「員工薪資保險資料」時本薪有變會自動記一筆；補登只寫歷史紀錄，不會改目前的本薪。修改／刪除在「費用與給付 → 稅務」的調薪紀錄。"
+          summary={countText(salaryRows.length)}
+          actions={
+            <LinkButton
               onClick={() => {
-                setShowInsuredForm((open) => !open);
-                setInsuredForm((f) => (f.effectiveOn ? f : { ...f, effectiveOn: todayDateKey() }));
+                setShowSalaryForm((open) => !open);
+                setSalaryForm((f) => (f.effectiveDate ? f : { ...f, effectiveDate: todayDateKey() }));
               }}
-              aria-expanded={showInsuredForm}
-              aria-controls={insuredPanelId}
+              aria-expanded={showSalaryForm}
+              aria-controls={salaryPanelId}
             >
-              {showInsuredForm ? "收合" : "＋ 補登投保調整"}
-            </Button>
-          )}
-        </div>
-        {!insuredAvailable && (
-          <p className="mb-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">投保調整歷程資料表尚未套用（migration 0088），暫時無法記錄。</p>
-        )}
-        <div id={insuredPanelId} hidden={!showInsuredForm || !insuredAvailable}>
-          <form
-            onSubmit={onAddInsured}
-            onChange={() => setInsuredError(null)}
-            className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-4"
-          >
-            <p className="text-xs text-gray-500 sm:col-span-4">只寫一筆歷史紀錄，不會改目前的投保級距。調整後金額至少填一項；調整前可留空。</p>
-            <div className="sm:col-span-4 sm:max-w-[25%]">
-              <label className={labelCls}>生效日</label>
-              <input type="date" className={inputCls} value={insuredForm.effectiveOn} onChange={(e) => setInsuredForm({ ...insuredForm, effectiveOn: e.target.value })} />
-            </div>
-            {(
-              [
-                ["勞保投保薪資", "prevLabor", "labor"],
-                ["健保投保薪資", "prevHealth", "health"],
-                ["勞退月提繳工資", "prevPension", "pension"],
-              ] as const
-            ).map(([label, prevKey, nextKey]) => (
-              <div key={nextKey} className="grid grid-cols-2 gap-2 sm:col-span-4 sm:grid-cols-4">
-                <div>
-                  <label className={labelCls}>{label}（調整前）</label>
-                  <MoneyInput className={inputCls} value={insuredForm[prevKey]} onValueChange={(v) => setInsuredForm({ ...insuredForm, [prevKey]: v })} />
-                </div>
-                <div>
-                  <label className={labelCls}>{label}（調整後）</label>
-                  <MoneyInput className={inputCls} value={insuredForm[nextKey]} onValueChange={(v) => setInsuredForm({ ...insuredForm, [nextKey]: v })} />
-                </div>
+              {showSalaryForm ? "收合" : "＋補登"}
+            </LinkButton>
+          }
+        >
+          <div id={salaryPanelId} hidden={!showSalaryForm}>
+            <form onSubmit={onAddSalary} onChange={() => setSalaryError(null)} className={`${formBoxCls} grid grid-cols-1 gap-2 sm:grid-cols-4`}>
+              <div>
+                <label className={labelCls}>生效日</label>
+                <input type="date" className={inputCls} value={salaryForm.effectiveDate} onChange={(e) => setSalaryForm({ ...salaryForm, effectiveDate: e.target.value })} />
               </div>
-            ))}
-            <div className="sm:col-span-4">
-              <label className={labelCls}>原因／備註（選填）</label>
-              <input className={inputCls} maxLength={500} value={insuredForm.note} onChange={(e) => setInsuredForm({ ...insuredForm, note: e.target.value })} />
-            </div>
-            <div className="sm:col-span-4">
-              <button type="submit" disabled={busy} className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50" style={{ color: "var(--brand)" }}>
-                {busy ? "儲存中…" : "補登投保調整"}
-              </button>
-            </div>
-            {insuredError && <ErrorText className="sm:col-span-4">{insuredError}</ErrorText>}
-          </form>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-100">
-            <thead>
-              <tr>
-                <th className={thCls}>生效日</th>
-                <th className={thCls}>勞保投保薪資</th>
-                <th className={thCls}>健保投保薪資</th>
-                <th className={thCls}>勞退月提繳工資</th>
-                <th className={thCls}>原因／備註</th>
-                <th className={thCls}>登錄人</th>
-                <th className={thCls}>登錄時間</th>
-                <th className={thCls} />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
+              <div>
+                <label className={labelCls}>原本薪（選填）</label>
+                <MoneyInput className={inputCls} value={salaryForm.prevSalary} onValueChange={(v) => setSalaryForm({ ...salaryForm, prevSalary: v })} />
+              </div>
+              <div>
+                <label className={labelCls}>新本薪</label>
+                <MoneyInput className={inputCls} value={salaryForm.newSalary} onValueChange={(v) => setSalaryForm({ ...salaryForm, newSalary: v })} />
+              </div>
+              <div>
+                <label className={labelCls}>原因（選填）</label>
+                <input className={inputCls} maxLength={500} value={salaryForm.reason} onChange={(e) => setSalaryForm({ ...salaryForm, reason: e.target.value })} />
+              </div>
+              <div className="sm:col-span-4">
+                <Button size="sm" type="submit" loading={busy}>
+                  補登調薪紀錄
+                </Button>
+              </div>
+              {salaryError && <ErrorText className="sm:col-span-4">{salaryError}</ErrorText>}
+            </form>
+          </div>
+          {salaryRows.length > 0 && (
+            <ul className="mt-1 divide-y divide-gray-100">
+              {salaryRows.map((r) => (
+                <ListRow
+                  key={r.id}
+                  testId="salary-adjustment-row"
+                  main={
+                    <>
+                      {r.effectiveDate}　{fmtAmount(r.prevSalary)} → {fmtAmount(r.newSalary)}
+                      <span className={`ml-1 ${r.diff !== null && r.diff < 0 ? "text-rose-600" : "text-gray-500"}`}>（{diffText(r.diff)}）</span>
+                    </>
+                  }
+                  meta={[r.reason, r.createdByName, fmtDateTime(r.createdAt)].filter(Boolean).join("｜")}
+                />
+              ))}
+            </ul>
+          )}
+        </SectionRow>
+
+        {/* 勞健保調整歷程 */}
+        <SectionRow
+          title="勞健保調整歷程"
+          tip="存「員工薪資保險資料」時投保有變會自動記一筆；補登只寫歷史紀錄，不會改目前的投保級距。調整後金額至少填一項，調整前可留空。"
+          summary={insuredAvailable ? countText(insuredRows.length) : "資料表尚未套用（migration 0088），暫時無法記錄"}
+          actions={
+            insuredAvailable && (
+              <LinkButton
+                onClick={() => {
+                  setShowInsuredForm((open) => !open);
+                  setInsuredForm((f) => (f.effectiveOn ? f : { ...f, effectiveOn: todayDateKey() }));
+                }}
+                aria-expanded={showInsuredForm}
+                aria-controls={insuredPanelId}
+              >
+                {showInsuredForm ? "收合" : "＋補登"}
+              </LinkButton>
+            )
+          }
+        >
+          <div id={insuredPanelId} hidden={!showInsuredForm || !insuredAvailable}>
+            <form onSubmit={onAddInsured} onChange={() => setInsuredError(null)} className={`${formBoxCls} grid grid-cols-1 gap-2 sm:grid-cols-4`}>
+              <div className="sm:col-span-4 sm:max-w-[25%]">
+                <label className={labelCls}>生效日</label>
+                <input type="date" className={inputCls} value={insuredForm.effectiveOn} onChange={(e) => setInsuredForm({ ...insuredForm, effectiveOn: e.target.value })} />
+              </div>
+              {(
+                [
+                  ["勞保投保薪資", "prevLabor", "labor"],
+                  ["健保投保薪資", "prevHealth", "health"],
+                  ["勞退月提繳工資", "prevPension", "pension"],
+                ] as const
+              ).map(([label, prevKey, nextKey]) => (
+                <div key={nextKey} className="grid grid-cols-2 gap-2 sm:col-span-4 sm:grid-cols-4">
+                  <div>
+                    <label className={labelCls}>{label}（調整前）</label>
+                    <MoneyInput className={inputCls} value={insuredForm[prevKey]} onValueChange={(v) => setInsuredForm({ ...insuredForm, [prevKey]: v })} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>{label}（調整後）</label>
+                    <MoneyInput className={inputCls} value={insuredForm[nextKey]} onValueChange={(v) => setInsuredForm({ ...insuredForm, [nextKey]: v })} />
+                  </div>
+                </div>
+              ))}
+              <div className="sm:col-span-4">
+                <label className={labelCls}>原因／備註（選填）</label>
+                <input className={inputCls} maxLength={500} value={insuredForm.note} onChange={(e) => setInsuredForm({ ...insuredForm, note: e.target.value })} />
+              </div>
+              <div className="sm:col-span-4">
+                <Button size="sm" type="submit" loading={busy}>
+                  補登投保調整
+                </Button>
+              </div>
+              {insuredError && <ErrorText className="sm:col-span-4">{insuredError}</ErrorText>}
+            </form>
+          </div>
+          {insuredRows.length > 0 && (
+            <ul className="mt-1 divide-y divide-gray-100">
               {insuredRows.map((r) => (
-                <tr key={r.id} data-testid="insured-change-row">
-                  <td className={tdCls}>{r.effectiveOn}</td>
-                  <td className={tdCls}>{pairText(r.labor)}</td>
-                  <td className={tdCls}>{pairText(r.health)}</td>
-                  <td className={tdCls}>{pairText(r.pension, "自動")}</td>
-                  <td className={`${tdCls} whitespace-normal`}>{r.note ?? "—"}</td>
-                  <td className={tdCls}>{r.createdByName ?? "—"}</td>
-                  <td className={tdCls}>{fmtDateTime(r.createdAt)}</td>
-                  <td className={tdCls}>
-                    <button type="button" onClick={() => setPendingDelete(r.id)} className="text-red-600 hover:underline">
+                <ListRow
+                  key={r.id}
+                  testId="insured-change-row"
+                  main={
+                    <>
+                      {r.effectiveOn}　勞保 {pairText(r.labor)}　健保 {pairText(r.health)}　勞退 {pairText(r.pension, "自動")}
+                    </>
+                  }
+                  meta={[r.note, r.createdByName, fmtDateTime(r.createdAt)].filter(Boolean).join("｜")}
+                  actions={
+                    <button type="button" onClick={() => setPendingDelete(r.id)} className={dangerLinkCls}>
                       刪除
                     </button>
-                  </td>
-                </tr>
+                  }
+                />
               ))}
-              {insuredRows.length === 0 && (
-                <tr>
-                  <td className={`${tdCls} text-gray-400`} colSpan={8}>
-                    無
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+            </ul>
+          )}
+        </SectionRow>
+      </Disclosure>
 
       <ConfirmDialog
         open={pendingDelete !== null}

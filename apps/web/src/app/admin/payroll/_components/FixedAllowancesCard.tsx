@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
 import { MoneyInput } from "@/components/MoneyInput";
 import { Button, ErrorText } from "@/components/admin-ui";
+import { dangerLinkCls, formBoxCls, LinkButton, ListRow, SectionRow } from "../../employees/_components/payroll-ui";
+import { fixedAllowanceSummaryText } from "@/lib/payroll-panel-text";
 import { apiErrorMessage } from "@/lib/api-client";
 import {
   buildFixedAllowanceBody,
@@ -150,160 +152,120 @@ export function FixedAllowancesCard({
   const staleText = staleNoticeText(stalePeriods);
   const fmt = (n: number) => n.toLocaleString("zh-TW");
 
+  const tip =
+    "每月執行薪資時自動帶入當月有效的津貼（月中生效／終止當月整月帶入）；應稅併入應發，伙食費每月合計在免稅額內免稅（規則參數，預設 3,000）。";
+
   return (
-    <div className="mt-6" data-testid="fixed-allowances-card">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-        <div>
-          <h3 className="text-sm font-medium text-gray-600">固定津貼</h3>
-          <p className="text-xs text-gray-400">
-            每月執行薪資時自動帶入當月有效的津貼（月中生效／終止當月整月帶入）；應稅併入應發，伙食費每月合計在免稅額內免稅（規則參數，預設 3,000）。
-          </p>
+    <div data-testid="fixed-allowances-card">
+      <SectionRow
+        title="固定津貼"
+        tip={tip}
+        summary={fixedAllowanceSummaryText(items.length, summary?.activeTotal)}
+        actions={
+          <LinkButton onClick={() => (showForm ? setShowForm(false) : startNew())} aria-expanded={showForm} aria-controls={panelId}>
+            {showForm ? "收合" : "＋新增"}
+          </LinkButton>
+        }
+      >
+        <div id={panelId} hidden={!showForm}>
+          <form onSubmit={onSubmit} className={`${formBoxCls} grid grid-cols-1 gap-3 sm:grid-cols-3`}>
+            <div>
+              <label className={labelCls}>津貼名稱</label>
+              <input className={inputCls} value={form.name} onChange={(e) => patch({ name: e.target.value })} placeholder="例：職務加給" />
+            </div>
+            <div>
+              <label className={labelCls}>月金額（元）</label>
+              <MoneyInput className={inputCls} value={form.amount} onValueChange={(v) => patch({ amount: v })} />
+            </div>
+            <div>
+              <label className={labelCls}>課稅方式</label>
+              <select className={inputCls} value={form.taxType} onChange={(e) => patch({ taxType: e.target.value as AllowanceTaxType })}>
+                <option value="taxable">{TAX_TYPE_LABEL.taxable}</option>
+                <option value="meal_exempt">{TAX_TYPE_LABEL.meal_exempt}</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>生效起日</label>
+              <input type="date" className={inputCls} value={form.effectiveFrom} onChange={(e) => patch({ effectiveFrom: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>生效迄日（選填）</label>
+              <input type="date" className={inputCls} value={form.effectiveTo} onChange={(e) => patch({ effectiveTo: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>備註（選填）</label>
+              <input className={inputCls} value={form.note} onChange={(e) => patch({ note: e.target.value })} />
+            </div>
+            <label className="flex items-center gap-2 text-sm text-gray-600">
+              <input type="checkbox" checked={form.insurable} onChange={(e) => patch({ insurable: e.target.checked })} />
+              計入投保薪資（經常性給與）
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-600 sm:col-span-2">
+              <input type="checkbox" checked={form.overtimeBase} onChange={(e) => patch({ overtimeBase: e.target.checked })} data-testid="fixed-allowance-overtime-base" />
+              {overtimeBaseHint(summary?.hourlyWageDivisor)}
+            </label>
+            {midHint && (
+              <p className="text-xs text-amber-700 sm:col-span-3" data-testid="fixed-allowance-mid-month-hint">
+                {midHint}
+              </p>
+            )}
+            <div className="flex flex-wrap items-center gap-3 sm:col-span-3">
+              <Button size="sm" type="submit" loading={submitting}>
+                {editingId ? "儲存修改" : "新增固定津貼"}
+              </Button>
+              {formError && <ErrorText>{formError}</ErrorText>}
+            </div>
+          </form>
         </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          type="button"
-          onClick={() => (showForm ? setShowForm(false) : startNew())}
-          aria-expanded={showForm}
-          aria-controls={panelId}
-        >
-          {showForm ? "收合" : "＋ 新增固定津貼"}
-        </Button>
-      </div>
 
-      <div id={panelId} hidden={!showForm}>
-        <form onSubmit={onSubmit} className="mb-3 grid grid-cols-1 gap-3 rounded-xl bg-slate-50 p-3 sm:grid-cols-3">
-          <div>
-            <label className={labelCls}>津貼名稱</label>
-            <input className={inputCls} value={form.name} onChange={(e) => patch({ name: e.target.value })} placeholder="例：職務加給" />
-          </div>
-          <div>
-            <label className={labelCls}>月金額（元）</label>
-            <MoneyInput
-              className={inputCls}
-              value={form.amount}
-              onValueChange={(v) => patch({ amount: v })}
-            />
-          </div>
-          <div>
-            <label className={labelCls}>課稅方式</label>
-            <select
-              className={inputCls}
-              value={form.taxType}
-              onChange={(e) => patch({ taxType: e.target.value as AllowanceTaxType })}
-            >
-              <option value="taxable">{TAX_TYPE_LABEL.taxable}</option>
-              <option value="meal_exempt">{TAX_TYPE_LABEL.meal_exempt}</option>
-            </select>
-          </div>
-          <div>
-            <label className={labelCls}>生效起日</label>
-            <input type="date" className={inputCls} value={form.effectiveFrom} onChange={(e) => patch({ effectiveFrom: e.target.value })} />
-          </div>
-          <div>
-            <label className={labelCls}>生效迄日（選填）</label>
-            <input type="date" className={inputCls} value={form.effectiveTo} onChange={(e) => patch({ effectiveTo: e.target.value })} />
-          </div>
-          <label className="flex items-center gap-2 self-end pb-2 text-sm text-gray-600">
-            <input type="checkbox" checked={form.insurable} onChange={(e) => patch({ insurable: e.target.checked })} />
-            計入投保薪資（經常性給與）
-          </label>
-          <label className="flex items-center gap-2 self-end pb-2 text-sm text-gray-600 sm:col-start-3">
-            <input type="checkbox" checked={form.overtimeBase} onChange={(e) => patch({ overtimeBase: e.target.checked })} data-testid="fixed-allowance-overtime-base" />
-            {overtimeBaseHint(summary?.hourlyWageDivisor)}
-          </label>
-          {midHint && (
-            <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 sm:col-span-3" data-testid="fixed-allowance-mid-month-hint">
-              {midHint}
-            </p>
-          )}
-          <div className="sm:col-span-3">
-            <label className={labelCls}>備註（選填）</label>
-            <input className={inputCls} value={form.note} onChange={(e) => patch({ note: e.target.value })} />
-          </div>
-          <div className="flex flex-wrap items-center gap-3 sm:col-span-3">
-            <button
-              type="submit"
-              disabled={submitting}
-              className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50"
-              style={{ color: "var(--brand)" }}
-            >
-              {submitting ? "儲存中…" : editingId ? "儲存修改" : "新增固定津貼"}
-            </button>
-            {formError && <ErrorText>{formError}</ErrorText>}
-          </div>
-        </form>
-      </div>
-
-      {loadError && <ErrorText>{loadError}</ErrorText>}
-      {staleText && (
-        <p className="mb-2 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-800" role="alert" data-testid="fixed-allowances-stale">
-          {staleText}
-        </p>
-      )}
-      {warnings.map((w) => (
-        <p key={`${w.name}-${w.months.join()}`} className="mb-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="fixed-allowances-overlap">
-          {w.message}
-        </p>
-      ))}
-      {/* 手機寬度下 .admin-shell table 有 min-width 720px（globals.css）：外層自己捲，不要撐破卡片（卡片 overflow-hidden 會把右半邊切掉）。 */}
-      <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm">
-        <thead>
-          <tr className="border-b border-gray-200 text-xs text-gray-500">
-            <th className="py-1.5 pr-3">名稱</th>
-            <th className="py-1.5 pr-3 text-right">月金額</th>
-            <th className="py-1.5 pr-3">課稅</th>
-            <th className="py-1.5 pr-3">計入投保</th>
-            <th className="py-1.5 pr-3">計入加班基數</th>
-            <th className="py-1.5 pr-3">生效期間</th>
-            <th className="py-1.5">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((a) => (
-            <tr key={a.id} className="border-b border-gray-50">
-              <td className="py-1.5 pr-3 text-gray-800">
-                {a.name}
-                {a.note && <span className="ml-1 text-xs text-gray-400">（{a.note}）</span>}
-              </td>
-              <td className="py-1.5 pr-3 text-right tabular-nums">{fmt(a.amount)}</td>
-              <td className="py-1.5 pr-3 text-xs text-gray-600">{a.taxType === "meal_exempt" ? "伙食費" : "應稅"}</td>
-              <td className="py-1.5 pr-3 text-xs text-gray-600">{a.insurable ? "是" : "否"}</td>
-              <td className="py-1.5 pr-3 text-xs text-gray-600">{a.overtimeBase === false ? "否" : "是"}</td>
-              <td className="py-1.5 pr-3 text-xs text-gray-600">
-                {a.effectiveFrom} ～ {a.effectiveTo ?? "（無迄日）"}
-              </td>
-              <td className="py-1.5 whitespace-nowrap">
-                <button type="button" onClick={() => startEdit(a)} className="mr-3 text-gray-600 hover:underline">
-                  修改
-                </button>
-                <button type="button" onClick={() => void onDelete(a)} className="text-red-600 hover:underline">
-                  刪除
-                </button>
-              </td>
-            </tr>
-          ))}
-          {items.length === 0 && (
-            <tr>
-              <td colSpan={7} className="py-1.5 text-gray-400">
-                無
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-      </div>
-      {summary && summary.activeTotal > 0 && (
-        <p className="mt-2 text-xs text-gray-500">
-          {summary.period} 有效的固定津貼合計 {fmt(summary.activeTotal)} 元（計入投保 {fmt(summary.activeInsurableTotal)} 元）。
-        </p>
-      )}
-      {hint && (
-        <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="fixed-allowances-insured-hint">
-          {hint}
-        </p>
-      )}
+        {loadError && <ErrorText>{loadError}</ErrorText>}
+        {staleText && (
+          <p className="mt-1 text-xs text-rose-700" role="alert" data-testid="fixed-allowances-stale">
+            {staleText}
+          </p>
+        )}
+        {warnings.map((w) => (
+          <p key={`${w.name}-${w.months.join()}`} className="mt-1 text-xs text-amber-700" data-testid="fixed-allowances-overlap">
+            {w.message}
+          </p>
+        ))}
+        {items.length > 0 && (
+          <ul className="mt-1 divide-y divide-gray-100">
+            {items.map((a) => (
+              <ListRow
+                key={a.id}
+                main={
+                  <>
+                    {a.name} <span className="tabular-nums">{fmt(a.amount)}</span> 元
+                  </>
+                }
+                meta={[
+                  a.taxType === "meal_exempt" ? "伙食費" : "應稅",
+                  a.insurable ? "計入投保" : "不計投保",
+                  a.overtimeBase === false ? "不計加班基數" : "計入加班基數",
+                  `${a.effectiveFrom} ～ ${a.effectiveTo ?? "無迄日"}`,
+                  a.note,
+                ]
+                  .filter(Boolean)
+                  .join("｜")}
+                actions={
+                  <>
+                    <LinkButton onClick={() => startEdit(a)}>修改</LinkButton>
+                    <button type="button" onClick={() => void onDelete(a)} className={dangerLinkCls}>
+                      刪除
+                    </button>
+                  </>
+                }
+              />
+            ))}
+          </ul>
+        )}
+        {hint && (
+          <p className="mt-1 text-xs text-amber-700" data-testid="fixed-allowances-insured-hint">
+            {hint}
+          </p>
+        )}
+      </SectionRow>
     </div>
   );
 }

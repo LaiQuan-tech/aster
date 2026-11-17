@@ -26,6 +26,8 @@ import { FixedAllowancesCard } from "../../payroll/_components/FixedAllowancesCa
 import { salaryFormChanges, todayDateKey, type SalaryFormValues } from "@/lib/salary-history";
 import { SalaryHistorySection } from "./SalaryHistorySection";
 import { NhiDependentsCountField } from "./NhiDependentsCountField";
+import { dangerLinkCls, Disclosure, formBoxCls, LinkButton, ListRow } from "./payroll-ui";
+import { taxDependentsHeadline } from "@/lib/payroll-panel-text";
 import { apiErrorMessage } from "@/lib/api-client";
 import { salaryFormError, wageFieldsChanged, type WageFormValues } from "@/lib/salary-completeness";
 
@@ -488,120 +490,118 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
           </div>
         </BottomSheet>
 
-        {/* 2026-11-08 員工固定津貼：每月執行薪資時自動帶入；合計提示用上方表單目前的本薪與勞保級距。 */}
-        <FixedAllowancesCard
-          employeeId={empId}
-          baseSalary={baseSalary}
-          laborGrade={laborGrade}
-          onSummary={setAllowanceSummary}
-          reloadKey={allowanceReloadKey}
-        />
+        {/* 2026-11-17 下半部精簡：每區一行，有資料／點開才展開（payroll-ui.tsx）。 */}
+        <div className="mt-6 divide-y divide-gray-100 border-t border-gray-100">
+          {/* 2026-11-08 員工固定津貼：每月執行薪資時自動帶入；合計提示用上方表單目前的本薪與勞保級距。 */}
+          <FixedAllowancesCard
+            employeeId={empId}
+            baseSalary={baseSalary}
+            laborGrade={laborGrade}
+            onSummary={setAllowanceSummary}
+            reloadKey={allowanceReloadKey}
+          />
 
-        {/* 2026-11-10 調薪歷程＋勞健保調整歷程 */}
-        <SalaryHistorySection employeeId={empId} reloadKey={historyReloadKey} />
+          {/* 2026-11-10 調薪歷程＋勞健保調整歷程 → 合併成可收合的「歷程紀錄」 */}
+          <SalaryHistorySection employeeId={empId} reloadKey={historyReloadKey} />
 
-        <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
-          <div>
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-              <h3 className="text-sm font-medium text-gray-600">健保眷屬投保資料</h3>
-              <Button variant="secondary" size="sm"
-                type="button"
-                onClick={() => setShowNhiForm((open) => !open)}
-                aria-expanded={showNhiForm}
-                aria-controls={nhiPanelId}>
-                {showNhiForm ? "收合" : "＋ 新增健保眷屬"}
-              </Button>
-            </div>
-            {/* 2026-11-17 眷屬人數直接輸入（填了以此為準；明細增刪後重讀筆數）。 */}
-            <NhiDependentsCountField employeeId={empId} reloadKey={nhiDeps.filter((d) => d.insured).map((d) => d.id).join(",")} />
-            {/* hidden 掛在不帶 display 類別的外層 div（form 本身是 grid，直接掛會被蓋掉）。 */}
-            <div id={nhiPanelId} hidden={!showNhiForm}>
-              {/* form 的 onChange 會收到底下所有欄位冒泡上來的變更：改任何一欄就清掉錯誤。 */}
-              <form
-                onSubmit={onAddNhi}
-                onChange={() => setNhiError(null)}
-                className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2"
+          {/* 健保眷屬：一行人數（點修改才輸入）；明細收合，新增在明細裡。 */}
+          <NhiDependentsCountField
+            key={`nhi-${empId}`}
+            employeeId={empId}
+            detailCount={nhiDeps.length}
+            reloadKey={nhiDeps.filter((d) => d.insured).map((d) => d.id).join(",")}
+          >
+            <div className="mt-1">
+              <Disclosure
+                title={`明細 ${nhiDeps.length} 筆`}
+                actions={
+                  <LinkButton onClick={() => setShowNhiForm((open) => !open)} aria-expanded={showNhiForm} aria-controls={nhiPanelId}>
+                    {showNhiForm ? "收合" : "＋新增"}
+                  </LinkButton>
+                }
               >
-                <input className={inputCls} value={nhiName} onChange={(event) => setNhiName(event.target.value)} placeholder="眷屬姓名" />
-                <input className={inputCls} value={nhiRelationship} onChange={(event) => setNhiRelationship(event.target.value)} placeholder="關係" />
-                <input className={inputCls} value={nhiIdNumber} onChange={(event) => setNhiIdNumber(event.target.value)} placeholder="身分證字號" />
-                <label className="flex items-center gap-2 text-sm text-gray-600">
-                  <input type="checkbox" checked={nhiInsured} onChange={(event) => setNhiInsured(event.target.checked)} />
-                  投保中
-                </label>
-                <button
-                  type="submit"
-                  disabled={nhiSubmitting}
-                  className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50"
-                  style={{ color: "var(--brand)" }}
-                >
-                  {nhiSubmitting ? "新增中…" : "新增健保眷屬"}
-                </button>
-                {nhiError && <ErrorText className="sm:col-span-2">{nhiError}</ErrorText>}
-              </form>
+                {/* hidden 掛在不帶 display 類別的外層 div（form 本身是 grid，直接掛會被蓋掉）。 */}
+                <div id={nhiPanelId} hidden={!showNhiForm}>
+                  {/* form 的 onChange 會收到底下所有欄位冒泡上來的變更：改任何一欄就清掉錯誤。 */}
+                  <form onSubmit={onAddNhi} onChange={() => setNhiError(null)} className={`${formBoxCls} grid grid-cols-1 gap-2 sm:grid-cols-2`}>
+                    <input className={inputCls} value={nhiName} onChange={(event) => setNhiName(event.target.value)} placeholder="眷屬姓名" />
+                    <input className={inputCls} value={nhiRelationship} onChange={(event) => setNhiRelationship(event.target.value)} placeholder="關係" />
+                    <input className={inputCls} value={nhiIdNumber} onChange={(event) => setNhiIdNumber(event.target.value)} placeholder="身分證字號" />
+                    <label className="flex items-center gap-2 text-sm text-gray-600">
+                      <input type="checkbox" checked={nhiInsured} onChange={(event) => setNhiInsured(event.target.checked)} />
+                      投保中
+                    </label>
+                    <div className="sm:col-span-2">
+                      <Button size="sm" type="submit" loading={nhiSubmitting}>
+                        新增健保眷屬
+                      </Button>
+                    </div>
+                    {nhiError && <ErrorText className="sm:col-span-2">{nhiError}</ErrorText>}
+                  </form>
+                </div>
+                {nhiDeps.length > 0 && (
+                  <ul className="divide-y divide-gray-100">
+                    {nhiDeps.map((d) => (
+                      <ListRow
+                        key={d.id}
+                        main={d.name}
+                        meta={`${d.relationship ?? "—"}｜${d.id_number ?? "無證號"}｜${d.insured ? "投保中" : "未投保"}`}
+                        actions={
+                          <button type="button" onClick={() => deleteNhiDependent(d.id).then(() => loadEmployee(empId))} className={dangerLinkCls}>
+                            刪除
+                          </button>
+                        }
+                      />
+                    ))}
+                  </ul>
+                )}
+              </Disclosure>
             </div>
-            <ul className="divide-y divide-gray-100 text-sm">
-              {nhiDeps.map((d) => (
-                <li key={d.id} className="flex items-center justify-between py-1.5">
-                  <span>
-                    {d.name}
-                    <span className="text-xs text-gray-500">
-                      {" "}｜{d.relationship ?? "—"}｜{d.id_number ?? "無證號"}｜{d.insured ? "投保中" : "未投保"}
-                    </span>
-                  </span>
-                  <button onClick={() => deleteNhiDependent(d.id).then(() => loadEmployee(empId))} className="text-red-600 hover:underline">刪除</button>
-                </li>
-              ))}
-              {nhiDeps.length === 0 && <li className="py-1.5 text-gray-400">無</li>}
-            </ul>
-          </div>
-          <div>
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-              <h3 className="text-sm font-medium text-gray-600">所得稅扶養親屬資料</h3>
-              <Button variant="secondary" size="sm"
-                type="button"
-                onClick={() => setShowTaxForm((open) => !open)}
-                aria-expanded={showTaxForm}
-                aria-controls={taxPanelId}>
-                {showTaxForm ? "收合" : "＋ 新增扶養親屬"}
-              </Button>
-            </div>
-            <div id={taxPanelId} hidden={!showTaxForm}>
-              <form
-                onSubmit={onAddTax}
-                onChange={() => setTaxError(null)}
-                className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2"
-              >
-                <input className={inputCls} value={taxName} onChange={(event) => setTaxName(event.target.value)} placeholder="親屬姓名" />
-                <input className={inputCls} value={taxRelationship} onChange={(event) => setTaxRelationship(event.target.value)} placeholder="關係" />
-                <input className={inputCls} value={taxIdNumber} onChange={(event) => setTaxIdNumber(event.target.value)} placeholder="身分證字號" />
-                <input className={inputCls} type="number" value={taxBirthYear} onChange={(event) => setTaxBirthYear(event.target.value)} placeholder="出生年" />
-                <button
-                  type="submit"
-                  disabled={taxSubmitting}
-                  className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50"
-                  style={{ color: "var(--brand)" }}
-                >
-                  {taxSubmitting ? "新增中…" : "新增扶養親屬"}
-                </button>
-                {taxError && <ErrorText className="sm:col-span-2">{taxError}</ErrorText>}
-              </form>
-            </div>
-            <ul className="divide-y divide-gray-100 text-sm">
-              {taxDeps.map((d) => (
-                <li key={d.id} className="flex items-center justify-between py-1.5">
-                  <span>
-                    {d.name}
-                    <span className="text-xs text-gray-500">
-                      {" "}｜{d.relationship ?? "—"}｜{d.id_number ?? "無證號"}｜出生年 {d.birth_year ?? "—"}｜{taxStatusLabel(d.support_status)}
-                    </span>
-                  </span>
-                  <button onClick={() => deleteTaxDependent(d.id).then(() => loadEmployee(empId))} className="text-red-600 hover:underline">停用扶養</button>
-                </li>
-              ))}
-              {taxDeps.length === 0 && <li className="py-1.5 text-gray-400">無</li>}
-            </ul>
-          </div>
+          </NhiDependentsCountField>
+
+          {/* 所得稅扶養親屬：收合成一行，新增在展開後。 */}
+          <section className="py-3" data-testid="tax-dependents">
+            <Disclosure
+              key={`tax-${empId}`}
+              title={taxDependentsHeadline(taxDeps.length)}
+              actions={
+                <LinkButton onClick={() => setShowTaxForm((open) => !open)} aria-expanded={showTaxForm} aria-controls={taxPanelId}>
+                  {showTaxForm ? "收合" : "＋新增"}
+                </LinkButton>
+              }
+            >
+              <div id={taxPanelId} hidden={!showTaxForm}>
+                <form onSubmit={onAddTax} onChange={() => setTaxError(null)} className={`${formBoxCls} grid grid-cols-1 gap-2 sm:grid-cols-2`}>
+                  <input className={inputCls} value={taxName} onChange={(event) => setTaxName(event.target.value)} placeholder="親屬姓名" />
+                  <input className={inputCls} value={taxRelationship} onChange={(event) => setTaxRelationship(event.target.value)} placeholder="關係" />
+                  <input className={inputCls} value={taxIdNumber} onChange={(event) => setTaxIdNumber(event.target.value)} placeholder="身分證字號" />
+                  <input className={inputCls} type="number" value={taxBirthYear} onChange={(event) => setTaxBirthYear(event.target.value)} placeholder="出生年" />
+                  <div className="sm:col-span-2">
+                    <Button size="sm" type="submit" loading={taxSubmitting}>
+                      新增扶養親屬
+                    </Button>
+                  </div>
+                  {taxError && <ErrorText className="sm:col-span-2">{taxError}</ErrorText>}
+                </form>
+              </div>
+              {taxDeps.length > 0 && (
+                <ul className="divide-y divide-gray-100">
+                  {taxDeps.map((d) => (
+                    <ListRow
+                      key={d.id}
+                      main={d.name}
+                      meta={`${d.relationship ?? "—"}｜${d.id_number ?? "無證號"}｜出生年 ${d.birth_year ?? "—"}｜${taxStatusLabel(d.support_status)}`}
+                      actions={
+                        <button type="button" onClick={() => deleteTaxDependent(d.id).then(() => loadEmployee(empId))} className={dangerLinkCls}>
+                          停用扶養
+                        </button>
+                      }
+                    />
+                  ))}
+                </ul>
+              )}
+            </Disclosure>
+          </section>
         </div>
       </>
     </Card>
