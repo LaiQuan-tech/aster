@@ -664,7 +664,9 @@ export async function settleAttendance({ tenantId, from, to, employeeId, special
   const { rows, specialInRange } = await computeAttendanceRows({ tenantId, from, to, employeeId })
   // 特殊假日刪除／改範圍後，原本只因特殊假日而寫的列（沒打卡、沒假）不會再出現在 rows → 清掉殘留旗標（含無薪扣薪）。
   // 只在區間內仍有特殊假日、或呼叫端明示（剛刪除）時跑。
-  if (specialInRange || specialCleanup) {
+  // 驗收第三輪：刪除特殊假日後若當下重算失敗，之後的手動重算／每日排程也要清得掉 → 區間內只要還有帶
+  // flags.specialDay 的列（partial index，limit 1）就跑。
+  if (specialInRange || specialCleanup || (await hasSpecialDayFlags(tenantId, from, to, employeeId))) {
     await clearStaleSpecialDays(tenantId, from, to, employeeId, new Set(rows.map((r) => `${r.employee_id}|${r.work_date}`)))
   }
   if (rows.length === 0) return { settled: 0 }
@@ -696,6 +698,24 @@ export async function settleAttendance({ tenantId, from, to, employeeId, special
  * 沒假、沒排班，只因特殊假日才寫的列，而特殊假日已刪除或不再適用）→ 歸零（attendance_days 有 no_hard_delete，不能刪）：
  * 工時／遲到／加班／請假 0、移除 specialDay 旗標（其他旗標保留）。失敗只記 log，不擋結算。
  */
+async function hasSpecialDayFlags(tenantId: string, from: DateKey, to: DateKey, employeeId: string | undefined): Promise<boolean> {
+  let q = supabaseAdmin
+    .from("attendance_days")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .gte("work_date", from)
+    .lte("work_date", to)
+    .not("anomaly->flags->specialDay", "is", null)
+  if (employeeId) q = q.eq("employee_id", employeeId)
+  const { data, error } = await q.limit(1)
+  if (error) {
+    // 查不了（舊庫欄位缺漏等）→ 保守地照跑清理（清理本身容錯）。
+    console.error(`[settlement] hasSpecialDayFlags: ${error.message}`)
+    return true
+  }
+  return (data ?? []).length > 0
+}
+
 async function clearStaleSpecialDays(
   tenantId: string,
   from: DateKey,
@@ -1095,7 +1115,8 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
       const shiftNet = scheduledShift ? shiftWindowUtc(workDate, scheduledShift, tz).workMinutes : 0
       const expected = unscheduledPt ? 0 : shiftNet > 0 ? shiftNet : regularMinutes
       const tripMinutes =
-        special.paid || expected === 0 ? 0 : coveredMinutesOn(tripRequests, empId, workDate, scheduledShift, tz, expected)
+        // 用當天實際結算的班別（排班／預設班別／彈性上班），午休才扣得對（驗收第三輪）。
+        special.paid || expected === 0 ? 0 : coveredMinutesOn(tripRequests, empId, workDate, shift, tz, expected)
       const unpaidMinutes = special.paid
         ? 0
         : Math.max(0, expected - workedMinutes - (leave?.total ?? 0) - tripMinutes)

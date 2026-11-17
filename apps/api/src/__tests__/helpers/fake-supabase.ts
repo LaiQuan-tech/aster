@@ -317,13 +317,21 @@ export function createFakeSupabase() {
       is: (column: string, value: unknown) => (predicates.push((row) => (row[column] ?? null) === (value ?? null)), builder),
       not: (column: string, op: string, value: unknown) => {
         if (op !== "is" && op !== "eq") throw new Error(`fake-supabase: not() 不支援的運算子 ${op}`)
-        // jsonb 路徑 `col->>key`（只支援一層，取文字值）。
+        // jsonb 路徑 `col->>key`（取文字值）或多層 `col->a->b`（取 jsonb 值；2026-11-17 特殊假日旗標查詢用）。
         const at = (row: Row): unknown => {
           const m = /^(\w+)->>(\w+)$/.exec(column)
-          if (!m) return row[column]
-          const obj = row[m[1]!]
-          const v = obj && typeof obj === "object" ? (obj as Row)[m[2]!] : undefined
-          return v === undefined || v === null ? null : String(v)
+          if (m) {
+            const obj = row[m[1]!]
+            const v = obj && typeof obj === "object" ? (obj as Row)[m[2]!] : undefined
+            return v === undefined || v === null ? null : String(v)
+          }
+          if (column.includes("->")) {
+            const [base, ...keys] = column.split("->")
+            let v: unknown = row[base!]
+            for (const k of keys) v = v && typeof v === "object" ? (v as Row)[k] : undefined
+            return v === undefined ? null : v
+          }
+          return row[column]
         }
         predicates.push((row) => (at(row) ?? null) !== (value ?? null))
         return builder

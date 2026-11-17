@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 
 import { computePayslip } from "@hr/rules"
-import { specialLeaveDaysRouter } from "../routes/special-leave-days.js"
+import { RecalcBusyError, specialLeaveDaysRouter, withRecalcLock } from "../routes/special-leave-days.js"
+import { coveredMinutesOn } from "../services/absence-cover.js"
 import { isPeriodClosedError } from "../services/period-lock.js"
 import { detectAnomalies, scanMissingPunches } from "../services/detection.js"
 import { lateMinutesForArrival, settleAttendance } from "../services/settlement.js"
@@ -511,9 +512,9 @@ describe("驗收第二輪（B2／S1／S2／S3／S4／N1／N2）", () => {
     expect(res.body.recalc).toEqual([{ period: "2026-10", status: "done", rebuilt: 0, submitted: 2, approved: 1, draftPayslips: 1 }])
   })
 
-  it("N2 互斥鎖：同租戶已有進行中的重算 → 409 recalc_in_progress、不寫入；超過 10 分鐘的殘留鎖可接手、做完釋放", async () => {
+  it("N2 互斥鎖：同租戶已有進行中的重算 → 409 recalc_in_progress、不寫入；超過 2 分鐘的殘留鎖可接手、做完釋放", async () => {
     fake.uniques.special_leave_recalc_locks = [["tenant_id"]]
-    fake.db.special_leave_recalc_locks = [{ tenant_id: TENANT_ID, token: "11111111-1111-4111-8111-000000000001", started_at: new Date("2026-10-20T09:55:00+08:00").toISOString() }]
+    fake.db.special_leave_recalc_locks = [{ tenant_id: TENANT_ID, token: "11111111-1111-4111-8111-000000000001", started_at: new Date("2026-10-20T09:59:00+08:00").toISOString() }]
     const body = { startDate: DAY, name: "颱風假", paid: false, scope: "all" }
     const busy = await as("hr-user")(request(app).post("/special-leave-days").send(body))
     expect(busy.status).toBe(409)
@@ -522,7 +523,7 @@ describe("驗收第二輪（B2／S1／S2／S3／S4／N1／N2）", () => {
 
     fake.db.special_leave_recalc_locks = [{ tenant_id: TENANT_ID, token: "11111111-1111-4111-8111-000000000001", started_at: new Date("2026-10-20T09:40:00+08:00").toISOString() }]
     const ok = await as("hr-user")(request(app).post("/special-leave-days").send(body))
-    expect(ok.status).toBe(201)
+    expect(ok.status).toBe(201) // 20 分鐘前的殘留鎖可接手
     expect(fake.db.special_leave_recalc_locks).toHaveLength(0)
   })
 
@@ -534,5 +535,110 @@ describe("驗收第二輪（B2／S1／S2／S3／S4／N1／N2）", () => {
     const mid = fake.reads.length
     await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, specialCleanup: true })
     expect(fake.reads.slice(mid).filter((t) => t === "attendance_days").length).toBeGreaterThan(adReads)
+  })
+})
+
+describe("驗收第三輪", () => {
+  const SPECIAL_ID = "aaaaaaaa-0000-4000-8000-0000000000ff"
+  const sp = () => special({ id: SPECIAL_ID })
+
+  describe("1 殘留清理：刪除後重算失敗，之後一般結算（手動重算／每日排程）也清得掉", () => {
+    it("API 刪除 → A 只因特殊假日而寫的列清掉旗標", async () => {
+      fake.db.special_leave_days = [sp()]
+      await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY })
+      expect(rowOf(A)!.anomaly.flags.specialDay).toBeDefined()
+      const r = await as("hr-user")(request(app).delete(`/special-leave-days/${SPECIAL_ID}`))
+      expect(r.status).toBe(200)
+      expect(rowOf(A)!.anomaly?.flags?.specialDay).toBeUndefined()
+    })
+    it("刪除已寫入但重算沒跑（中斷）→ 之後不帶 specialCleanup 的整月結算也清掉，薪資不再扣", async () => {
+      fake.db.special_leave_days = [sp()]
+      await settleAttendance({ tenantId: TENANT_ID, from: "2026-10-01", to: "2026-10-31" })
+      ;(fake.db.special_leave_days![0] as Record<string, unknown>).deleted_at = "2026-10-20T01:00:00Z"
+      await settleAttendance({ tenantId: TENANT_ID, from: "2026-10-01", to: "2026-10-31" })
+      const a = rowOf(A)!
+      expect(a.anomaly?.flags?.specialDay).toBeUndefined()
+      expect(toAttendanceDay(a as never, new Map()).leaves).toBeUndefined()
+    })
+    it("PATCH 範圍改成只剩 HR → A 的旗標清掉、HR 仍有", async () => {
+      fake.db.special_leave_days = [sp()]
+      await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY })
+      const r = await as("hr-user")(
+        request(app).patch(`/special-leave-days/${SPECIAL_ID}`).send({ scope: "employees", employeeIds: [HR] }),
+      )
+      expect(r.status).toBe(200)
+      expect(rowOf(A)!.anomaly?.flags?.specialDay).toBeUndefined()
+      expect(rowOf(HR)!.anomaly.flags.specialDay.name).toBe("颱風假")
+    })
+  })
+
+  describe("2 互斥鎖", () => {
+    beforeEach(() => {
+      fake.uniques.special_leave_recalc_locks = [["tenant_id"]]
+      fake.db.special_leave_recalc_locks = []
+    })
+    it("fn 丟錯 → DB 列與記憶體鎖都釋放，下一次拿得到", async () => {
+      await expect(withRecalcLock(TENANT_ID, null, async () => { throw new Error("boom") })).rejects.toThrow("boom")
+      expect(fake.db.special_leave_recalc_locks).toHaveLength(0)
+      await expect(withRecalcLock(TENANT_ID, null, async () => 1)).resolves.toBe(1)
+    })
+    it("同程序並行 → 第二個 busy；做完釋放", async () => {
+      let release!: () => void
+      const p1 = withRecalcLock(TENANT_ID, null, () => new Promise<void>((r) => { release = r }))
+      await expect(withRecalcLock(TENANT_ID, null, async () => 2)).rejects.toBeInstanceOf(RecalcBusyError)
+      release()
+      await p1
+      expect(fake.db.special_leave_recalc_locks).toHaveLength(0)
+    })
+    it("別的執行個體 1 分鐘前拿的鎖 → busy；3 分鐘前（> 2 分鐘）→ 接手、換 token，舊持有者的 token 刪不到新鎖", async () => {
+      fake.db.special_leave_recalc_locks = [{ tenant_id: TENANT_ID, token: "x", started_at: new Date("2026-10-20T09:59:00+08:00").toISOString() }]
+      await expect(withRecalcLock(TENANT_ID, null, async () => 3)).rejects.toBeInstanceOf(RecalcBusyError)
+      expect(fake.db.special_leave_recalc_locks).toHaveLength(1)
+      fake.db.special_leave_recalc_locks = [{ tenant_id: TENANT_ID, token: "x", started_at: new Date("2026-10-20T09:57:00+08:00").toISOString() }]
+      await withRecalcLock(TENANT_ID, null, async () => {
+        expect((fake.db.special_leave_recalc_locks![0] as Record<string, unknown>).token).not.toBe("x")
+        const { supabaseAdmin } = await import("../lib/supabase.js")
+        await supabaseAdmin.from("special_leave_recalc_locks").delete().eq("tenant_id", TENANT_ID).eq("token", "x")
+        expect(fake.db.special_leave_recalc_locks).toHaveLength(1)
+      })
+      expect(fake.db.special_leave_recalc_locks).toHaveLength(0)
+    })
+  })
+
+  describe("3／4 出差覆蓋分鐘（coveredMinutesOn）", () => {
+    const tz = "Asia/Taipei"
+    const D = "2030-04-01"
+    const day = { start: "09:00", end: "18:00", breakMinutes: 60 }
+    const night = { start: "22:00", end: "06:00", breakMinutes: 60, breakStart: "02:00" }
+    const req = (o: Record<string, unknown>) => ({ employee_id: "e1", kind: "business_trip", start_at: "", end_at: "", segments: null, ...o })
+    const iso = (d: string, t: string) => new Date(`${d}T${t}:00+08:00`).toISOString()
+    it.each([
+      ["日班整天 09–18（扣午休）", [req({ start_at: iso(D, "09:00"), end_at: iso(D, "18:00") })], day, 480, 480],
+      ["上午 09–13 跨午休", [req({ start_at: iso(D, "09:00"), end_at: iso(D, "13:00") })], day, 480, 180],
+      ["分段 13–18", [req({ segments: [{ date: D, startTime: "13:00", endTime: "18:00" }] })], day, 480, 300],
+      ["分段同時有起訖與時數 → 只算一次", [req({ segments: [{ date: D, startTime: "09:00", endTime: "12:00", hours: 3 }] })], day, 480, 180],
+      [
+        "只填時數 4h＋另一張 09–13 → 取大不重複",
+        [req({ segments: [{ date: D, hours: 4 }] }), req({ start_at: iso(D, "09:00"), end_at: iso(D, "13:00") })],
+        day,
+        480,
+        240,
+      ],
+      ["夜班 22–06，當日段 22:00–02:00", [req({ segments: [{ date: D, startTime: "22:00", endTime: "02:00" }] })], night, 420, 240],
+      ["夜班，隔天日期的段 00:00–06:00 也算（扣 02–03 休息）", [req({ segments: [{ date: "2030-04-02", startTime: "00:00", endTime: "06:00" }] })], night, 420, 300],
+      ["夜班起訖 22:00 → 隔天 06:00", [req({ start_at: iso(D, "22:00"), end_at: iso("2030-04-02", "06:00") })], night, 420, 420],
+    ])("%s", (_label, requests, shift, cap, expected) => {
+      expect(coveredMinutesOn(requests as never, "e1", D, shift, tz, cap)).toBe(expected)
+    })
+
+    it("結算用實際班別（彈性上班含午休）：出差 09–13、無薪颱風假 → 出差抵 180 分、無薪 300", async () => {
+      fake.db.special_leave_days = [special()]
+      fake.db.leave_requests = [{
+        id: "bt-2", tenant_id: TENANT_ID, employee_id: A, leave_type_id: null, kind: "business_trip", status: "approved",
+        start_at: `${DAY}T09:00:00+08:00`, end_at: `${DAY}T13:00:00+08:00`, hours: 4, segments: null, deleted_at: null,
+      }]
+      await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, employeeId: A })
+      expect(rowOf(A)!.anomaly.flags.specialDay.unpaidMinutes).toBe(300)
+    })
   })
 })

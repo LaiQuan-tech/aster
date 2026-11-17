@@ -147,12 +147,27 @@ export function coveredMinutesOn(
   if (!w) return 0
   const pseudoShift: ShiftDef = shift ?? { start: "00:00", end: "23:59", breakMinutes: 0 }
   const intervals: MsInterval[] = []
+  // 只填時數、沒有起訖的段（無從得知覆蓋哪一段）：同一天加總，最後與有起訖的時段「取大」——兩者可能是同一段，
+  // 不重複扣抵（驗收第三輪）。
   let hoursMinutes = 0
+  const prevDate = addDaysKey(date, -1)
+  const nextDate = addDaysKey(date, 1)
   for (const req of own) {
     if (Array.isArray(req.segments) && req.segments.length > 0) {
       for (const seg of req.segments) {
-        if (seg?.date === date && (typeof seg.startTime !== "string" || typeof seg.endTime !== "string") && typeof seg.hours === "number") {
-          hoursMinutes += Math.max(0, Math.round(seg.hours * 60))
+        if (!seg || typeof seg.date !== "string") continue
+        const hasTimes = typeof seg.startTime === "string" && typeof seg.endTime === "string"
+        if (seg.date === date) {
+          if (!hasTimes && typeof seg.hours === "number") hoursMinutes += Math.max(0, Math.round(seg.hours * 60))
+          continue // 有起訖 → 下面 requestIntervalsOn 依班別座標換算
+        }
+        // 前一天／隔天的段：照字面時刻放回它自己的日期（跨日班的隔天凌晨段、前一晚的夜班段），再與今天的班別時段取交集。
+        if (hasTimes && (seg.date === prevDate || seg.date === nextDate)) {
+          const a = hhmmToMinutesOrNull(seg.startTime!)
+          const b = hhmmToMinutesOrNull(seg.endTime!)
+          if (a == null || b == null) continue
+          const end = b <= a ? b + 24 * 60 : b
+          intervals.push({ start: zonedTimeToUtc(seg.date, 0, a, tz).getTime(), end: zonedTimeToUtc(seg.date, 0, end, tz).getTime() })
         }
       }
     }
@@ -173,7 +188,7 @@ export function coveredMinutesOn(
   }
   let ms = 0
   for (const need of needs) for (const iv of merged) ms += Math.max(0, Math.min(need.end, iv.end) - Math.max(need.start, iv.start))
-  return Math.min(capMinutes, Math.round(ms / 60_000) + hoursMinutes)
+  return Math.min(capMinutes, Math.max(Math.round(ms / 60_000), hoursMinutes))
 }
 
 /** 已核准、未註銷、與 [from, to]（本地日，含隔天跨日班）重疊的請假／在家／出差單。 */

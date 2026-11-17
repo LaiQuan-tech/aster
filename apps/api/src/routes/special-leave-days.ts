@@ -224,7 +224,8 @@ export async function recalcSpecialDayRange(
 
 /* ---------------------------------------------------------- 重算互斥鎖 --- */
 
-const STALE_LOCK_MS = 10 * 60_000
+// 略大於 Vercel 函式上限（maxDuration 60 秒）：超過就一定是中斷的殘留鎖。
+const STALE_LOCK_MS = 2 * 60_000
 const memoryLocks = new Set<string>()
 
 export class RecalcBusyError extends Error {
@@ -236,7 +237,7 @@ export class RecalcBusyError extends Error {
 
 /**
  * 每租戶同時只跑一個特殊假日寫入＋重算（N2）：程序內記憶體鎖＋DB 列鎖（special_leave_recalc_locks，tenant_id 唯一；
- * migration 0111）。超過 10 分鐘的殘留 DB 鎖可接手。表未建 → 只靠記憶體鎖。拿不到 → RecalcBusyError（409）。
+ * migration 0111）。超過 2 分鐘的殘留 DB 鎖可接手。表未建 → 只靠記憶體鎖。拿不到 → RecalcBusyError（409）。
  */
 export async function withRecalcLock<T>(tenantId: string, actorEmpId: string | null, fn: () => Promise<T>): Promise<T> {
   if (memoryLocks.has(tenantId)) throw new RecalcBusyError()
