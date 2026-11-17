@@ -64,21 +64,23 @@ import { useSession } from "@/lib/use-session";
 import { useEmployeeAccountActions } from "../_components/useEmployeeAccountActions";
 import { EmployeeStatementsPanel, type StatementTab } from "../_components/EmployeeStatementsPanel";
 import { EmployeePayrollPanel } from "../_components/EmployeePayrollPanel";
+import { EmployeeLeavePanel } from "../_components/EmployeeLeavePanel";
 
 const UNSAVED_PROMPT = "這位員工的資料還沒儲存，確定要離開嗎？";
 
 /**
  * 內頁分頁（2026-10-27）：員工資料｜出勤統計表｜薪資明細表（薪資明細表只有 HR／平台管理員看得到）。
  * 2026-11-09：加「薪資」分頁（原 /admin/payroll 的員工薪資保險資料卡），同樣只給 HR／平台管理員。
+ * 2026-11-17：最右邊加「休假」分頁（各假別額度設定），同樣只給 HR／平台管理員。
  */
-type DetailTab = "profile" | "salary" | StatementTab;
+type DetailTab = "profile" | "salary" | "leave" | StatementTab;
 
 const isStatementTab = (t: DetailTab): t is StatementTab => t === "attendance" || t === "payslip";
 
 function tabFromLocation(): DetailTab {
   if (typeof window === "undefined") return "profile";
   const t = new URLSearchParams(window.location.search).get("tab");
-  return t === "attendance" || t === "payslip" || t === "salary" ? t : "profile";
+  return t === "attendance" || t === "payslip" || t === "salary" || t === "leave" ? t : "profile";
 }
 
 type DetailEmployee = EmployeeWithProfile & EditableEmployee;
@@ -481,13 +483,13 @@ export default function EmployeeDetailPage() {
         </div>
       </Card>
 
-      {/* 分頁：員工資料｜出勤統計表｜薪資｜薪資明細表（會計看不到薪資與薪資明細表） */}
+      {/* 分頁：員工資料｜出勤統計表｜薪資｜薪資明細表｜休假（會計看不到薪資、薪資明細表與休假） */}
       <div role="tablist" aria-label="員工內頁分頁" className="flex gap-1 overflow-x-auto rounded-xl border border-gray-200 bg-white p-1 print:hidden">
         {(
           [
             ["profile", "員工資料"],
             ["attendance", "出勤統計表"],
-            ...(canManage ? ([["salary", "薪資"], ["payslip", "薪資明細表"]] as const) : []),
+            ...(canManage ? ([["salary", "薪資"], ["payslip", "薪資明細表"], ["leave", "休假"]] as const) : []),
           ] as ReadonlyArray<readonly [DetailTab, string]>
         ).map(([key, label]) => (
           <button
@@ -516,6 +518,13 @@ export default function EmployeeDetailPage() {
           <EmployeePayrollPanel employeeId={employee.id} />
         ) : (
           <p className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-500">薪資資料只有 HR 與平台管理員可以查看。</p>
+        ))}
+
+      {tab === "leave" &&
+        (canManage ? (
+          <EmployeeLeavePanel employeeId={employee.id} />
+        ) : (
+          <p className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-500">假別額度只有 HR 與平台管理員可以設定。</p>
         ))}
 
       {tab === "profile" && (
