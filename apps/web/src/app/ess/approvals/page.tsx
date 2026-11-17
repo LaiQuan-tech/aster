@@ -1,5 +1,6 @@
 "use client";
 
+import { PayeeAccountInfo } from "@/components/PayeeAccountInfo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   approveRequest,
@@ -841,6 +842,8 @@ export default function ApprovalsPage() {
                       <dt className="text-gray-400">建單</dt>
                       <dd>{d.createdByName ?? "—"}</dd>
                     </dl>
+                    {/* 2026-11-17：收款戶名／銀行／帳號末 4 碼＋帳戶來源＋名冊近期變更警示。 */}
+                    <PayeeAccountInfo d={d} className="mt-2" />
                     {/* 第八輪：收款名稱與名冊廠商相近（已說明或開單後才相近）→ 醒目標示，請核准人確認收款對象。 */}
                     {d.payeeSimilarWarning && (
                       <p role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">

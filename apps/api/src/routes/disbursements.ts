@@ -193,13 +193,14 @@ async function actorOf(tenantId: string, req: Request): Promise<Actor> {
 }
 
 /**
- * 收款方（廠商）銀行資料只給會計與 HR（2026-10-27 業主決定）。放款其他端點本來就是 requireFinance；
- * 只有簽核類端點（待我簽核、核准／退回）對任何候選簽核人開放，回傳前把收款方銀行三欄遮成 null。
+ * 簽核類端點（待我簽核、核准／退回）對任何候選簽核人開放。2026-11-17 業主決定（取代 2026-10-27 全遮）：
+ * 核准人看得到收款戶名、銀行名稱／代碼與帳號**末 4 碼**（payeeAccountMasked，後端遮好），完整帳號一律不送——
+ * 會計／HR 也一樣（核准畫面用不到完整帳號；要匯款的放款列表／明細／匯出本來就 requireFinance、維持原樣）。
  * 付款公司自己的帳號（payingBankAccount）不是廠商資料，不遮。
  */
 export function maskPayeeBank<T>(d: T): T {
   if (!d || typeof d !== "object") return d
-  return { ...d, payeeBankName: null, payeeBankAccount: null, payeeBankCode: null }
+  return { ...d, payeeBankAccount: null }
 }
 
 function handleError(err: unknown, res: Response, next: NextFunction): void {
@@ -307,7 +308,7 @@ disbursementsRouter.get("/disbursements/pending-approvals", ...authGuards, async
     }
     const wantAll = req.query.scope === "all" && isFinanceRole(actor.role)
     const items = await listPendingDisbursementApprovals(tenantId, actor, { scope: wantAll ? "all" : "mine" })
-    res.status(200).json({ scope: wantAll ? "all" : "mine", disbursements: isFinanceRole(actor.role) ? items : items.map(maskPayeeBank) })
+    res.status(200).json({ scope: wantAll ? "all" : "mine", disbursements: items.map(maskPayeeBank) })
   } catch (err) {
     handleError(err, res, next)
   }
@@ -530,7 +531,7 @@ function decisionRoute(action: "approve" | "reject") {
         res.status(404).json({ error: "not_found" })
         return
       }
-      res.status(200).json(isFinanceRole(actor.role) ? out : { ...out, disbursement: maskPayeeBank(out.disbursement) })
+      res.status(200).json(out.disbursement ? { ...out, disbursement: maskPayeeBank(out.disbursement) } : out)
     } catch (err) {
       handleError(err, res, next)
     }

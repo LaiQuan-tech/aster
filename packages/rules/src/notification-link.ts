@@ -164,6 +164,12 @@ export function notificationLink(n: NotificationLinkInput): string | null {
     }
     case "overtime_unapproved_punch":
       return "/ess/approvals"
+    // 2026-11-17 廠商收款帳戶變更雙人覆核：送出 → 覆核者到放款簽核頁上方的待覆核區塊；結果 → 申請人回該廠商頁。
+    case "vendor_bank_change_request": {
+      if (str(payload.event) === "submitted") return "/admin/disbursements/approvals"
+      const vendorId = str(payload.vendorId)
+      return vendorId ? `/admin/vendors/${enc(vendorId)}` : "/admin/vendors"
+    }
     default:
       return null
   }
@@ -190,6 +196,8 @@ export function notificationNeedsAction(n: NotificationLinkInput): boolean {
     case "attendance_sheet":
       return action === "submitted" || action === "manager_reviewed" || action === "returned" || action === "reopened" || action === "beyond_cap_settlement"
     case "bonus_run":
+      return event === "submitted"
+    case "vendor_bank_change_request":
       return event === "submitted"
     default:
       return false

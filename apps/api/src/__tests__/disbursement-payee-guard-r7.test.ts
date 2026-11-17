@@ -167,7 +167,9 @@ describe("第七輪 H2：封存專案的未付期款照算（同應付清單）"
     expect(res.status).toBe(400)
     expect(res.body.error).toBe("change_reason_required")
     expect(fake.db.vendors!.find((v) => v.id === VE)!.bank_account).toBe("333")
-    expect((await as(request(app).patch(`/vendors/${VE}`)).send({ bankAccount: "444", changeReason: "測試換帳戶" })).status).toBe(200)
+    // 2026-11-17 雙人覆核：有未付期款時帶了原因 → 202 送覆核，名冊不直接改。
+    expect((await as(request(app).patch(`/vendors/${VE}`)).send({ bankAccount: "444", changeReason: "測試換帳戶" })).status).toBe(202)
+    expect(fake.db.vendors!.find((v) => v.id === VE)!.bank_account).toBe("333")
   })
   it("同次改名＋帳戶 → 409 vendor_identity_change", async () => {
     const res = await as(request(app).patch(`/vendors/${VE}`)).send({ name: "測試另一家設計", bankAccount: "444" })

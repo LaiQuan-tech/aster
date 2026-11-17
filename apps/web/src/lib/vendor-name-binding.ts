@@ -70,6 +70,8 @@ export function humanizeVendorIdentityError(message: string, serverMessage?: str
   if (message.includes("vendor_identity_change")) return VENDOR_IDENTITY_CHANGE_TEXT;
   if (message.includes("vendor_has_open_disbursements")) return VENDOR_HAS_OPEN_DISBURSEMENTS_TEXT;
   if (message.includes("change_reason_required")) return VENDOR_CHANGE_REASON_REQUIRED_TEXT;
+  // 2026-11-17 雙人覆核：同廠商已有一筆帳戶變更待覆核。
+  if (message.includes("vendor_bank_change_pending")) return server || "此廠商已有一筆收款帳戶變更待覆核，請等覆核完成或取消後再改";
   if (message.includes("invalid_vendor_name")) return INVALID_VENDOR_NAME_TEXT;
   return message;
 }

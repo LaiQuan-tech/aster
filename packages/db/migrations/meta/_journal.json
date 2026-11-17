@@ -722,6 +722,13 @@
       "when": 1795200000000,
       "tag": "0102_leave_type_statutory_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1795300000000,
+      "tag": "0103_vendor_bank_change_review",
+      "breakpoints": true
     }
   ]
 }

@@ -24,6 +24,8 @@ const BLOCKED_PREFIXES = [
   "/auth",
   "/demo",
   "/health",
+  // 2026-11-17 廠商收款帳戶變更覆核：核准會改收款帳戶，只能本人在後台按，不給 AI。
+  "/vendor-bank-changes",
 ]
 
 export function isBlockedPath(path: string): boolean {
@@ -132,7 +134,7 @@ const SPECIFIC: Record<string, string> = {
   "POST /vendors":
     "新增廠商：只有名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate（回 matchedVendorName）；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險、寫嚴格稽核）；名稱／簡稱／帳戶戶名含不可見字元或西里爾／希臘字母 → 400 invalid_vendor_name。",
   "PATCH /vendors/:id":
-    "修改廠商：只有改後名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險）；名稱不合法 → 400 invalid_vendor_name；有未匯款放款單時不可改帳戶（409 vendor_has_open_disbursements）、只有未付期款改帳戶須帶 changeReason（第一次補帳戶免）。",
+    "修改廠商：只有改後名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險）；名稱不合法 → 400 invalid_vendor_name；有未匯款放款單時不可改帳戶（409 vendor_has_open_disbursements）；有未付期款時改帳戶須帶 changeReason（第一次補帳戶免），且不會直接生效——回 202 bankChangeRequested，建立「帳戶變更待覆核」，需老闆或 HR（非申請人）在後台核准後才套用；已有待覆核 → 409 vendor_bank_change_pending。",
   "DELETE /vendors/:id": "刪除廠商（HR）：仍有未付期款或未匯款放款單 → 409 vendor_in_use。",
   "GET /punch": "打卡紀錄；query: employeeId, deptId, from, to, type, source",
   "GET /attendance/punch-overview": "打卡當日總覽／週表；query: date 或 from/to, deptId, employeeId",

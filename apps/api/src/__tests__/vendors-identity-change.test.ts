@@ -136,22 +136,24 @@ describe("R2：改收款帳戶（2026-11-16 第四輪）", () => {
     expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000001" })
   })
 
-  it("只有未付期款（沒開單）：沒帶 changeReason → 400 change_reason_required；帶了 → 200 並寫稽核", async () => {
+  it("只有未付期款（沒開單）：沒帶 changeReason → 400 change_reason_required；帶了 → 202 送雙人覆核（名冊不改）並寫稽核", async () => {
     fake.db.project_subcontract_payments = unpaid()
     const bad = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "  " })
     expect(bad.status).toBe(400)
     expect(bad.body.error).toBe("change_reason_required")
     expect(vendorUpdates()).toHaveLength(0)
     const ok = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "測試：廠商換銀行" })
-    expect(ok.status).toBe(200)
-    expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000002" })
+    // 2026-11-17 雙人覆核：不直接生效，建 vendor_bank_change_requests（pending）。
+    expect(ok.status).toBe(202)
+    expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000001" })
+    expect(fake.db.vendor_bank_change_requests).toHaveLength(1)
+    expect(fake.db.vendor_bank_change_requests![0]).toMatchObject({ vendor_id: VENDOR, status: "pending", old_bank_account: "0000000000001", new_bank_account: "0000000000002", reason: "測試：廠商換銀行" })
     const a = audits()
     expect(a).toHaveLength(1)
     expect(a[0]!.payload).toMatchObject({
-      table_name: "vendors",
-      record_id: VENDOR,
-      old_row: expect.objectContaining({ bank_account: "0000000000001" }),
-      new_row: expect.objectContaining({ bank_account: "0000000000002", changeReason: "測試：廠商換銀行" }),
+      table_name: "vendor_bank_change_requests",
+      old_row: expect.objectContaining({ vendor_id: VENDOR, bank_account: "0000000000001" }),
+      new_row: expect.objectContaining({ bank_account: "0000000000002", reason: "測試：廠商換銀行", status: "pending" }),
     })
   })
 
@@ -178,11 +180,15 @@ describe("R2：改收款帳戶（2026-11-16 第四輪）", () => {
     expect(need.body.error).toBe("change_reason_required")
   })
 
-  it("U1 第六輪：名冊第一次補帳戶（原本代碼／銀行名／帳號皆空）不需要變更原因", async () => {
+  it("U1 第六輪：名冊第一次補帳戶（原本代碼／銀行名／帳號皆空）不需要變更原因（2026-11-17：有未付期款仍送覆核）", async () => {
     fake.db.vendors![0] = { ...fake.db.vendors![0]!, bank_code: null, bank_name: null, bank_account: null }
     fake.db.project_subcontract_payments = [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, amount: "1000", override_amount: null, paid_on: null }]
     const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankCode: "000", bankName: "測試銀行", bankAccount: "0000000000009" })
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(202)
+    expect(fake.db.vendors![0]).toMatchObject({ bank_account: null })
+    // 模擬覆核核准生效後（直接改假資料），再改 → 要原因。
+    fake.db.vendor_bank_change_requests = []
+    fake.db.vendors![0] = { ...fake.db.vendors![0]!, bank_code: "000", bank_name: "測試銀行", bank_account: "0000000000009" }
     // 已有帳戶再改 → 要原因（對照）。
     const again = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000008" })
     expect(again.status).toBe(400)
@@ -197,17 +203,19 @@ describe("第五輪（2026-11-17）：嚴格稽核、刪廠商擋、名稱不可
     return (req: request.Test) => req.set("Authorization", "Bearer vendor-hr-tester")
   }
 
-  it("第 6 項：改帳戶的稽核寫在更新之前；稽核寫失敗 → 500、名冊不改", async () => {
+  it("第 6 項：改帳戶的稽核寫在建立覆核申請之前；稽核寫失敗 → 500、名冊與申請都不動", async () => {
     fake.db.project_subcontract_payments = unpaid()
     fake.injectError({ table: "audit_logs", action: "insert", error: { message: "測試：稽核寫入失敗" } })
     const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "測試原因" })
     expect(res.status).toBe(500)
     expect(vendorUpdates()).toHaveLength(0)
     expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000001" })
+    expect(fake.db.vendor_bank_change_requests ?? []).toHaveLength(0)
     const ok = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "測試原因" })
-    expect(ok.status).toBe(200)
-    const order = fake.writes.filter((w) => w.table === "audit_logs" || (w.table === "vendors" && w.action === "update")).map((w) => w.table)
-    expect(order).toEqual(["audit_logs", "vendors"])
+    expect(ok.status).toBe(202)
+    const order = fake.writes.filter((w) => w.table === "audit_logs" || w.table === "vendor_bank_change_requests").map((w) => w.table)
+    expect(order).toEqual(["audit_logs", "vendor_bank_change_requests"])
+    expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000001" })
   })
 
   it("第 3 項：有未付期款 → DELETE 409 vendor_in_use、0 寫入", async () => {

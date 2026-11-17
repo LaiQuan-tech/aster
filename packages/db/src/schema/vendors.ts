@@ -49,6 +49,8 @@ export const vendors = pgTable(
     bankCode: text("bank_code"),
     bankAccount: text("bank_account"),
     accountHolder: text("account_holder"),
+    /** 收款帳戶最後一次變更時間（0103；核准放款畫面 30 天內黃色警示）。 */
+    bankChangedAt: timestamp("bank_changed_at", { withTimezone: true }),
     note: text("note"),
     cardStoragePath: text("card_storage_path"),
     source: text("source").notNull().default("manual"),

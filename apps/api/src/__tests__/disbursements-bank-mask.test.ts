@@ -8,6 +8,7 @@ const svc = vi.hoisted(() => ({
   item: {
     id: "dddddddd-0000-4000-8000-000000000001", payeeName: "測試廠商甲", payeeBankName: "測試銀行（000）",
     payeeBankAccount: "0000-0000-0000 測試戶名", payeeBankCode: "000", payingBankAccount: "測試公司帳號", amount: 1000,
+    payeeAccountMasked: "****0000", payeeAccountSource: "roster",
   },
 }))
 vi.mock("../services/disbursement-approval.js", async (orig) => ({
@@ -20,8 +21,9 @@ import { disbursementsRouter } from "../routes/disbursements.js"
 import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
 
 /**
- * 收款方（廠商）銀行資料只給會計與 HR（2026-10-27 業主決定）。放款的列表／明細／匯出本來就 requireFinance；
- * 「待我簽核」與核准／退回對任何候選簽核人開放，非會計／HR 拿到的收款方銀行三欄要是 null。
+ * 收款方（廠商）銀行資料：放款的列表／明細／匯出本來就 requireFinance（完整帳號維持原樣）。
+ * 2026-11-17 業主決定（取代 2026-10-27 全遮）：「待我簽核」與核准／退回對任何候選簽核人開放，
+ * 一律只給戶名、銀行名稱／代碼與末 4 碼（payeeAccountMasked），完整帳號（payeeBankAccount）一律 null——會計／HR 也一樣。
  * ⚠️ 全部是明顯的假資料。
  */
 const app = express()
@@ -42,24 +44,30 @@ beforeEach(() => {
 })
 
 describe("放款簽核端點：收款方銀行遮罩", () => {
-  it("主管（非會計／HR）看待我簽核：收款方銀行三欄 null，付款公司帳號與其他欄位照常", async () => {
+  it("主管看待我簽核：戶名、銀行名／代碼、末 4 碼照常，完整帳號 null；付款公司帳號照常", async () => {
     const res = await as("manager-user", request(app).get("/disbursements/pending-approvals"))
     expect(res.status).toBe(200)
-    expect(res.body.disbursements[0]).toMatchObject({ payeeName: "測試廠商甲", payeeBankName: null, payeeBankAccount: null, payeeBankCode: null, payingBankAccount: "測試公司帳號" })
+    expect(res.body.disbursements[0]).toMatchObject({
+      payeeName: "測試廠商甲", payeeBankName: "測試銀行（000）", payeeBankCode: "000", payeeBankAccount: null,
+      payeeAccountMasked: "****0000", payeeAccountSource: "roster", payingBankAccount: "測試公司帳號",
+    })
     expect(JSON.stringify(res.body)).not.toContain("0000-0000-0000")
   })
 
-  it("主管核准：回應裡的放款單同樣遮", async () => {
+  it("主管核准：回應裡的放款單同樣只給末 4 碼", async () => {
     const res = await as("manager-user", request(app).post(`/disbursements/${svc.item.id}/approve`)).send({})
     expect(res.status).toBe(200)
-    expect(res.body.disbursement).toMatchObject({ payeeBankAccount: null, payeeBankName: null, payeeBankCode: null })
+    expect(res.body.disbursement).toMatchObject({ payeeBankAccount: null, payeeBankName: "測試銀行（000）", payeeAccountMasked: "****0000" })
+    expect(JSON.stringify(res.body)).not.toContain("0000-0000-0000")
   })
 
-  it.each([["會計", "accountant-user"], ["HR", "hr-user"]])("%s：收款方銀行照常顯示", async (_label, token) => {
+  it.each([["會計", "accountant-user"], ["HR", "hr-user"]])("%s：簽核端點同樣不送完整帳號（只給末 4 碼）", async (_label, token) => {
     const list = await as(token, request(app).get("/disbursements/pending-approvals"))
-    expect(list.body.disbursements[0].payeeBankAccount).toBe("0000-0000-0000 測試戶名")
+    expect(list.body.disbursements[0]).toMatchObject({ payeeBankAccount: null, payeeAccountMasked: "****0000", payeeBankCode: "000" })
+    expect(JSON.stringify(list.body)).not.toContain("0000-0000-0000")
     const decided = await as(token, request(app).post(`/disbursements/${svc.item.id}/approve`)).send({})
-    expect(decided.body.disbursement.payeeBankAccount).toBe("0000-0000-0000 測試戶名")
+    expect(decided.body.disbursement.payeeBankAccount).toBeNull()
+    expect(JSON.stringify(decided.body)).not.toContain("0000-0000-0000")
   })
 
   it("放款列表本身限會計與 HR：主管 403", async () => {

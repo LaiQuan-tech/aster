@@ -12,7 +12,8 @@ import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
-import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { BankChangeError, createBankChangeRequest, vendorHasPendingBankChange, type BankFields } from "../services/vendor-bank-change.js"
 
 export const vendorsRouter = Router()
 
@@ -427,6 +428,16 @@ type BankChangeCheck = {
   needsReason: boolean
   /** 改到的收款帳戶欄位（寫稽核用）。 */
   before: Record<string, string | null> | null
+  /** 收款帳戶值有變。 */
+  bankChanged: boolean
+  /** 2026-11-17 雙人覆核：改了收款帳戶且有未付期款（沒有開單）→ 不直接生效，建「帳戶變更待覆核」（第一次補帳戶也一樣）。 */
+  needsReview: boolean
+  /** 該廠商已有一筆待覆核帳戶變更 → 409 vendor_bank_change_pending。 */
+  pendingReview: boolean
+  /** 改後的收款帳戶四欄（沒帶的欄位＝現值）；建覆核申請用。 */
+  after: BankFields | null
+  /** 廠商現名（通知用）。 */
+  vendorName: string | null
 }
 
 /**
@@ -435,7 +446,10 @@ type BankChangeCheck = {
  * 開單：未作廢未匯款（draft／pending_approval／approved）的放款單。查無廠商回全 false（交給後面的 update 回 404）。
  */
 async function checkBankChange(tenantId: string, vendorId: string, body: Partial<z.infer<typeof vendorBody>>): Promise<BankChangeCheck> {
-  const none: BankChangeCheck = { identityBlocked: false, openDisbursements: false, needsReason: false, before: null }
+  const none: BankChangeCheck = {
+    identityBlocked: false, openDisbursements: false, needsReason: false, before: null,
+    bankChanged: false, needsReview: false, pendingReview: false, after: null, vendorName: null,
+  }
   if (!BANK_FIELDS.some(([k]) => body[k] !== undefined)) return none
   if (bankColsMissing) return none
   const { data: stored, error } = await supabaseAdmin
@@ -462,11 +476,20 @@ async function checkBankChange(tenantId: string, vendorId: string, body: Partial
   const before = Object.fromEntries(BANK_FIELDS.map(([, col]) => [col, cur[col] ?? null]))
   // 第六輪 U1：名冊第一次補帳戶（原本代碼／銀行名／帳號三欄皆空）不需要變更原因。
   const firstFill = ["bank_code", "bank_name", "bank_account"].every((col) => norm(cur[col]) === null)
+  const after = Object.fromEntries(
+    BANK_FIELDS.map(([k, col]) => [col, body[k] !== undefined ? norm(body[k]) : (cur[col] ?? null)]),
+  ) as BankFields
   return {
     identityBlocked: nameChanged && (hasOpen || hasUnpaid),
     openDisbursements: hasOpen,
     needsReason: !hasOpen && hasUnpaid && !firstFill,
     before,
+    bankChanged: true,
+    // 2026-11-17：有未付期款 → 走雙人覆核（第一次補帳戶也是：第一次填也可能被冒填）。
+    needsReview: !hasOpen && hasUnpaid,
+    pendingReview: await vendorHasPendingBankChange(tenantId, vendorId),
+    after,
+    vendorName: cur.name ?? null,
   }
 }
 
@@ -586,6 +609,13 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
       })
       return
     }
+    if (bankCheck.pendingReview) {
+      res.status(409).json({
+        error: "vendor_bank_change_pending",
+        message: "此廠商已有一筆收款帳戶變更待覆核，請等覆核完成或取消後再改",
+      })
+      return
+    }
     const rawReason = (req.body as { changeReason?: unknown } | undefined)?.changeReason
     const changeReason = typeof rawReason === "string" ? rawReason.trim() : ""
     if (bankCheck.needsReason && !changeReason) {
@@ -595,33 +625,39 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
       })
       return
     }
-    if (bankCheck.needsReason) {
-      // 第五輪（2026-11-17）：稽核改嚴格且寫在 update 之前——稽核寫不進去就不改帳戶（500）。
-      const actor = userId ? await resolveSelf(tenantId, userId) : null
-      const norm = (v: unknown) => {
-        const t = typeof v === "string" ? v.trim() : ""
-        return t === "" ? null : t
-      }
-      const body = parsed.data as Partial<z.infer<typeof vendorBody>>
-      await writeAuditLogStrict({
-        tenantId,
-        tableName: "vendors",
-        recordId: id,
-        action: "UPDATE",
-        oldRow: bankCheck.before,
-        newRow: {
-          ...Object.fromEntries(BANK_FIELDS.map(([k, col]) => [col, body[k] !== undefined ? norm(body[k]) : (bankCheck.before?.[col] ?? null)])),
-          changeReason,
-        },
-        actorEmpId: actor?.id ?? null,
-        context: "PATCH /vendors/:id 更改收款帳戶（有未付期款）",
-      })
-    }
     if (similarAudit) await similarAudit()
+    // 2026-11-17 雙人覆核：有未付期款時帳戶不直接改——先建「帳戶變更待覆核」（嚴格稽核＋通知覆核者），
+    // 這次 PATCH 的其他欄位照常存，收款帳戶四欄從 update 剔除。
+    let bankChangeRequestId: string | null = null
+    if (bankCheck.needsReview && bankCheck.before && bankCheck.after) {
+      const actor = userId ? await resolveSelf(tenantId, userId) : null
+      try {
+        const created = await createBankChangeRequest({
+          tenantId,
+          vendorId: id,
+          vendorName: bankCheck.vendorName ?? "",
+          requestedByEmpId: actor?.id ?? null,
+          before: bankCheck.before as BankFields,
+          after: bankCheck.after,
+          reason: changeReason || null,
+        })
+        bankChangeRequestId = created.id
+      } catch (err) {
+        if (err instanceof BankChangeError) {
+          res.status(err.httpStatus).json({ error: err.code, ...(err.details ?? {}) })
+          return
+        }
+        throw err
+      }
+    }
+    // 直接改帳戶（沒有未付款項）→ 記 bank_changed_at（0103；欄位未套用就不帶）。
+    const stampBankChanged = bankCheck.bankChanged && !bankCheck.needsReview && (await columnsExist("vendors", "bank_changed_at"))
     const { data, error } = await withVendorCols((cols, roster) => {
       if (!roster && present.length > 0) return migrationBlocked()
       const row = toRow(parsed.data as z.infer<typeof vendorBody>, roster)
       if (dropAffiliate) delete row.is_affiliate
+      if (bankChangeRequestId) for (const [, col] of BANK_FIELDS) delete row[col]
+      if (stampBankChanged) row.bank_changed_at = new Date().toISOString()
       return supabaseAdmin
         .from("vendors")
         .update({ ...row, updated_at: new Date().toISOString() })
@@ -641,6 +677,15 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     }
     if (!data) {
       res.status(404).json({ error: "not_found" })
+      return
+    }
+    if (bankChangeRequestId) {
+      res.status(202).json({
+        vendor: serialize(data as unknown as Record<string, unknown>),
+        bankChangeRequested: true,
+        bankChangeRequest: { id: bankChangeRequestId, status: "pending" },
+        message: "此廠商仍有未付期款：收款帳戶變更已送老闆／HR 覆核，核准後才生效；其他欄位已儲存",
+      })
       return
     }
     res.status(200).json({ vendor: serialize(data as unknown as Record<string, unknown>) })

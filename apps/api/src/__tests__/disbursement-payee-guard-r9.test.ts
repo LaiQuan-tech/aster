@@ -237,7 +237,9 @@ describe("第九輪 H-2：硬擋只看名稱，簡稱／帳戶戶名只到相近
     expect(no.status).toBe(409)
     expect(no.body.error).toBe("vendor_name_similar")
     const ok = await as(request(app).patch(`/vendors/${VB}`)).send({ accountHolder: "陳大文", confirmDistinctReason: "測試：同名不同人", changeReason: "測試：更正戶名" })
-    expect(ok.status, r(ok)).toBe(200)
+    // 2026-11-17 雙人覆核：該廠商有未付期款 → 戶名（收款帳戶欄位）變更送覆核，202。
+    expect(ok.status, r(ok)).toBe(202)
+    expect(ok.body.bankChangeRequested).toBe(true)
   })
   it("「其他」付給個人「陳大文」、簡稱「大文水電」→ 409 payee_name_similar；帶說明 → 201", async () => {
     for (const n of ["陳大文", "大文水電"]) {

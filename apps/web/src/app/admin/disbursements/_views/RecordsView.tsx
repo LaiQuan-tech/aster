@@ -1,5 +1,6 @@
 "use client";
 
+import { PayeeAccountInfo } from "@/components/PayeeAccountInfo";
 import { useCallback, useEffect, useState } from "react";
 import { formatMoney } from "@/lib/money";
 import Link from "next/link";
@@ -288,6 +289,8 @@ export default function RecordsView({
                           ⚠ {payeeSimilarWarningText(d.payeeSimilarWarning)}
                         </p>
                       )}
+                      {/* 2026-11-17：收款帳戶末 4 碼、來源與名冊近期變更警示（「複製帳號」仍是完整帳號，財務專用）。 */}
+                      <PayeeAccountInfo d={d} className="mt-1 whitespace-normal" />
                     </td>
                     <td className="py-1.5 pr-2 text-gray-600">{d.payingCompanyName ?? "—"}</td>
                     <td className="py-1.5 pr-2 text-right text-gray-700">{fmtMoney(d.amount)}</td>

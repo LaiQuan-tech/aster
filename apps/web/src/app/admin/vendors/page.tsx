@@ -1,4 +1,5 @@
 "use client";
+import { VendorBankChangeReviews } from "@/components/VendorBankChangeReviews";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText, Pill, inputCls, useToast } from "@/components/admin-ui";
@@ -94,6 +95,8 @@ export default function VendorsPage() {
   return (
     <>
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
+      {/* 2026-11-17：廠商收款帳戶變更待覆核（老闆／HR）；沒有待覆核或沒權限時不顯示。 */}
+      <VendorBankChangeReviews onChanged={() => void load()} />
 
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-2" role="tablist" aria-label="名冊類別">

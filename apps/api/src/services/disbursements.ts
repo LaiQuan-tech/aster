@@ -39,6 +39,7 @@ import { writeAuditLog, writeAuditLogStrict } from "./audit.js"
 import { firstNewlyPickedInactive } from "./company-lifecycle.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { isHrRole } from "../middleware/scope.js"
+import { maskBankAccount, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
 
 /**
  * 放款專區——匯款紀錄（disbursements）× 分攤（disbursement_allocations）×
@@ -548,6 +549,16 @@ export type SerializedDisbursement = {
   payeeBankName: string | null
   payeeBankAccount: string | null
   payeeBankCode: string | null
+  /**
+   * 2026-11-17 業主：核准人看得到收款帳號——只露末 4 碼（****1234），後端遮好；核准類端點不送完整帳號。
+   */
+  payeeAccountMasked: string | null
+  /** 帳戶來源：roster＝照名冊（登錄廠商）／manual＝手動輸入（非登錄收款方）。 */
+  payeeAccountSource: "roster" | "manual"
+  /** 登錄廠商的名冊收款帳戶 30 天內變更過 → 變更時間（vendors.bank_changed_at，0103）；否則 null。 */
+  payeeBankChangedAt?: string | null
+  /** 登錄廠商有「帳戶變更待覆核」→ true（送審／核准／付款會被擋）。 */
+  vendorBankChangePending?: boolean
   payingCompanyId: string
   payingCompanyName: string | null
   payingBankAccount: string | null
@@ -676,6 +687,8 @@ export function serializeDisbursement(
     payeeBankName: d.payee_bank_name,
     payeeBankAccount: d.payee_bank_account,
     payeeBankCode: d.payee_bank_code,
+    payeeAccountMasked: maskBankAccount(d.payee_bank_account),
+    payeeAccountSource: d.payee_kind === "vendor" && d.vendor_id ? "roster" : "manual",
     payingCompanyId: d.paying_company_id,
     payingCompanyName: d.paying_company_name ?? companies.get(d.paying_company_id)?.name ?? null,
     payingBankAccount: d.paying_bank_account,
@@ -792,7 +805,40 @@ export async function serializeMany(tenantId: string, rows: DisbursementRow[]): 
     loadCompanies(tenantId, rows.flatMap((r) => [r.paying_company_id, r.receipt_issuer_company_id ?? ""]).filter(Boolean)),
   ])
   const allocBy = groupBy(allocations, (a) => a.disbursement_id)
-  return rows.map((r) => serializeDisbursement(r, allocBy.get(r.id) ?? [], ctx, companies))
+  const out = rows.map((r) => serializeDisbursement(r, allocBy.get(r.id) ?? [], ctx, companies))
+  await attachVendorBankStatus(tenantId, out)
+  return out
+}
+
+/** 名冊帳戶「最近變更」的警示天數（業主：30 天）。 */
+export const BANK_CHANGED_WARN_DAYS = 30
+
+/**
+ * 2026-11-17：登錄廠商單補上名冊帳戶近期變更時間（30 天內）與「帳戶變更待覆核」旗標（核准畫面黃色警示用）。
+ * 只是顯示資訊：0103 未套用或查詢失敗 → 不帶、記 log，不擋列表（送審／核准／付款的硬擋另在 assertPayeeBankStillMatchesVendor）。
+ */
+async function attachVendorBankStatus(tenantId: string, items: SerializedDisbursement[]): Promise<void> {
+  const vendorIds = [...new Set(items.filter((d) => d.payeeKind === "vendor" && d.vendorId).map((d) => d.vendorId as string))]
+  if (vendorIds.length === 0) return
+  try {
+    const changedAt = new Map<string, string>()
+    if (await columnsExist("vendors", "bank_changed_at")) {
+      const rows = await batch<{ id: string; bank_changed_at: string | null }>("vendors", "id, bank_changed_at", tenantId, vendorIds, "id", false)
+      const cutoff = Date.now() - BANK_CHANGED_WARN_DAYS * 86_400_000
+      for (const r of rows) {
+        if (r.bank_changed_at && Date.parse(r.bank_changed_at) >= cutoff) changedAt.set(r.id.toLowerCase(), r.bank_changed_at)
+      }
+    }
+    const pending = await vendorsWithPendingBankChange(tenantId, vendorIds)
+    for (const d of items) {
+      if (d.payeeKind !== "vendor" || !d.vendorId) continue
+      const key = d.vendorId.toLowerCase()
+      d.payeeBankChangedAt = changedAt.get(key) ?? null
+      d.vendorBankChangePending = pending.has(key)
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "attachVendorBankStatus: lookup failed")
+  }
 }
 
 export async function getDisbursement(tenantId: string, id: string): Promise<SerializedDisbursement | null> {
@@ -1856,6 +1902,12 @@ export async function assertPayeeBankStillMatchesVendor(
   current: Pick<DisbursementRow, "payee_kind" | "vendor_id" | "payee_bank_account" | "payee_bank_code" | "payee_bank_name">,
 ): Promise<void> {
   if (current.payee_kind !== "vendor" || !current.vendor_id) return
+  // 2026-11-17 雙人覆核：廠商帳戶變更待覆核期間，這家廠商的單不能送審／核准／付款（避免覆核期間把錢匯出去）。
+  if (await vendorHasPendingBankChange(tenantId, current.vendor_id)) {
+    throw new DisbursementError(409, "vendor_bank_change_pending", {
+      message: "此廠商的收款帳戶變更正在等待覆核，覆核完成前不能送審、核准或付款",
+    })
+  }
   const { data, error } = await supabaseAdmin
     .from("vendors")
     .select(VENDOR_LITE_COLS)

@@ -13,6 +13,7 @@
  * 關係企業標記只有 HR／平台管理員能勾；刪除只有 HR／平台管理員看得到（API requireHrAdmin）。
  * 存檔：修改後留在內頁並顯示「已儲存」（比照員工內頁）；新增成功後換到這家廠商的內頁。
  */
+import { VendorBankChangeReviews } from "@/components/VendorBankChangeReviews";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -44,6 +45,8 @@ export default function VendorDetailPage() {
   const params = useParams<{ id: string }>();
   const id = typeof params?.id === "string" ? decodeURIComponent(params.id) : "";
   const isNew = id === NEW_ROSTER_ID;
+  /** 送出帳戶變更覆核後重新載入上方的待覆核區塊。 */
+  const [reviewsKey, setReviewsKey] = useState(0);
   const toast = useToast();
   const { isHr, isAdmin } = useRosterRoles();
   const canSetAffiliate = isHr;
@@ -178,10 +181,11 @@ export default function VendorDetailPage() {
       // 改收款帳戶而廠商仍有未付期款（沒有開單）→ 問變更原因帶 changeReason（寫稽核）。名稱相同（vendor_name_duplicate）仍硬擋。
       const extra: { changeReason?: string; confirmDistinctReason?: string } = {};
       let createdId: string | null = null;
+      let bankChangeQueued = false;
       for (let attempt = 0; ; attempt++) {
         try {
           if (isNew) createdId = (await createVendor({ ...body, ...extra })).vendor.id;
-          else await updateVendor(id, { ...body, ...extra });
+          else bankChangeQueued = (await updateVendor(id, { ...body, ...extra })).bankChangeRequested === true;
           break;
         } catch (err) {
           if (attempt >= 2) throw err;
@@ -196,7 +200,7 @@ export default function VendorDetailPage() {
             continue;
           }
           if (!isNew && !extra.changeReason && err instanceof Error && isChangeReasonRequired(err.message)) {
-            const reason = window.prompt("此廠商仍有未付期款，更改收款帳戶請填寫變更原因（會留稽核紀錄）：")?.trim();
+            const reason = window.prompt("此廠商仍有未付期款，更改收款帳戶請填寫變更原因（會留稽核紀錄，並送老闆／HR 覆核後才生效）：")?.trim();
             if (!reason) {
               setSaveError("未填寫變更原因，收款帳戶沒有更改。");
               return;
@@ -212,7 +216,14 @@ export default function VendorDetailPage() {
         leave(rosterDetailHref("vendors", createdId));
         return;
       }
-      toast.show("已儲存", "success");
+      if (bankChangeQueued) {
+        setReviewsKey((k) => k + 1);
+        // 2026-11-17 雙人覆核：有未付期款 → 收款帳戶變更已送覆核（尚未生效），其他欄位已存。
+        toast.show("已送覆核：收款帳戶變更需老闆／HR 核准後才生效（其他欄位已儲存）", "success");
+        setSaveError("收款帳戶變更已送覆核，核准前名冊仍是原帳戶；覆核進度見本頁上方或「放款簽核」頁。");
+      } else {
+        toast.show("已儲存", "success");
+      }
       setScanMsg(null);
       try {
         await fetchVendor();
@@ -222,7 +233,7 @@ export default function VendorDetailPage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "儲存失敗";
       const server = (err as { serverMessage?: string } | null)?.serverMessage;
-      setSaveError(msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : humanizeVendorIdentityError(humanizeAffiliateError(msg), server));
+      setSaveError(msg.includes("migration_required") && server?.includes("0103") ? server : msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : humanizeVendorIdentityError(humanizeAffiliateError(msg), server));
     } finally {
       setSaving(false);
     }
@@ -294,6 +305,8 @@ export default function VendorDetailPage() {
 
   return (
     <>
+      {/* 2026-11-17：這家廠商的收款帳戶變更待覆核（老闆／HR 可在此核准）。 */}
+      {!isNew && <VendorBankChangeReviews key={reviewsKey} vendorId={id} onChanged={() => void fetchVendor()} />}
       <RosterDetailHeader
         backHref={LIST_HREF}
         backLabel="返回廠商列表"

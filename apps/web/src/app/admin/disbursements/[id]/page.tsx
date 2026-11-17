@@ -1,5 +1,7 @@
 "use client";
 
+import { PayeeAccountInfo } from "@/components/PayeeAccountInfo";
+import { maskAccountTail } from "@/lib/payee-account";
 import { withSimilarNameConfirm } from "@/lib/vendor-name-binding";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatMoney } from "@/lib/money";
@@ -471,7 +473,7 @@ export default function DisbursementDetailPage() {
                 <div><p className="text-xs text-gray-500">方式</p><p className="font-medium text-gray-800">{DISBURSEMENT_METHOD_LABELS[d.method]}</p></div>
                 <div><p className="text-xs text-gray-500">付款公司</p><p className="font-medium text-gray-800">{d.payingCompanyName ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">收款方</p><p className="font-medium text-gray-800">{d.payeeName}</p></div>
-                <div><p className="text-xs text-gray-500">收款銀行／帳號</p><p className="font-medium text-gray-800">{[d.payeeBankName, d.payeeBankAccount].filter(Boolean).join(" / ") || "—"}</p></div>
+                <div><p className="text-xs text-gray-500">收款銀行／帳號</p><p className="font-medium text-gray-800">{[d.payeeBankName, d.payeeAccountMasked ?? maskAccountTail(d.payeeBankAccount)].filter(Boolean).join(" / ") || "—"}</p></div>
                 <div><p className="text-xs text-gray-500">收款銀行代碼</p><p className="font-medium text-gray-800">{d.payeeBankCode ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">實付</p><p className="font-medium text-gray-900">{fmtMoney(d.amount)}</p></div>
                 <div><p className="text-xs text-gray-500">代扣</p><p className="font-medium text-gray-700">{fmtMoney(d.withheldAmount)}</p></div>
@@ -488,6 +490,8 @@ export default function DisbursementDetailPage() {
                 </div>
                 <div><p className="text-xs text-gray-500">發票</p><p className="font-medium text-gray-800">{d.hasInvoice ? `已開立${d.invoiceNo ? "・" + d.invoiceNo : ""}` : "未開立"}</p></div>
               </div>
+              {/* 2026-11-17：核准畫面帳號只露末 4 碼＋帳戶來源＋名冊近期變更警示（「複製匯款資訊」仍是完整帳號，財務專用）。 */}
+              <PayeeAccountInfo d={d} className="mt-3" />
               {/* 第八輪：收款名稱與名冊廠商相近（已說明或開單後才相近）→ 醒目標示，請核准人確認收款對象。 */}
               {d.payeeSimilarWarning && (
                 <p role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">

@@ -1,5 +1,7 @@
 "use client";
 
+import { VendorBankChangeReviews } from "@/components/VendorBankChangeReviews";
+import { PayeeAccountInfo } from "@/components/PayeeAccountInfo";
 import { useCallback, useEffect, useState } from "react";
 import { formatMoney } from "@/lib/money";
 import Link from "next/link";
@@ -121,6 +123,8 @@ export default function DisbursementApprovalsPage() {
 
   return (
     <>
+      {/* 2026-11-17：廠商收款帳戶變更待覆核（老闆／HR）；沒有待覆核或沒權限時不顯示。 */}
+      <VendorBankChangeReviews onChanged={() => void load()} />
       <Card>
         <div className="flex flex-wrap items-center gap-2">
           <Segmented
@@ -189,6 +193,8 @@ export default function DisbursementApprovalsPage() {
                     </dd>
                   </div>
                 </dl>
+                {/* 2026-11-17：收款戶名／銀行／帳號末 4 碼＋帳戶來源＋名冊近期變更警示。 */}
+                <PayeeAccountInfo d={d} className="mt-2" />
                 {/* 第八輪：收款名稱與名冊廠商相近（已說明或開單後才相近）→ 醒目標示，請核准人確認收款對象。 */}
                 {d.payeeSimilarWarning && (
                   <p role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">

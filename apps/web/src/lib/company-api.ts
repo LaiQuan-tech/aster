@@ -117,7 +117,52 @@ export function createVendor(body: VendorInput & { confirmDistinctReason?: strin
 }
 /** `changeReason`：只有未付期款時改收款帳戶必填（後端寫稽核，2026-11-16 R2）。 */
 export function updateVendor(id: string, body: Partial<VendorInput> & { changeReason?: string; confirmDistinctReason?: string }) {
-  return apiFetch<{ vendor: Vendor }>(`/vendors/${id}`, { method: "PATCH", body: JSON.stringify(body) })
+  // 2026-11-17：有未付期款時改收款帳戶 → 202＋bankChangeRequested（送老闆／HR 覆核，帳戶尚未生效；其他欄位已存）。
+  return apiFetch<{ vendor: Vendor; bankChangeRequested?: boolean; bankChangeRequest?: { id: string; status: string }; message?: string }>(
+    `/vendors/${id}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  )
+}
+
+/* -------------------------------------------- 廠商收款帳戶變更雙人覆核 -- */
+export type VendorBankChangeStatus = "pending" | "approved" | "rejected" | "cancelled"
+export interface VendorBankFields {
+  bankCode: string | null
+  bankName: string | null
+  bankAccount: string | null
+  accountHolder: string | null
+}
+export interface VendorBankChangeRequest {
+  id: string
+  vendorId: string
+  vendorName: string | null
+  status: VendorBankChangeStatus
+  reason: string | null
+  requestedByEmpId: string | null
+  requestedByName: string | null
+  decidedByEmpId: string | null
+  decidedByName: string | null
+  decidedAt: string | null
+  decisionNote: string | null
+  createdAt: string
+  old: VendorBankFields
+  new: VendorBankFields
+  canDecide: boolean
+  canCancel: boolean
+}
+/** 覆核者（老闆／平台管理員／HR）與財務角色可讀；其他人 403。 */
+export function listVendorBankChanges(params: { status?: VendorBankChangeStatus | "all"; vendorId?: string } = {}) {
+  const qs = new URLSearchParams()
+  if (params.status) qs.set("status", params.status)
+  if (params.vendorId) qs.set("vendorId", params.vendorId)
+  const q = qs.toString()
+  return apiFetch<{ requests: VendorBankChangeRequest[]; isReviewer: boolean }>(`/vendor-bank-changes${q ? `?${q}` : ""}`)
+}
+export function decideVendorBankChange(id: string, action: "approve" | "reject" | "cancel", note?: string) {
+  return apiFetch<{ id: string; vendorId: string; status: VendorBankChangeStatus }>(
+    `/vendor-bank-changes/${id}/${action}`,
+    { method: "POST", body: JSON.stringify(note ? { note } : {}) },
+  )
 }
 export function deleteVendor(id: string) {
   return apiFetch<{ id: string }>(`/vendors/${id}`, { method: "DELETE" })

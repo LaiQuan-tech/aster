@@ -1,5 +1,6 @@
 "use client";
 
+import { PayeeAccountInfo } from "@/components/PayeeAccountInfo";
 import { useEffect, useMemo, useState } from "react";
 import { formatMoney } from "@/lib/money";
 import { MoneyInput } from "@/components/MoneyInput";
@@ -307,6 +308,8 @@ export default function LedgerView({
                                 ⚠ {payeeSimilarWarningText(d.payeeSimilarWarning)}
                               </p>
                             )}
+                            {/* 2026-11-17：批次付款前看得到收款帳戶末 4 碼、來源與名冊近期變更警示。 */}
+                            <PayeeAccountInfo d={d} className="mt-1" />
                           </td>
                           <td className="py-1.5 pr-2 text-gray-500">{d.allocationLabel ?? "—"}</td>
                           <td className="py-1.5 pr-2 text-right tabular-nums text-gray-500">{fmtMoney(d.withheldAmount)}</td>

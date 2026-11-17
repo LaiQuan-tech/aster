@@ -63,6 +63,7 @@ import { optionListsRouter } from "./routes/option-lists.js"
 import { companyPagesRouter } from "./routes/company-pages.js"
 import { employeeMailboxesRouter } from "./routes/employee-mailboxes.js"
 import { vendorsRouter } from "./routes/vendors.js"
+import { vendorBankChangesRouter } from "./routes/vendor-bank-changes.js"
 import { knowledgeRouter } from "./routes/knowledge.js"
 import { disbursementsRouter } from "./routes/disbursements.js"
 import { disbursementReportsRouter } from "./routes/disbursement-reports.js"
@@ -217,6 +218,7 @@ app.use(optionListsRouter) // /option-lists*（全站共用的選項清單：客
 app.use(companyPagesRouter)
 app.use(employeeMailboxesRouter)
 app.use(vendorsRouter)
+app.use(vendorBankChangesRouter)
 app.use(knowledgeRouter)
 app.use(disbursementReportsRouter) // /disbursements/pivot、/disbursements/pivot.xlsx 要在 /disbursements/:id 之前
 app.use(disbursementsRouter)
