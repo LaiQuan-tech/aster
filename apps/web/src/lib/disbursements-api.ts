@@ -618,6 +618,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   boss_step_target_not_boss: "老闆關只能改派給在職平台管理員（老闆）。",
   non_boss_step_target_boss: "平台管理員（老闆）只在老闆關簽核，其他關卡不能改派給他們。",
   conflict: "這張放款單剛被其他人修改、送簽或核准，請重新整理後再改。",
+  conflict_retry: "這張放款單剛被其他人核准、付款或修改，這次操作沒有生效；請重新整理後再試。",
   already_signed_step: "你已經簽過這張放款單前面的關卡，同一輪不能再簽下一關，請由其他簽核人處理。",
   current_step_not_found: "找不到目前的簽核關卡，請重新整理。",
   invalid_approver: "選到的簽核人不存在或已離職。",

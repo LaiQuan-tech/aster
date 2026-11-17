@@ -10,7 +10,7 @@ import { disbursementsRouter } from "../routes/disbursements.js"
 import { vendorsRouter } from "../routes/vendors.js"
 import { vendorBankChangesRouter } from "../routes/vendor-bank-changes.js"
 import { getDisbursement, payDisbursement } from "../services/disbursements.js"
-import { decideDisbursement, listPendingDisbursementApprovals, resetDisbursementApprovalProbe, submitDisbursement } from "../services/disbursement-approval.js"
+import { decideDisbursement, listPendingDisbursementApprovals, resetDisbursementApprovalProbe, submitDisbursement, withdrawDisbursement } from "../services/disbursement-approval.js"
 import { bossStepNotifyRecipients } from "../lib/boss.js"
 import { payDisbursementsBatch } from "../services/disbursement-batch-pay.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
@@ -844,6 +844,64 @@ describe("驗收（2026-11-17 TOCTOU）：付款／送簽讀完到寫入之間�
     fake.db.disbursement_allocations = [alloc()]
     flipOnAllocRead()
     await expect(submitDisbursement(TENANT_ID, actor, DISB)).rejects.toMatchObject({ httpStatus: 409 })
+    expect(fake.db.disbursements![0]!.status).toBe("draft")
+  })
+})
+
+describe("驗收（2026-11-17）：撤回與核准／付款並發 → 條件寫入，搶輸 409 conflict_retry", () => {
+  const PA = "bbbbbbbb-0000-4000-8000-0000000000aa"
+  const pendingStep = (): Row => ({
+    id: "99999999-0000-4000-8000-0000000000e1", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: BOSS,
+    candidate_emp_ids: [BOSS], step_kind: "fallback", decision: "pending", comment: null, acted_at: null, acted_by_emp_id: null, created_at: "2026-11-01T00:00:00.000Z",
+  })
+  /** 讀 employees（服務已讀完單頭、還沒寫入）時，`cond` 成立就模擬並發寫入 `patch`。 */
+  const flipOnEmployeesRead = (patch: Row, cond: () => boolean = () => true) => {
+    const emps = fake.db.employees
+    let flipped = false
+    Object.defineProperty(fake.db, "employees", {
+      configurable: true,
+      get() {
+        if (!flipped && cond()) {
+          flipped = true
+          Object.assign(fake.db.disbursements![0]!, patch)
+        }
+        return emps
+      },
+      set(v) {
+        Object.defineProperty(fake.db, "employees", { configurable: true, writable: true, enumerable: true, value: v })
+      },
+    })
+  }
+  beforeEach(() => {
+    fake.db.disbursements = [header(VENDOR_A, { status: "pending_approval", current_step: 1, approved_at: null })]
+    fake.db.disbursement_allocations = [alloc()]
+    fake.db.disbursement_approval_steps = [pendingStep()]
+  })
+
+  it("撤回讀到送簽中、期間單子已被付款 → 409 conflict_retry，不會把已匯款覆寫成草稿", async () => {
+    flipOnEmployeesRead({ status: "paid", paid_on: "2026-11-17", current_step: null, updated_at: "2026-11-17T01:00:00.000Z" })
+    await expect(withdrawDisbursement(TENANT_ID, actor, DISB, "測試")).rejects.toMatchObject({ httpStatus: 409, code: "conflict_retry" })
+    expect(fake.db.disbursements![0]).toMatchObject({ status: "paid", paid_on: "2026-11-17" })
+  })
+  it("撤回期間被核准（狀態變 approved）或重送下一輪（approval_round 變）→ 409，不覆寫", async () => {
+    flipOnEmployeesRead({ status: "approved", current_step: null, approved_at: "2026-11-17T01:00:00.000Z", updated_at: "2026-11-17T01:00:00.000Z" })
+    await expect(withdrawDisbursement(TENANT_ID, actor, DISB, "測試")).rejects.toMatchObject({ code: "conflict_retry" })
+    expect(fake.db.disbursements![0]!.status).toBe("approved")
+    fake.db.disbursements = [header(VENDOR_A, { status: "pending_approval", current_step: 1, approved_at: null })]
+    flipOnEmployeesRead({ approval_round: 2 })
+    await expect(withdrawDisbursement(TENANT_ID, actor, DISB, "測試")).rejects.toMatchObject({ code: "conflict_retry" })
+    expect(fake.db.disbursements![0]!.status).toBe("pending_approval")
+  })
+  it("沒有並發 → 正常退回草稿（對照組）", async () => {
+    const out = await withdrawDisbursement(TENANT_ID, actor, DISB, "測試")
+    expect(out?.status).toBe("draft")
+    expect(fake.db.disbursements![0]!.status).toBe("draft")
+  })
+  it("核准搶輸（關卡已寫 approved、單頭同時被撤回）→ 409，關卡還原為 pending 且清掉 approved_as_boss", async () => {
+    fake.db.employees!.push({ id: PA, tenant_id: TENANT_ID, user_id: "pa-user", role: "platform_admin", dept_id: null, name: "測試平台管理員", status: "active" })
+    flipOnEmployeesRead({ status: "draft", current_step: null, updated_at: "2026-11-17T01:00:00.000Z" }, () => fake.db.disbursement_approval_steps?.[0]?.decision === "approved")
+    await expect(decideDisbursement({ action: "approve", tenantId: TENANT_ID, id: DISB, actor: { empId: PA, role: "platform_admin", active: true } })).rejects.toMatchObject({ httpStatus: 409 })
+    expect(fake.db.disbursement_approval_steps![0]).toMatchObject({ decision: "pending", acted_by_emp_id: null, approved_as_boss: null })
     expect(fake.db.disbursements![0]!.status).toBe("draft")
   })
 })

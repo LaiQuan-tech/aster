@@ -677,7 +677,14 @@ export async function decideDisbursement(params: {
     if ((data ?? []).length > 0) return
     const { error: revertErr } = await supabaseAdmin
       .from("disbursement_approval_steps")
-      .update({ decision: "pending", comment: null, acted_at: null, acted_by_emp_id: null, approver_emp_id: step.approver_emp_id })
+      .update({
+        decision: "pending",
+        comment: null,
+        acted_at: null,
+        acted_by_emp_id: null,
+        approver_emp_id: step.approver_emp_id,
+        ...("approved_as_boss" in stepPatch ? { approved_as_boss: null } : {}),
+      })
       .eq("tenant_id", tenantId)
       .eq("id", step.id)
       .eq("decision", stepPatch.decision as string)
@@ -931,12 +938,21 @@ export async function withdrawDisbursement(
   const actorName = actor.empId ? ((await employeeNames(tenantId, [actor.empId])).get(actor.empId) ?? "HR") : "HR"
   const nowIso = new Date().toISOString()
   const note = appendNote(current.note, `撤回簽核（${actorName}）：${reason}`)
-  const { error } = await supabaseAdmin
+  // 驗收（2026-11-17）：條件寫入——仍是送簽中、同一輪、讀取後沒被改過（updated_at）才退回草稿；
+  // 撤回與核准／付款並發時搶輸 → 0 列 → 409 conflict_retry，不會把已核准／已匯款覆寫成草稿。
+  let withdrawQ = supabaseAdmin
     .from("disbursements")
     .update({ status: "draft", current_step: null, note, updated_at: nowIso })
     .eq("tenant_id", tenantId)
     .eq("id", id)
+    .eq("status", "pending_approval")
+  withdrawQ = current.approval_round == null ? withdrawQ.is("approval_round", null) : withdrawQ.eq("approval_round", current.approval_round)
+  withdrawQ = current.updated_at ? withdrawQ.eq("updated_at", current.updated_at) : withdrawQ.is("updated_at", null)
+  const { data: withdrawn, error } = await withdrawQ.select("id")
   if (error) throw new Error(`withdrawDisbursement: ${error.message}`)
+  if ((withdrawn ?? []).length === 0) {
+    throw new DisbursementError(409, "conflict_retry", { hint: "這張放款單剛被核准、付款或修改，撤回未生效；請重新整理後再確認。" })
+  }
 
   await notifyOwner(tenantId, current, {
     event: "withdrawn",
