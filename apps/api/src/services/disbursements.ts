@@ -552,9 +552,9 @@ export type SerializedDisbursement = {
   /**
    * 2026-11-17 業主：核准人看得到收款帳號——只露末 4 碼（****1234），後端遮好；核准類端點不送完整帳號。
    */
-  payeeAccountMasked: string | null
+  payeeAccountMasked?: string | null
   /** 帳戶來源：roster＝照名冊（登錄廠商）／manual＝手動輸入（非登錄收款方）。 */
-  payeeAccountSource: "roster" | "manual"
+  payeeAccountSource?: "roster" | "manual"
   /** 登錄廠商的名冊收款帳戶 30 天內變更過 → 變更時間（vendors.bank_changed_at，0103）；否則 null。 */
   payeeBankChangedAt?: string | null
   /** 登錄廠商有「帳戶變更待覆核」→ true（送審／核准／付款會被擋）。 */
