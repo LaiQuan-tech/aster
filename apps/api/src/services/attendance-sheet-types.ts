@@ -204,7 +204,7 @@ export interface SheetView {
   money: SheetMoney | null
   /**
    * 2026-11-17：money 為 null 的原因（只有即時試算會帶；凍結快照沒有）。
-   * salary_structure_missing＝沒有薪資結構；salary_base_missing＝有結構但本薪與時薪都空／0（引擎拒算）；
+   * salary_structure_missing＝沒有薪資結構；salary_base_missing＝有結構但缺本薪或時薪（引擎拒算）；
    * preview_failed＝其他試算錯誤。有算出金額或沒要求金額＝null／不帶。
    */
   previewError?: MoneyPreviewError | null

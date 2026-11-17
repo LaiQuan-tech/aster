@@ -1361,12 +1361,14 @@ export interface IncompleteSalaryEntry {
   issue: "base_salary_required" | "hourly_wage_required" | "daily_wage_required" | "wage_basis_required";
   /** 短標籤（月薪制缺本薪…）。 */
   label: string;
-  /** 本薪與時薪都沒有 → 執行薪資時會被跳過。 */
+  /** 缺本薪或時薪（引擎拒算）→ 執行薪資時會被跳過。 */
   skippedByPayroll: boolean;
 }
 
-export function getIncompleteSalaries() {
-  return apiFetch<{ count: number; employees: IncompleteSalaryEntry[] }>("/salary-structures/incomplete");
+/** period（YYYY-MM）：只列該月仍在職的人；省略＝當月。 */
+export function getIncompleteSalaries(period?: string) {
+  const qs = period ? `?period=${encodeURIComponent(period)}` : "";
+  return apiFetch<{ period?: string; count: number; employees: IncompleteSalaryEntry[] }>(`/salary-structures/incomplete${qs}`);
 }
 
 export interface Payslip {

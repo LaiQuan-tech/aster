@@ -16,6 +16,8 @@ const CASES: web.SalaryCompletenessInput[] = [
   { method: "hourly", hourlyWage: "" },
   { method: "hourly", hourlyWage: "0" },
   { method: "hourly", hourlyWage: "190.5" },
+  { method: "hourly", hourlyWage: "0", baseSalary: "30000" },
+  { method: "monthly", baseSalary: "", hourlyWage: "200" },
   { method: "by_attendance_days", dailyWage: "" },
   { method: "by_attendance_days", dailyWage: "1500" },
   { method: "by_attendance_days", dailyWage: "1500", hourlyWage: "187.5" },
@@ -26,6 +28,7 @@ describe("web 與 API 規則一致", () => {
   it.each(CASES)("%o", (c) => {
     expect(web.salaryStructureIssue(c)).toBe(api.salaryStructureIssue(c));
     expect(web.hasWageBasis(c)).toBe(api.hasWageBasis(c));
+    expect(web.engineRejects(c)).toBe(api.engineRejects(c));
   });
   it("訊息與標籤一致", () => {
     expect(web.SALARY_STRUCTURE_ISSUE_MESSAGES).toEqual(api.SALARY_STRUCTURE_ISSUE_MESSAGES);
@@ -81,5 +84,28 @@ describe("名單提示與執行薪資略過說明", () => {
     expect(t).toContain("缺本薪／時薪、未產生薪資單 1 位");
     expect(t).toContain("員工乙");
     expect(t).toContain("月表未核准、未產生薪資單 1 位：員工丙");
+  });
+});
+
+describe("wageFieldsChanged（不完整舊資料只改勞健保／工時／勞退時不擋）", () => {
+  const loaded = { method: "monthly", baseSalary: "", dailyWage: "", hourlyWage: "0" };
+  it("計薪方式與三欄都沒改 → false（不送、不檢查）；數字寫法不同視同沒改", () => {
+    expect(web.wageFieldsChanged(loaded, { ...loaded })).toBe(false);
+    expect(web.wageFieldsChanged({ ...loaded, baseSalary: "33000.00" }, { ...loaded, baseSalary: "33000" })).toBe(false);
+  });
+  it("任一欄改了、或換計薪方式 → true；空與 0 視為不同", () => {
+    expect(web.wageFieldsChanged(loaded, { ...loaded, baseSalary: "32000" })).toBe(true);
+    expect(web.wageFieldsChanged(loaded, { ...loaded, method: "hourly" })).toBe(true);
+    expect(web.wageFieldsChanged(loaded, { ...loaded, hourlyWage: "" })).toBe(true);
+  });
+  it("還沒有薪資結構（新建）→ 一律視為有改（要檢查）", () => {
+    expect(web.wageFieldsChanged(null, { ...loaded })).toBe(true);
+  });
+  it("沒改時就算不完整也不擋；有改才用 salaryFormError 檢查", () => {
+    const cur = { ...loaded };
+    const err = web.wageFieldsChanged(loaded, cur) ? web.salaryFormError(cur) : null;
+    expect(err).toBeNull();
+    const changed = { ...loaded, method: "hourly" };
+    expect(web.wageFieldsChanged(loaded, changed) ? web.salaryFormError(changed) : null).toBe("時薪制的時薪必須大於 0");
   });
 });

@@ -27,7 +27,7 @@ import { salaryFormChanges, todayDateKey, type SalaryFormValues } from "@/lib/sa
 import { SalaryHistorySection } from "./SalaryHistorySection";
 import { NhiDependentsCountField } from "./NhiDependentsCountField";
 import { apiErrorMessage } from "@/lib/api-client";
-import { salaryFormError } from "@/lib/salary-completeness";
+import { salaryFormError, wageFieldsChanged, type WageFormValues } from "@/lib/salary-completeness";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -58,6 +58,8 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
   const [salaryMsg, setSalaryMsg] = useState<string | null>(null);
   // 2026-11-10 調薪／投保調整歷程：讀進來的本薪與投保三項（存檔前比對，有變就先問生效日與原因）。
   const [loadedValues, setLoadedValues] = useState<SalaryFormValues>({ baseSalary: "", laborGrade: "", healthGrade: "", pensionWage: "" });
+  /** 載入時的計薪方式＋三個薪資欄位；null＝還沒有薪資結構（新建）。沒改就不送這四欄、不檢查完整度。 */
+  const [loadedWage, setLoadedWage] = useState<WageFormValues | null>(null);
   const [changePrompt, setChangePrompt] = useState<{ base: boolean; insured: boolean } | null>(null);
   const [changeDate, setChangeDate] = useState("");
   const [changeReason, setChangeReason] = useState("");
@@ -117,6 +119,12 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
       setPensionWage(wage);
       setPensionNewSystem(newSystem);
       setLoadedPension({ wage, newSystem });
+      setLoadedWage({
+        method: salary.method,
+        baseSalary: salary.base_salary ?? "",
+        dailyWage: salary.daily_wage ?? "",
+        hourlyWage: salary.hourly_wage ?? "",
+      });
       setLoadedValues({
         baseSalary: salary.base_salary ?? "",
         laborGrade: salary.labor_insured_salary ?? "",
@@ -136,6 +144,7 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
       setPensionWage("");
       setPensionNewSystem(true);
       setLoadedPension({ wage: "", newSystem: true });
+      setLoadedWage(null);
       setLoadedValues({ baseSalary: "", laborGrade: "", healthGrade: "", pensionWage: "" });
     }
     try {
@@ -153,7 +162,10 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
     setSalaryMsg(null);
     setInsuredHint(null);
     // 2026-11-17：月薪制本薪 > 0、時薪制時薪 > 0、按出勤天數制日薪 > 0 且有時薪／本薪基準（API 也會擋）。
-    const wageError = salaryFormError({ method, baseSalary, dailyWage, hourlyWage });
+    // 計薪方式與三個薪資欄位都沒改（例如舊資料不完整、這次只改勞健保／工時／勞退）→ 不檢查、也不送這四欄。
+    const wageError = wageFieldsChanged(loadedWage, { method, baseSalary, dailyWage, hourlyWage })
+      ? salaryFormError({ method, baseSalary, dailyWage, hourlyWage })
+      : null;
     if (wageError) {
       setSalaryMsg(wageError);
       return;
@@ -192,11 +204,16 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
       // M12：投保級距留空＝不帶欄位，API 會依「投保級距表」以投保基數自動選一級
       //（月薪制基數＝本薪；時薪制＝時薪 × 每週約定時數 × 52 ÷ 12），並把選到的值回來。
       // 填了就完全照填的存，手動覆寫永遠優先。
+      const wageChanged = wageFieldsChanged(loadedWage, { method, baseSalary, dailyWage, hourlyWage });
       const res = await putSalaryStructure(empId, {
-        method,
-        baseSalary: baseSalary ? Number(baseSalary) : null,
-        dailyWage: dailyWage ? Number(dailyWage) : null,
-        hourlyWage: hourlyWage ? Number(hourlyWage) : 0,
+        ...(wageChanged
+          ? {
+              method,
+              baseSalary: baseSalary ? Number(baseSalary) : null,
+              dailyWage: dailyWage ? Number(dailyWage) : null,
+              hourlyWage: hourlyWage ? Number(hourlyWage) : 0,
+            }
+          : {}),
         agreedHoursPerWeek: agreedHoursPerWeek ? Number(agreedHoursPerWeek) : null,
         agreedDaysPerWeek: agreedDaysPerWeek ? Number(agreedDaysPerWeek) : null,
         ...(laborGrade ? { laborInsuredSalary: Number(laborGrade) } : {}),
@@ -207,6 +224,7 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
         ...(change ? { change } : {}),
       });
       setLoadedPension({ wage: pensionWage.trim(), newSystem: pensionNewSystem });
+      setLoadedWage({ method, baseSalary, dailyWage, hourlyWage });
       setAllowanceReloadKey((n) => n + 1);
       setHistoryReloadKey((n) => n + 1);
       const warn = res.history?.warnings?.length ? `（${res.history.warnings.join(" ")}）` : "";

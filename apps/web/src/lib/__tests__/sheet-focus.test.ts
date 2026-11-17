@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  SHEET_FOCUS_EVENT,
   anomalyPills,
   approveHint,
+  clearSheetFocusHash,
+  requestSheetFocus,
+  setSheetFocusHash,
   filterBySeverity,
   monthAnomalyHref,
   parseSheetFocusHash,
@@ -91,5 +95,57 @@ describe("異常項目落點與篩選", () => {
     const items = [{ severity: "error" as const }, { severity: "warn" as const }, { severity: "info" as const }];
     expect(filterBySeverity(items, "error")).toHaveLength(1);
     expect(filterBySeverity(items, null)).toHaveLength(3);
+  });
+});
+
+describe("hash 只套用一次（假的 window／history）", () => {
+  function fakeWindow(href: string) {
+    const events: Array<{ type: string; detail: unknown }> = [];
+    const loc = new URL(href);
+    const win = {
+      location: loc,
+      history: {
+        state: null,
+        replaceState: (_s: unknown, _t: string, url: string) => {
+          const next = new URL(url, loc.href);
+          loc.href = next.href;
+        },
+      },
+      dispatchEvent: (e: { type: string; detail: unknown }) => {
+        events.push({ type: e.type, detail: e.detail });
+        return true;
+      },
+    };
+    vi.stubGlobal("window", win);
+    vi.stubGlobal("CustomEvent", class {
+      type: string;
+      detail: unknown;
+      constructor(type: string, init: { detail: unknown }) {
+        this.type = type;
+        this.detail = init.detail;
+      }
+    });
+    return { win, events };
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("requestSheetFocus 只廣播事件、不改網址", () => {
+    const { win, events } = fakeWindow("https://x.test/admin/attendance-statements?employee=e1&period=2026-10");
+    requestSheetFocus("approve");
+    expect(events).toEqual([{ type: SHEET_FOCUS_EVENT, detail: "approve" }]);
+    expect(win.location.hash).toBe("");
+  });
+  it("setSheetFocusHash 寫 hash、clearSheetFocusHash 清掉並保留 query", () => {
+    const { win } = fakeWindow("https://x.test/admin/attendance-statements?employee=e1&period=2026-10");
+    setSheetFocusHash("anomalies-warn");
+    expect(win.location.hash).toBe("#anomalies-warn");
+    clearSheetFocusHash();
+    expect(win.location.hash).toBe("");
+    expect(win.location.search).toBe("?employee=e1&period=2026-10");
+  });
+  it("clearSheetFocusHash 不動不認得的 hash", () => {
+    const { win } = fakeWindow("https://x.test/p#other");
+    clearSheetFocusHash();
+    expect(win.location.hash).toBe("#other");
   });
 });

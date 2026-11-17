@@ -21,7 +21,7 @@ import type {
   StatementSalaryInfo,
 } from "../lib/statements/types.js"
 import type { MoneyPreviewError, SheetMoney, SheetView } from "./attendance-sheet-types.js"
-import { hasWageBasis } from "./salary-completeness.js"
+import { engineRejects } from "./salary-completeness.js"
 import { findSheet, generateSheets, sheetViewFromRow } from "./attendance-sheets.js"
 import { PeriodClosedError, isPeriodClosed } from "./period-lock.js"
 import { buildPayrollInputs, loadRuleConfigFor } from "./payroll-inputs.js"
@@ -295,7 +295,7 @@ async function loadSalaryInfo(tenantId: string, employeeId: string, period: stri
   return {
     laborInsuredSalary: insured != null && Number(insured) > 0 ? Number(insured) : null,
     nhiDependents: inputs.salary?.nhiDependents ?? null,
-    wageBasisMissing: !hasWageBasis(inputs.salary ?? {}),
+    wageBasisMissing: inputs.salary ? engineRejects(inputs.salary) : false,
     // 2026-11-10 表尾「投保薪資調整」：生效日在該月底以前的最近 3 筆（表未套用＝空）。
     insuredAdjustments: await loadInsuredAdjustmentsForStatement(tenantId, employeeId, monthRangeKeys(period).to),
   }

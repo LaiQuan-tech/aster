@@ -348,7 +348,7 @@ export default function PayrollMonthPage() {
         </div>
         {/* 2026-11-17 執行薪資前：缺本薪／時薪的人列名（會被跳過），點名字到該員工「薪資」分頁補。 */}
         <div className="mt-3">
-          <IncompleteSalaryNotice variant="payroll" reloadKey={refreshKey} />
+          <IncompleteSalaryNotice variant="payroll" reloadKey={refreshKey} period={period} />
         </div>
         {runMsg && (
           <p role={runMsg.ok ? "status" : "alert"} className={`mt-3 break-words text-sm ${runMsg.ok ? "text-green-700" : "text-red-600"}`}>

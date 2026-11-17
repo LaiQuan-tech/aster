@@ -8,8 +8,9 @@
  *   #anomalies-warn     展開異常清單、只看「提醒」
  *   #approve            捲到月表卡片的核准／退回按鈕區
  * 跨頁連結：/admin/attendance-statements?employee=<id>&period=YYYY-MM#anomalies-error（sheetFocusHref）。
- * 同頁：requestSheetFocus 改 hash（replaceState，不新增瀏覽紀錄）並廣播 SHEET_FOCUS_EVENT，
- * 月表卡片（SheetReviewBar）聽事件與載入時的 hash 來展開／捲動。
+ * 同頁同一張月表：requestSheetFocus 廣播 SHEET_FOCUS_EVENT，月表卡片（SheetReviewBar）立即展開／捲動。
+ * 換員工後才要套用（左側清單藥丸）：setSheetFocusHash 只寫 hash，月表卡片載入新月表時套用一次。
+ * 月表卡片套用 hash 後一律 clearSheetFocusHash，之後切月份／換員工不會再重複展開、捲動。
  */
 import type { AnomalySeverity, SheetAnomaly, SheetStatus } from "./attendance-sheets-api";
 
@@ -38,13 +39,25 @@ export function sheetFocusHref(employeeId: string, period: string, focus: SheetF
   return `/admin/attendance-statements?${qs.toString()}#${focus}`;
 }
 
-/** 同頁：改 hash（不新增瀏覽紀錄）並通知月表卡片。 */
+/** 同頁、目前這張月表：通知月表卡片立即套用（不改網址）。 */
 export function requestSheetFocus(focus: SheetFocus): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent<SheetFocus>(SHEET_FOCUS_EVENT, { detail: focus }));
+}
+
+/** 下一張載入的月表才套用：只寫 hash（不新增瀏覽紀錄）。 */
+export function setSheetFocusHash(focus: SheetFocus): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   url.hash = focus;
   window.history.replaceState(window.history.state, "", url.toString());
-  window.dispatchEvent(new CustomEvent<SheetFocus>(SHEET_FOCUS_EVENT, { detail: focus }));
+}
+
+/** 套用過就清掉 hash（只清本模組認得的錨點；其他 hash 不動）。 */
+export function clearSheetFocusHash(): void {
+  if (typeof window === "undefined") return;
+  if (!parseSheetFocusHash(window.location.hash)) return;
+  window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}`);
 }
 
 /** 逐日月表某一天那一列的 DOM id（AttendanceSheetTable 的 <tr id>）。 */

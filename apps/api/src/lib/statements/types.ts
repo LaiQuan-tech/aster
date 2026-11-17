@@ -94,7 +94,7 @@ export interface StatementSalaryInfo {
   nhiDependents: number | null
   /** 投保薪資（勞保）調整歷程：生效日 ≤ 該月底的最近 3 筆、舊→新（2026-11-10；舊資料／表未套用＝空或沒有）。 */
   insuredAdjustments?: Array<{ effectiveOn: string; laborInsuredSalary: number }>
-  /** 2026-11-17：薪資結構的本薪與時薪都空／0（引擎無從折算，試算與跑薪資都會略過此人）。 */
+  /** 2026-11-17：薪資結構缺本薪或時薪（時薪制缺時薪；其他制兩者皆空／0）：引擎拒算，試算與跑薪資都會略過此人。 */
   wageBasisMissing?: boolean
 }
 

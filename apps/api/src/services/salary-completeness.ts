@@ -53,6 +53,14 @@ export function hasWageBasis(s: SalaryCompletenessInput): boolean {
 }
 
 /**
+ * 引擎會不會拒算（月表試算空白、跑薪資跳過 hourly_wage_missing）：時薪制一定要時薪 > 0
+ *（payroll-engine「hourly method requires salary.hourlyWage > 0」，本薪有值也不行）；其他制要有時薪或本薪。
+ */
+export function engineRejects(s: SalaryCompletenessInput): boolean {
+  return s.method === "hourly" ? !positive(s.hourlyWage) : !hasWageBasis(s)
+}
+
+/**
  * 薪資設定缺什麼；完整回 null。method 未知／空視同月薪制（DB 預設 monthly，toSalaryStructure 也是這樣塌）。
  */
 export function salaryStructureIssue(s: SalaryCompletenessInput): SalaryStructureIssue | null {

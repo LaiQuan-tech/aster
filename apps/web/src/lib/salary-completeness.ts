@@ -49,6 +49,14 @@ export function hasWageBasis(s: SalaryCompletenessInput): boolean {
 }
 
 /**
+ * 引擎會不會拒算（月表試算空白、跑薪資跳過 hourly_wage_missing）：時薪制一定要時薪 > 0
+ *（payroll-engine「hourly method requires salary.hourlyWage > 0」，本薪有值也不行）；其他制要有時薪或本薪。
+ */
+export function engineRejects(s: SalaryCompletenessInput): boolean {
+  return s.method === "hourly" ? !positive(s.hourlyWage) : !hasWageBasis(s);
+}
+
+/**
  * 薪資設定缺什麼；完整回 null。method 未知／空視同月薪制（DB 預設 monthly，toSalaryStructure 也是這樣塌）。
  */
 export function salaryStructureIssue(s: SalaryCompletenessInput): SalaryStructureIssue | null {
@@ -128,4 +136,34 @@ export function payrollSkipText(
   if (wage.length > 0) text += `；薪資設定缺本薪／時薪、未產生薪資單 ${wage.length} 位（請到員工「薪資」分頁補上後重跑）：${wage.map(nameOf).join("、")}`
   if (sheet.length > 0) text += `；出勤月表未核准、未產生薪資單 ${sheet.length} 位：${sheet.map(nameOf).join("、")}`
   return text
+}
+
+/** 表單上的計薪方式與三個薪資欄位（字串＝輸入框原樣）。 */
+export interface WageFormValues {
+  method: string
+  baseSalary: string
+  dailyWage: string
+  hourlyWage: string
+}
+
+function sameAmount(a: string, b: string): boolean {
+  const x = a.trim()
+  const y = b.trim()
+  if (x === "" || y === "") return x === y
+  return Number(x) === Number(y)
+}
+
+/**
+ * 計薪方式與三個薪資欄位有沒有改（2026-11-17）：沒改＝存檔時不送這四欄、也不做完整度檢查
+ *（舊資料不完整時，只改勞健保／工時／勞退照樣存得進去；API 也只在有送這四欄時才檢查）。
+ * loaded＝null（還沒有薪資結構、這次是新建）一律視為有改。空字串與 0 視為不同（空＝沒填）。
+ */
+export function wageFieldsChanged(loaded: WageFormValues | null, current: WageFormValues): boolean {
+  if (!loaded) return true
+  return (
+    loaded.method !== current.method ||
+    !sameAmount(loaded.baseSalary, current.baseSalary) ||
+    !sameAmount(loaded.dailyWage, current.dailyWage) ||
+    !sameAmount(loaded.hourlyWage, current.hourlyWage)
+  )
 }

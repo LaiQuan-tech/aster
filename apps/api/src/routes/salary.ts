@@ -15,14 +15,14 @@ import { logger } from "../lib/logger.js"
 import { loadRuleConfigFor, SALARY_PENSION_COLS } from "../services/payroll-inputs.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { todayKey } from "../lib/tz.js"
+import { monthRangeKeys, todayKey } from "../lib/tz.js"
 import { getRequestContext } from "../lib/request-context.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { recordSalarySaveHistory, type SaveHistoryResult } from "../services/salary-history.js"
 import {
   SALARY_STRUCTURE_ISSUE_LABELS,
   SALARY_STRUCTURE_ISSUE_MESSAGES,
-  hasWageBasis,
+  engineRejects,
   salaryStructureIssue,
   type SalaryStructureIssue,
 } from "../services/salary-completeness.js"
@@ -185,26 +185,38 @@ export interface IncompleteSalaryEntry {
   issue: SalaryStructureIssue
   /** 短標籤（月薪制缺本薪…）。 */
   label: string
-  /** 本薪與時薪都沒有 → 執行薪資時引擎無法計算，會被跳過（hourly_wage_missing）。 */
+  /** 缺本薪或時薪（時薪制缺時薪、其他制本薪與時薪都沒有）→ 執行薪資時引擎拒算，會被跳過（hourly_wage_missing）。 */
   skippedByPayroll: boolean
 }
 
 /**
- * 純函式：薪資結構列 ＋ 員工 → 設定不完整的名單（已離職／停用的人不列；依員編、姓名排序）。
+ * 該員工在 [from, to]（薪資月份）期間內是否仍在職：有離職日 → 離職日 ≥ 月初才算（月中離職的人當月仍要算薪）；
+ * 沒離職日 → status 不是 active（停用）不算；到職日晚於月底不算。
+ */
+export function employedDuring(
+  e: { status?: string | null; terminated_at?: string | null; hire_date?: string | null },
+  range: { from: string; to: string },
+): boolean {
+  if (e.hire_date && String(e.hire_date).slice(0, 10) > range.to) return false
+  if (e.terminated_at) return String(e.terminated_at).slice(0, 10) >= range.from
+  return !e.status || e.status === "active"
+}
+
+/**
+ * 純函式：薪資結構列 ＋ 員工 → 設定不完整的名單（只列該薪資月份期間內仍在職的人；依員編、姓名排序）。
  * 判準同 PUT 存檔驗證（services/salary-completeness.ts）。
  */
 export function incompleteSalaryEntries(
   salaries: Array<{ employee_id: string; method: string | null; base_salary: unknown; daily_wage: unknown; hourly_wage: unknown }>,
-  employees: Array<{ id: string; name: string | null; emp_no: string | null; status?: string | null; terminated_at?: string | null }>,
-  today: string,
+  employees: Array<{ id: string; name: string | null; emp_no: string | null; status?: string | null; terminated_at?: string | null; hire_date?: string | null }>,
+  range: { from: string; to: string },
 ): IncompleteSalaryEntry[] {
   const empById = new Map(employees.map((e) => [e.id, e] as const))
   const out: IncompleteSalaryEntry[] = []
   for (const s of salaries) {
     const e = empById.get(s.employee_id)
     if (!e) continue
-    if (e.status && e.status !== "active") continue
-    if (e.terminated_at && String(e.terminated_at).slice(0, 10) <= today) continue
+    if (!employedDuring(e, range)) continue
     const input = {
       method: s.method,
       baseSalary: numOrNull(s.base_salary),
@@ -220,21 +232,26 @@ export function incompleteSalaryEntries(
       method: s.method ?? "monthly",
       issue,
       label: SALARY_STRUCTURE_ISSUE_LABELS[issue],
-      skippedByPayroll: !hasWageBasis(input),
+      skippedByPayroll: engineRejects(input),
     })
   }
   return out.sort((a, b) => (a.empNo ?? "\uffff").localeCompare(b.empNo ?? "\uffff") || a.name.localeCompare(b.name))
 }
 
-// GET /salary-structures/incomplete — 薪資設定不完整的在職員工（2026-11-17；HR／平台管理員／會計）。
-// 只回姓名、員編、計薪方式與缺哪一欄，不回金額。
+// GET /salary-structures/incomplete?period=YYYY-MM — 薪資設定不完整、該月仍在職的員工（2026-11-17；HR／平台管理員／會計）。
+// period 省略＝租戶當月。只回姓名、員編、計薪方式與缺哪一欄，不回金額。
 salaryRouter.get(
   "/salary-structures/incomplete",
   requireAuth,
   requireTenant,
   requireFinance,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    const rawPeriod = typeof req.query.period === "string" ? req.query.period : undefined
+    if (rawPeriod !== undefined && !/^\d{4}-(0[1-9]|1[0-2])$/.test(rawPeriod)) {
+      res.status(400).json({ error: "invalid_period", message: "period 格式須為 YYYY-MM" })
+      return
+    }
     try {
       const { data: sal, error: salErr } = await supabaseAdmin
         .from("salary_structures")
@@ -243,19 +260,19 @@ salaryRouter.get(
       if (salErr) throw new Error(`GET /salary-structures/incomplete (salary_structures): ${salErr.message}`)
       const salaries = (sal ?? []) as Array<{ employee_id: string; method: string | null; base_salary: unknown; daily_wage: unknown; hourly_wage: unknown }>
       const ids = salaries.map((r) => r.employee_id)
-      let employees: Array<{ id: string; name: string | null; emp_no: string | null; status?: string | null; terminated_at?: string | null }> = []
+      let employees: Array<{ id: string; name: string | null; emp_no: string | null; status?: string | null; terminated_at?: string | null; hire_date?: string | null }> = []
       if (ids.length > 0) {
         const { data: emps, error: empErr } = await supabaseAdmin
           .from("employees")
-          .select("id, name, emp_no, status, terminated_at")
+          .select("id, name, emp_no, status, terminated_at, hire_date")
           .eq("tenant_id", tenantId)
           .in("id", ids)
         if (empErr) throw new Error(`GET /salary-structures/incomplete (employees): ${empErr.message}`)
         employees = (emps ?? []) as typeof employees
       }
-      const today = todayKey(await getTenantTimezone(tenantId))
-      const entries = incompleteSalaryEntries(salaries, employees, today)
-      res.status(200).json({ count: entries.length, employees: entries })
+      const period = rawPeriod ?? todayKey(await getTenantTimezone(tenantId)).slice(0, 7)
+      const entries = incompleteSalaryEntries(salaries, employees, monthRangeKeys(period))
+      res.status(200).json({ period, count: entries.length, employees: entries })
     } catch (err) {
       next(err)
     }

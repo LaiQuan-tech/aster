@@ -13,10 +13,11 @@ vi.mock("../services/attendance-sheets.js", async (importOriginal) => ({
 
 import { clearTenantTimezoneCache } from "../lib/tenant-tz.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
-import { incompleteSalaryEntries, salaryRouter } from "../routes/salary.js"
+import { employedDuring, incompleteSalaryEntries, salaryRouter } from "../routes/salary.js"
 import { employeeStatementsRouter } from "../routes/employee-statements.js"
 import {
   SALARY_STRUCTURE_ISSUE_MESSAGES,
+  engineRejects,
   hasWageBasis,
   salaryStructureIssue,
 } from "../services/salary-completeness.js"
@@ -157,6 +158,14 @@ describe("salaryStructureIssue（純函式）", () => {
     expect(hasWageBasis({ hourlyWage: "0.01" })).toBe(true)
     expect(hasWageBasis({ baseSalary: 1 })).toBe(true)
   })
+  it("engineRejects＝引擎會不會拒算：時薪制缺時薪即使有本薪也拒算；其他制看有沒有時薪或本薪", () => {
+    expect(engineRejects({ method: "hourly", hourlyWage: 0, baseSalary: 30000 })).toBe(true)
+    expect(engineRejects({ method: "hourly", hourlyWage: "190" })).toBe(false)
+    expect(engineRejects({ method: "monthly", baseSalary: null, hourlyWage: "0" })).toBe(true)
+    expect(engineRejects({ method: "monthly", baseSalary: null, hourlyWage: "200" })).toBe(false)
+    expect(engineRejects({ method: "by_attendance_days", dailyWage: 1500 })).toBe(true)
+    expect(engineRejects({ method: "by_attendance_days", dailyWage: 1500, hourlyWage: 190 })).toBe(false)
+  })
   it("每個代碼都有中文訊息", () => {
     for (const m of Object.values(SALARY_STRUCTURE_ISSUE_MESSAGES)) expect(m).toMatch(/[一-鿿]/)
   })
@@ -236,7 +245,7 @@ describe("GET /salary-structures/incomplete", () => {
     expect((await as(T.staff).get("/salary-structures/incomplete")).status).toBe(403)
   })
 
-  it("incompleteSalaryEntries：離職日在今天以後的仍列；月薪制有時薪無本薪 → 列出但不會被跳過", () => {
+  it("incompleteSalaryEntries：離職日在該月月初以後的仍列；月薪制有時薪無本薪 → 列出但不會被跳過", () => {
     const out = incompleteSalaryEntries(
       [
         { employee_id: "x1", method: "monthly", base_salary: null, daily_wage: null, hourly_wage: "200" },
@@ -246,11 +255,44 @@ describe("GET /salary-structures/incomplete", () => {
         { id: "x1", name: "甲", emp_no: "T02", status: "active", terminated_at: null },
         { id: "x2", name: "乙", emp_no: "T01", status: "active", terminated_at: "2099-12-31" },
       ],
-      "2026-11-17",
+      { from: "2026-11-01", to: "2026-11-30" },
     )
     expect(out.map((e) => e.employeeId)).toEqual(["x2", "x1"])
     expect(out[1]).toMatchObject({ issue: "base_salary_required", skippedByPayroll: false })
     expect(out[0]).toMatchObject({ skippedByPayroll: true })
+  })
+})
+
+describe("名單：時薪制缺時薪但有本薪、所選月份在職判斷", () => {
+  it("時薪制缺時薪、本薪有值 → 列出且標「會被跳過」", () => {
+    const out = incompleteSalaryEntries(
+      [{ employee_id: "h1", method: "hourly", base_salary: "30000", daily_wage: null, hourly_wage: "0" }],
+      [{ id: "h1", name: "甲", emp_no: "T01", status: "active", terminated_at: null }],
+      { from: "2026-11-01", to: "2026-11-30" },
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ issue: "hourly_wage_required", skippedByPayroll: true })
+  })
+
+  it("employedDuring：月中離職當月仍算、前月離職不算、月底後才到職不算、停用（無離職日）不算", () => {
+    const nov = { from: "2026-11-01", to: "2026-11-30" }
+    expect(employedDuring({ status: "terminated", terminated_at: "2026-11-15" }, nov)).toBe(true)
+    expect(employedDuring({ status: "terminated", terminated_at: "2026-10-31" }, nov)).toBe(false)
+    expect(employedDuring({ status: "active", hire_date: "2026-12-01" }, nov)).toBe(false)
+    expect(employedDuring({ status: "active", hire_date: "2026-11-30" }, nov)).toBe(true)
+    expect(employedDuring({ status: "inactive" }, nov)).toBe(false)
+    expect(employedDuring({ status: "active" }, nov)).toBe(true)
+  })
+
+  it("GET ?period=：以該月判斷在職（2022-05 月中離職的人，查 2022-05 會列、查當月不列）；period 格式錯 400", async () => {
+    fake.db.employees.find((e) => e.id === EMP_D)!.terminated_at = "2022-05-20"
+    const cur = await as(T.hr).get("/salary-structures/incomplete")
+    expect((cur.body.employees as Array<{ employeeId: string }>).some((e) => e.employeeId === EMP_D)).toBe(false)
+    const old = await as(T.hr).get("/salary-structures/incomplete?period=2022-05")
+    expect(old.status).toBe(200)
+    expect(old.body.period).toBe("2022-05")
+    expect((old.body.employees as Array<{ employeeId: string }>).some((e) => e.employeeId === EMP_D)).toBe(true)
+    expect((await as(T.hr).get("/salary-structures/incomplete?period=2020-13")).status).toBe(400)
   })
 })
 
@@ -282,6 +324,13 @@ describe("出勤統計表：沒金額時帶原因（previewError）", () => {
     expect(res.body.attendance.moneySource).toBeNull()
     expect(res.body.attendance.previewError).toBe("salary_base_missing")
     expect(res.body.payslip.previewError).toBe("salary_base_missing")
+  })
+
+  it("時薪制缺時薪但本薪有值 → 也是 salary_base_missing（引擎拒算）", async () => {
+    fake.db.salary_structures.push(salary(FAKE_EMPLOYEE_ID, "hourly", "30000", null, "0"))
+    const res = await as(T.hr).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=2026-06`)
+    expect(res.status).toBe(200)
+    expect(res.body.attendance.previewError).toBe("salary_base_missing")
   })
 
   it("薪資結構完整但沒薪資單、沒月表試算 → previewError null（維持原本「沒有薪資資料」文案）", async () => {

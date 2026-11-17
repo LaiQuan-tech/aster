@@ -25,6 +25,7 @@ import { SheetSnapshots } from "./SheetSnapshots";
 import {
   SHEET_FOCUS_EVENT,
   anomalyPills,
+  clearSheetFocusHash,
   approveHint,
   filterBySeverity,
   monthAnomalyHref,
@@ -135,7 +136,9 @@ export function SheetReviewBar({
     };
     const onHash = () => {
       const f = parseSheetFocusHash(window.location.hash);
-      if (f) applyFocus(f);
+      if (!f) return;
+      applyFocus(f);
+      clearSheetFocusHash();
     };
     window.addEventListener(SHEET_FOCUS_EVENT, onFocus);
     window.addEventListener("hashchange", onHash);
@@ -145,12 +148,15 @@ export function SheetReviewBar({
     };
   }, [applyFocus]);
 
-  // 跨頁連結（…?employee=&period=#anomalies-error）：月表載入後套用一次。
+  // 跨頁連結（…?employee=&period=#anomalies-error）／左側清單藥丸換員工：月表載入後套用一次，
+  // 套用完清掉 hash——之後切月份、換員工不會再重複展開與捲動。
   const loadedSheetId = sheet?.id ?? null;
   useEffect(() => {
     if (!loadedSheetId) return;
     const f = parseSheetFocusHash(window.location.hash);
-    if (f) applyFocus(f);
+    if (!f) return;
+    applyFocus(f);
+    clearSheetFocusHash();
   }, [loadedSheetId, applyFocus]);
 
   /** 逐日異常 → 展開逐日月表、捲到那一天並短暫醒目。 */

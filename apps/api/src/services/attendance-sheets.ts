@@ -81,7 +81,7 @@ import {
   type SheetTotals,
   type SheetView,
 } from "./attendance-sheet-types.js"
-import { hasWageBasis } from "./salary-completeness.js"
+import { engineRejects } from "./salary-completeness.js"
 
 /**
  * Attendance sheets — 亞斯特 P1 出勤月表 的月結流程核心（DB ↔ SheetView）。
@@ -2117,8 +2117,8 @@ async function composeLiveView(
   // 2026-11-17：試算不出金額時把原因帶到畫面（原本一律吞掉，頁面只說「沒有薪資資料」誤導 HR）。
   let previewError: MoneyPreviewError | null = null
   if (inputs && !inputs.salary) previewError = "salary_structure_missing"
-  else if (inputs?.salary && !hasWageBasis(inputs.salary)) {
-    // 本薪與時薪都空／0：引擎會丟「hourlyWage or baseSalary required」，先判斷、不必丟錯再接。
+  else if (inputs?.salary && engineRejects(inputs.salary)) {
+    // 缺本薪或時薪（時薪制缺時薪；其他制本薪與時薪都空／0）：引擎會丟錯，先判斷、不必丟錯再接。
     previewError = "salary_base_missing"
   } else if (inputs?.salary) {
     try {
