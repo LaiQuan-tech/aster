@@ -43,3 +43,22 @@ describe("humanizeDisbursementError", () => {
     expect(describeBatchPayError("manual_check_required", { message: "單號 D-115-003 需人工確認" })).toBe("單號 D-115-003 需人工確認")
   })
 })
+
+describe("2026-11-17：conflict_retry 與找不到對照時顯示後端說明", () => {
+  it("conflict_retry 有中文，不被 conflict 子字串蓋掉", () => {
+    expect(humanizeDisbursementError(apiErr({ error: "conflict_retry" }), "x")).toBe("資料已被其他人更新，請重新整理後再試")
+    expect(describeBatchPayError("conflict_retry")).toBe("資料已被其他人更新，請重新整理後再試")
+  })
+  it("未知錯誤碼 → 顯示後端 message／hint；都沒有才回原碼", () => {
+    expect(humanizeDisbursementError(apiErr({ error: "some_new_code", message: "後端說明" }), "x")).toBe("後端說明")
+    expect(humanizeDisbursementError(apiErr({ error: "some_new_code", hint: "後端提示" }), "x")).toBe("後端提示")
+    expect(humanizeDisbursementError(apiErr({ error: "some_new_code" }), "x")).toBe("some_new_code")
+    expect(describeBatchPayError("some_new_code", { message: "後端說明" })).toBe("後端說明")
+    expect(describeBatchPayError("some_new_code", { hint: "後端提示" })).toBe("後端提示")
+    expect(describeBatchPayError("some_new_code")).toBe("some_new_code")
+  })
+  it("已知錯誤碼仍用前端中文（不被後端 message 蓋掉）", () => {
+    expect(describeBatchPayError("other_payee_approval_not_by_boss", { message: "英文" })).toContain("作廢後重開送簽")
+  })
+})
+

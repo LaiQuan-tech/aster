@@ -436,7 +436,16 @@ export function batchPayDisbursements(body: { paidOn: string; items: Array<{ id:
   })
 }
 
-/** 批次付款逐筆錯誤碼 → 中文（精準比對；找不到退回原碼）。 */
+/** 後端附的中文說明（details.message／hint）；沒有回 null。 */
+function serverDetailText(details?: Record<string, unknown>): string | null {
+  for (const k of ["message", "hint"] as const) {
+    const v = details?.[k]
+    if (typeof v === "string" && v.trim()) return v
+  }
+  return null
+}
+
+/** 批次付款逐筆錯誤碼 → 中文（精準比對；找不到對照時顯示後端 message／hint，再退回原碼）。 */
 export function describeBatchPayError(code: string, details?: Record<string, unknown>): string {
   if (code === "acceptance_required" && typeof details?.installmentNo === "number") {
     return `第 ${details.installmentNo} 期尚未驗收，請先在專案頁按「驗收確認」。`
@@ -446,7 +455,7 @@ export function describeBatchPayError(code: string, details?: Record<string, unk
   if ((code === "manual_check_required" || code === "payee_is_registered_vendor") && typeof details?.message === "string" && details.message.trim()) {
     return details.message
   }
-  return DISBURSEMENT_ERRORS[code] ?? code
+  return DISBURSEMENT_ERRORS[code] ?? serverDetailText(details) ?? code
 }
 
 /* ------------------------------------------------------------ M4 簽核鏈 -- */
@@ -617,8 +626,8 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   boss_step_boss_only: "老闆關只有平台管理員（老闆）能變更簽核人。",
   boss_step_target_not_boss: "老闆關只能改派給在職平台管理員（老闆）。",
   non_boss_step_target_boss: "平台管理員（老闆）只在老闆關簽核，其他關卡不能改派給他們。",
+  conflict_retry: "資料已被其他人更新，請重新整理後再試",
   conflict: "這張放款單剛被其他人修改、送簽或核准，請重新整理後再改。",
-  conflict_retry: "這張放款單剛被其他人核准、付款或修改，這次操作沒有生效；請重新整理後再試。",
   already_signed_step: "你已經簽過這張放款單前面的關卡，同一輪不能再簽下一關，請由其他簽核人處理。",
   current_step_not_found: "找不到目前的簽核關卡，請重新整理。",
   invalid_approver: "選到的簽核人不存在或已離職。",
@@ -690,8 +699,16 @@ export function humanizeDisbursementError(err: unknown, fallback: string): strin
   if (typeof server === "string" && server.trim() && (msg.includes("payee_is_registered_vendor") || msg.includes("invalid_payee_name"))) return server
   // 第八輪：相近名稱、使用者取消說明 → 顯示撞到的名冊名稱。
   if (typeof server === "string" && server.trim() && msg.includes("payee_name_similar")) return `${server}（未填說明，沒有儲存）`
+  // 先精準比對錯誤碼（避免 conflict 子字串蓋掉 conflict_retry），再退回舊的包含比對。
+  const exact = typeof body?.error === "string" ? DISBURSEMENT_ERRORS[body.error] : undefined
+  if (exact) return exact
+  if (DISBURSEMENT_ERRORS[msg]) return DISBURSEMENT_ERRORS[msg]
   for (const [code, text] of Object.entries(DISBURSEMENT_ERRORS)) {
     if (msg.includes(code)) return text
   }
+  // 找不到對照 → 顯示後端 message（2026-11-17）。
+  if (typeof server === "string" && server.trim()) return server
+  const hint = (body as { hint?: unknown } | undefined)?.hint
+  if (typeof hint === "string" && hint.trim()) return hint
   return msg
 }

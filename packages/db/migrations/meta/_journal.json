@@ -759,6 +759,41 @@
       "breakpoints": true
     },
     {
+      "idx": 108,
+      "version": "7",
+      "when": 1795800000000,
+      "tag": "0108_employee_nhi_dependents_override",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1796000000000,
+      "tag": "0110_special_leave_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1796100000000,
+      "tag": "0111_special_leave_recalc_locks",
+      "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1796200000000,
+      "tag": "0112_salary_raises",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1796300000000,
+      "tag": "0113_attendance_days_special_flag_idx",
+      "breakpoints": true
+    },
+    {
       "idx": 114,
       "version": "7",
       "when": 1796400000000,
