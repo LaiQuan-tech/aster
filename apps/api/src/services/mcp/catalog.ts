@@ -128,9 +128,9 @@ const SPECIFIC: Record<string, string> = {
   "POST /projects":
     "建立專案（含 initialSubcontracts?）：非登錄副委託（vendorId 空）只有與名冊廠商「名稱」完全相同才硬擋 → 409 must_bind_vendor（回 matchedVendorName、index），請改送該廠商的 vendorId；與簡稱或帳戶戶名相同、或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請在該列帶 confirmDistinctReason 說明（嚴格稽核、最高風險）。",
   "POST /disbursements":
-    "建立放款單：payeeKind vendor（帶 vendorId，帳戶照名冊帶；名冊沒帳戶卻手填 → 400 vendor_bank_missing）或 other（只有戶名與名冊廠商「名稱」完全相同才硬擋 → 400 payee_is_registered_vendor，請改選該廠商；與簡稱或帳戶戶名相同、或名稱包含／相近 → 409 payee_name_similar（回 matchedVendorName），同一家請改選該廠商，確為不同公司請帶 confirmDistinctReason 說明——最高風險、寫嚴格稽核、核准頁與放款紀錄頁紅框標示）。戶名含不可見字元或西里爾／希臘字母 → 400 invalid_payee_name。登錄廠商零分攤（非期款支出）且廠商仍有未付期款 → 409 vendor_has_unpaid_installments，確定非期款須帶 confirmNonInstallment: true（最高風險、寫稽核）。",
+    "建立放款單：payeeKind vendor（帶 vendorId，帳戶照名冊帶；名冊沒帳戶卻手填 → 400 vendor_bank_missing）或 other（只有戶名與名冊廠商「名稱」完全相同才硬擋 → 400 payee_is_registered_vendor，請改選該廠商；與簡稱或帳戶戶名相同、或名稱包含／相近 → 409 payee_name_similar（回 matchedVendorName），同一家請改選該廠商，確為不同公司請帶 confirmDistinctReason 說明——最高風險、寫嚴格稽核、核准頁與放款紀錄頁紅框標示）。戶名含不可見字元或西里爾／希臘字母 → 400 invalid_payee_name。登錄廠商零分攤（非期款支出）且廠商仍有未付期款 → 409 vendor_has_unpaid_installments，確定非期款須帶 confirmNonInstallment: true（最高風險、寫稽核）。「其他」收款帳戶請分欄送 payeeBankAccountNumber（帳號，只收數字／空白／連字號）＋payeeAccountHolder（帳戶戶名，不可含換行或不可見字元）；不再接受單一字串 payeeBankAccount（400 use_split_account_fields）。",
   "PATCH /disbursements/:id":
-    "修改放款單（只限草稿／已核准的備註類欄位）：已分攤的單不可改成零分攤（400 cannot_clear_allocations）；登錄廠商零分攤單改金額／用途／分攤，廠商有未付期款時須帶 confirmNonInstallment: true；「其他」收款改戶名後與名冊廠商相近須帶 confirmDistinctReason（最高風險）；其餘錯誤碼同 POST /disbursements。",
+    "修改放款單（只限草稿／已核准的備註類欄位）：已分攤的單不可改成零分攤（400 cannot_clear_allocations）；登錄廠商零分攤單改金額／用途／分攤，廠商有未付期款時須帶 confirmNonInstallment: true；「其他」收款改戶名後與名冊廠商相近須帶 confirmDistinctReason（最高風險）；其餘錯誤碼同 POST /disbursements。改「其他」收款帳戶用分欄（只送一欄時另一欄沿用現值；舊單帳號無法拆開時 400 split_account_required，兩欄一起送）；單一字串 payeeBankAccount 只接受原樣回送現值。",
   "POST /vendors":
     "新增廠商：只有名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate（回 matchedVendorName）；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險、寫嚴格稽核）；名稱／簡稱／帳戶戶名含不可見字元或西里爾／希臘字母 → 400 invalid_vendor_name。帶收款帳戶新建時廠商照建、帳戶不直接寫入（回 bankChangeRequested，需老闆／平台管理員 在後台核准）。",
   "PATCH /vendors/:id":

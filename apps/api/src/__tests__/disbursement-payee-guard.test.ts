@@ -280,7 +280,7 @@ describe("C. 登錄廠商的收款銀行欄位必須等於名冊", () => {
 
   it("非登錄收款方任意帳戶 → 201", async () => {
     const res = await as(request(app).post("/disbursements")).send(
-      body({ payeeKind: "other", vendorId: null, payeeName: "測試任意收款人", payeeBankAccount: "123-456", payeeBankCode: "001", allocations: [] }),
+      body({ payeeKind: "other", vendorId: null, payeeName: "測試任意收款人", payeeBankAccountNumber: "123-456", payeeBankCode: "001", allocations: [] }),
     )
     expect(res.status).toBe(201)
   })
@@ -611,7 +611,8 @@ describe("A2：MCP 確認頁 PATCH /disbursements/:id 顯示 AI 要改成的受�
   const get = async () => ({ status: 200, json: { disbursement: { id: DISB, disbursementNo: "D-115-001", amount: 1000, payeeName: "測試甲工程行", status: "draft" } } })
 
   it("帶受款人與帳號 → 摘要列出 AI 要改成的受款人與末 4 碼", async () => {
-    const r = await describeTarget(get, "PATCH", `/disbursements/${DISB}`, { payeeName: "測試乙工程行", payeeBankAccount: "0000-2222-9876" })
+    // 2026-11-17 第六輪：帳號改用分欄（payeeBankAccountNumber），單一字串不再顯示內容。
+    const r = await describeTarget(get, "PATCH", `/disbursements/${DISB}`, { payeeName: "測試乙工程行", payeeBankAccountNumber: "0000-2222-9876" })
     expect(r.ok).toBe(true)
     const summary = (r as { summary: string }).summary
     expect(summary).toContain("AI 要改成的受款人「測試乙工程行」")
@@ -624,7 +625,9 @@ describe("A2：MCP 確認頁 PATCH /disbursements/:id 顯示 AI 要改成的受�
     expect(maskAccount("０００－１２３４ 測試戶名")).toBe("****1234")
     const r = await describeTarget(get, "PATCH", `/disbursements/${DISB}`, { payeeBankAccount: "0000111 測試甲工程行王小明" })
     const summary = (r as { summary: string }).summary
-    expect(summary).toContain("****0111")
+    // 第六輪：單一字串不顯示內容（伺服器拒收），只提示要分欄。
+    expect(summary).toContain("不採用")
+    expect(summary).not.toContain("0111")
     expect(summary).not.toContain("王小明")
     const post = await describeTarget(get, "POST", "/disbursements", { payeeName: "x", amount: 1, payeeBankAccount: "0000111 測試甲工程行王小明" })
     expect((post as { summary: string }).summary).not.toContain("王小明")
@@ -1134,6 +1137,10 @@ describe("驗收第五輪：MCP 確認頁摘要只認 API 接受的駝峰鍵、�
     expect(s1).not.toContain("偽造")
     expect(s1).not.toContain("999")
     const both = await describeTarget(get as never, "PATCH", `/disbursements/${DISB}`, { payeeBankAccount: "11112222 別人", payeeBankAccountNumber: "33334444", payeeAccountHolder: "測試某人" })
+    // 第六輪：「99995678 1234」這種單一字串不再被拆成 ****1234 顯示。
+    const ambiguous = await describeTarget(get as never, "POST", "/disbursements", { payeeName: "x", amount: 1, payeeBankAccount: "99995678 1234" })
+    expect((ambiguous as { summary: string }).summary).not.toContain("****1234")
+    expect((ambiguous as { summary: string }).summary).not.toContain("5678")
     const s2 = (both as { summary: string }).summary
     expect(s2).toContain("****4444")
     expect(s2).toContain("帳戶戶名「測試某人」")

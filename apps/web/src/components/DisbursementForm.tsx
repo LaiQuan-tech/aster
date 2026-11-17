@@ -1,7 +1,7 @@
 "use client";
 
 import { splitAccountSnapshot } from "@/lib/payee-account";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { formatMoney } from "@/lib/money";
 import { MoneyInput } from "@/components/MoneyInput";
 import { Button, inputCls, labelCls, PrimaryButton, ErrorText } from "@/components/admin-ui";
@@ -94,6 +94,11 @@ export function allocRowFromPayable(p: Payable): AllocRowDraft {
 }
 
 const normBank = (v: string | null | undefined) => (v ?? "").trim();
+/** 與 API services/disbursements.ts cleanHolder 一致：去控制字元／格式字元、trim、按 code point 截 120。 */
+export function cleanHolder(raw: string | null | undefined): string {
+  const h = String(raw ?? "").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "").trim();
+  return Array.from(h).slice(0, 120).join("");
+}
 const normAcct = (v: string | null | undefined) => normBank(v).replace(/[\s\-－‐–—]/g, "");
 
 /**
@@ -111,16 +116,50 @@ export function bankSnapshotDiffersFromVendor(
   const nameOk = [vName, snapName].includes(normBank(snap.payeeBankName));
   const codeOk = normBank(snap.payeeBankCode) === vCode;
   const acctOk = [normAcct(v.bankAccount), normAcct(snapAcct)].includes(normAcct(snap.payeeBankAccount));
-  // 驗收第五輪：表單帳號與戶名分欄——戶名有值時要等於名冊戶名（空＝舊單沒有戶名段，不算不同）。
-  const holderOk = !normBank(snap.payeeAccountHolder) || normBank(snap.payeeAccountHolder) === normBank(v.accountHolder);
+  // 驗收第五／六輪：表單帳號與戶名分欄——戶名有值時要等於名冊戶名（空＝舊單沒有戶名段，不算不同）；
+  // 比對前與後端 cleanHolder 一致：去控制字元、按字元（code point）截 120。
+  const snapHolder = cleanHolder(snap.payeeAccountHolder);
+  const holderOk = !snapHolder || snapHolder === cleanHolder(v.accountHolder);
   return !(nameOk && codeOk && acctOk && holderOk);
+}
+
+type PayeeAccountFields = { payeeBankName: string; payeeBankCode: string; payeeBankAccount: string; payeeAccountHolder: string };
+export type PayeeKindStash = { fields: PayeeAccountFields; dirty: boolean } | null;
+
+/**
+ * 收款方種類切換（純函式，驗收第六輪）：
+ * - 切到廠商：原本是其他 → 暫存四欄與 dirty；已選廠商就帶名冊（名稱、銀行、帳號、戶名）。
+ * - 切回其他：有暫存、這段期間沒選過廠商、也沒有已選的廠商 → 還原四欄與 dirty；否則四欄清空、dirty＝true（存檔送兩欄 null）。
+ */
+export function switchPayeeKind<S extends PayeeAccountFields & { payeeKind: PayeeKind; vendorId: string; payeeName: string }>(
+  s: S,
+  k: PayeeKind,
+  vendors: Pick<Vendor, "id" | "name" | "bankName" | "bankCode" | "bankAccount" | "accountHolder">[],
+  ctx: { dirty: boolean; stash: PayeeKindStash; vendorPicked: boolean },
+): { state: S; dirty: boolean; stash: PayeeKindStash } {
+  if (s.payeeKind === k) return { state: s, dirty: ctx.dirty, stash: ctx.stash };
+  if (k === "vendor") {
+    const stash: PayeeKindStash =
+      s.payeeKind === "other"
+        ? { fields: { payeeBankName: s.payeeBankName, payeeBankCode: s.payeeBankCode, payeeBankAccount: s.payeeBankAccount, payeeAccountHolder: s.payeeAccountHolder }, dirty: ctx.dirty }
+        : ctx.stash;
+    const v = vendors.find((x) => x.id === s.vendorId);
+    const state = v
+      ? { ...s, payeeKind: k, payeeName: v.name, payeeBankName: v.bankName ?? "", payeeBankAccount: v.bankAccount ?? "", payeeAccountHolder: v.accountHolder ?? "", payeeBankCode: v.bankCode ?? "" }
+      : { ...s, payeeKind: k };
+    return { state, dirty: ctx.dirty, stash };
+  }
+  if (ctx.stash && !ctx.vendorPicked && !s.vendorId) {
+    return { state: { ...s, payeeKind: k, ...ctx.stash.fields }, dirty: ctx.stash.dirty, stash: null };
+  }
+  return { state: { ...s, payeeKind: k, payeeBankName: "", payeeBankCode: "", payeeBankAccount: "", payeeAccountHolder: "" }, dirty: true, stash: null };
 }
 
 function emptyAllocRow(projectId = ""): AllocRowDraft {
   return { key: newRowKey(), projectId, amount: "0", withheldAmount: "0", note: "", fromPayable: false };
 }
 
-function initFromDisbursement(d?: DisbursementFormInitial): {
+export function initFromDisbursement(d?: DisbursementFormInitial): {
   payeeKind: PayeeKind;
   vendorId: string;
   payeeName: string;
@@ -230,6 +269,9 @@ export default function DisbursementForm({
   const set = <K extends keyof typeof state>(k: K, v: (typeof state)[K]) => setState((s) => ({ ...s, [k]: v }));
   /** 手動收款的帳號／戶名有沒有被改過（沒改就原樣回送既有快照，驗收第三輪）。 */
   const [manualAccountDirty, setManualAccountDirty] = useState(false);
+  /** 其他 → 廠商時暫存的四欄（沒選廠商就切回其他時還原；驗收第六輪）。 */
+  const payeeStashRef = useRef<PayeeKindStash>(null);
+  const vendorPickedRef = useRef(false);
 
   function handleAmountChange(v: string) {
     setState((s) => ({ ...s, amount: v, grossAmount: String(toNum(v) + toNum(s.withheldAmount)) }));
@@ -242,6 +284,7 @@ export default function DisbursementForm({
   }
 
   function handleVendorSelect(vendorId: string) {
+    vendorPickedRef.current = true;
     const v = vendors.find((x) => x.id === vendorId);
     setState((s) => ({
       ...s,
@@ -458,25 +501,17 @@ export default function DisbursementForm({
                   name="payeeKind"
                   checked={state.payeeKind === k}
                   onChange={() => {
-                    if (k === "other") setManualAccountDirty(true); // 驗收第五輪：切到「其他」＝帳戶要重填，存檔一定送兩欄（空＝null）
-                    setState((s) => {
-                      // 切回「廠商」時戶名重新帶名冊名稱（避免沿用「其他」時手打的名稱）。
-                      const v = k === "vendor" ? vendors.find((x) => x.id === s.vendorId) : undefined;
-                      return v
-                        ? {
-                            ...s,
-                            payeeKind: k,
-                            payeeName: v.name,
-                            payeeBankName: v.bankName ?? "",
-                            payeeBankAccount: v.bankAccount ?? "",
-                            payeeAccountHolder: v.accountHolder ?? "",
-                            payeeBankCode: v.bankCode ?? "",
-                          }
-                        : k === "other" && s.payeeKind === "vendor"
-                          // 廠商 → 其他：名冊帶來的帳戶不沿用（兩欄清空，由使用者重填）；存檔明確送 null（manualAccountDirty）。
-                          ? { ...s, payeeKind: k, payeeBankName: "", payeeBankCode: "", payeeBankAccount: "", payeeAccountHolder: "" }
-                          : { ...s, payeeKind: k };
+                    // 驗收第六輪：切換邏輯在純函式 switchPayeeKind（有單元測試）——其他 → 廠商先暫存四欄，
+                    // 沒選廠商就切回其他 → 還原（dirty 也還原）；選過廠商或原本是廠商單 → 清空並標 dirty（存檔送兩欄 null）。
+                    const r = switchPayeeKind(state, k, vendors, {
+                      dirty: manualAccountDirty,
+                      stash: payeeStashRef.current,
+                      vendorPicked: vendorPickedRef.current,
                     });
+                    payeeStashRef.current = r.stash;
+                    if (k === "vendor") vendorPickedRef.current = false;
+                    setManualAccountDirty(r.dirty);
+                    setState(r.state);
                   }}
                 />
                 {PAYEE_KIND_LABELS[k]}

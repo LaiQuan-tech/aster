@@ -1653,7 +1653,9 @@ export function assertPayeeBankMatchesVendor(
         message: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶",
       })
     }
-    // 快照格式只在「與 DB 上這張單現有快照完全相同（未改動）」且該快照就是名冊快照時放行（舊單整份表單回送）。
+    // 快照格式只在「與 DB 上這張單現有快照完全相同（未改動）」且該快照就是名冊快照時放行。
+    // 註（2026-11-17 第六輪）：目前前端廠商單只送名冊原始帳號（上面 vendorBankRawMatches 就放行），走不到這條；
+    // 保留給 API／MCP 直接把 GET 回來的快照原樣送回的情況。登錄廠商的帳戶最後一律照名冊（resolvePayeeAccount）。
     const storedVal = stored?.[field]
     const unchangedSnapshot =
       storedVal != null &&
@@ -2160,45 +2162,50 @@ function resolvePayeeAccount(
   opts: { storedBank?: Partial<Record<PayeeBankField, string | null>>; storedSplit?: { number: string | null; holder: string | null } },
 ): { number: string | null; holder: string | null; snapshot: string | null } {
   const stored = opts.storedBank?.payeeBankAccount ?? null
-  const storedParts = (): { number: string | null; holder: string | null } => {
-    if (opts.storedSplit && (opts.storedSplit.number !== null || opts.storedSplit.holder !== null)) return opts.storedSplit
+  // DB 現有分欄（原樣；兩欄都 null＝舊單，沒動帳戶時維持 null、只留快照——驗收第六輪 #2：不再寫半套分欄）。
+  const storedSplit = opts.storedSplit ?? { number: null, holder: null }
+  const unchanged = () => ({ number: storedSplit.number, holder: storedSplit.holder, snapshot: stored })
+  /**
+   * 只送其中一欄時另一欄的基準：有分欄用分欄；舊單才解析舊快照——帳號段拆得出純數字才採用；
+   * 拆不出（「TW-12345 丙印刷行」「郵局 0001234-5678901 …」）→ 400 split_account_required，要求兩欄一起填（不讓帳號默默遺失）。
+   */
+  const baseForPartial = (): { number: string | null; holder: string | null } => {
+    if (storedSplit.number !== null || storedSplit.holder !== null) return storedSplit
     if (!stored) return { number: null, holder: null }
     const p = splitAccountSnapshot(stored, vendor?.account_holder ?? null)
     const n = normalizeAccountNumber(p.account)
-    // 舊快照拆出的值寫入分欄前清理（帳號非純數字 → null；戶名去控制字元、按字元截 120），不丟錯。
-    return { number: /^\d{1,40}$/.test(n) ? n : null, holder: cleanHolder(p.holder) }
+    if (!/^\d{1,40}$/.test(n)) {
+      throw new DisbursementError(400, "split_account_required", {
+        message: "這張單的舊收款帳號格式無法拆開，請同時填寫帳號與帳戶戶名",
+      })
+    }
+    return { number: n, holder: cleanHolder(p.holder) }
   }
-  const sameAsStored = (sent: string | null | undefined) => stored !== null && sent !== undefined && (sent ?? "").trim() === stored.trim()
+  const sameAsStored = (sent: string | null | undefined) => sent !== undefined && (sent ?? "").trim() === (stored ?? "").trim()
   if (vendor) {
     const sent = input.payeeBankAccount
-    if (sent === undefined) {
-      const number = rosterAccountNumber(vendor)
-      // 驗收第五輪：名冊有帳號但含非數字（寫不進分欄）→ 兩欄都不寫，前端改解析舊快照（避免帳號空白、戶名有值的半套分欄）。
-      const rosterHasAccount = String(vendor.bank_account ?? "").trim() !== ""
-      const holder = rosterHasAccount && number === null ? null : rosterAccountHolder(vendor)
-      return { number, holder, snapshot: vendorBankDefault(vendor, "payeeBankAccount") }
-    }
-    if (sameAsStored(sent)) return { ...storedParts(), snapshot: stored }
-    if (!(sent ?? "").trim()) return { number: null, holder: null, snapshot: null }
-    const p = splitAccountSnapshot(sent, vendor.account_holder)
-    const number = validatePayeeAccountNumber(p.account)
-    const holder = validatePayeeAccountHolder(p.holder ?? vendor.account_holder)
-    return { number, holder, snapshot: composeAccountSnapshot(number, holder) }
+    // 沒送、或送的不是 DB 現值（單一字串不再解析）→ 照名冊。
+    if (sent !== undefined && stored !== null && sameAsStored(sent)) return unchanged()
+    const number = rosterAccountNumber(vendor)
+    // 名冊有帳號但含非數字（寫不進分欄）→ 兩欄都不寫，前端改解析舊快照。
+    const rosterHasAccount = String(vendor.bank_account ?? "").trim() !== ""
+    const holder = rosterHasAccount && number === null ? null : rosterAccountHolder(vendor)
+    return { number, holder, snapshot: vendorBankDefault(vendor, "payeeBankAccount") }
   }
   if (input.payeeBankAccountNumber !== undefined || input.payeeAccountHolder !== undefined) {
-    const base = storedParts()
+    const bothSent = input.payeeBankAccountNumber !== undefined && input.payeeAccountHolder !== undefined
+    const base = bothSent ? { number: null, holder: null } : baseForPartial()
     const number = input.payeeBankAccountNumber !== undefined ? validatePayeeAccountNumber(input.payeeBankAccountNumber) : base.number
     const holder = input.payeeAccountHolder !== undefined ? validatePayeeAccountHolder(input.payeeAccountHolder) : base.holder
     return { number, holder, snapshot: composeAccountSnapshot(number, holder) }
   }
+  // 驗收第六輪 #1：「其他」收款不再接受單一字串 payeeBankAccount 作為新帳戶（"99995678 1234" 這種拆法有歧義）——
+  // 原樣回送 DB 現值才放行（維持不變），否則 400 use_split_account_fields（建單／改單入口另有同樣檢查）。
   const sent = input.payeeBankAccount
-  if (sent === undefined) return { ...storedParts(), snapshot: stored }
-  if (sameAsStored(sent)) return { ...storedParts(), snapshot: stored }
-  if (!(sent ?? "").trim()) return { number: null, holder: null, snapshot: null }
-  const p = splitAccountSnapshot(sent)
-  const number = validatePayeeAccountNumber(p.account)
-  const holder = validatePayeeAccountHolder(p.holder)
-  return { number, holder, snapshot: composeAccountSnapshot(number, holder) }
+  if (sent === undefined || sameAsStored(sent)) return unchanged()
+  throw new DisbursementError(400, "use_split_account_fields", {
+    message: "「其他」收款請用 payeeBankAccountNumber（帳號）與 payeeAccountHolder（帳戶戶名）分欄填寫，不再接受單一字串 payeeBankAccount",
+  })
 }
 
 /** 寫入用的單頭：0106 分欄未套用時剔除分欄鍵（schema-compat）。 */

@@ -85,20 +85,23 @@ export function maskAccount(value: unknown): string {
 }
 
 /**
- * 收款帳號／戶名的描述（驗收第五輪）：只認 API 實際接受的駝峰鍵，優先序同伺服器——送了分欄
- * （payeeBankAccountNumber／payeeAccountHolder）就不看 payeeBankAccount；帳號只露末 4 碼。登錄廠商單標「以名冊為準」。
+ * 收款帳號／戶名的描述（驗收第五／六輪）：只認 API 實際接受的駝峰分欄（payeeBankAccountNumber／payeeAccountHolder），
+ * 帳號只露末 4 碼。單一字串 payeeBankAccount 不顯示內容（「其他」收款伺服器會回 400 use_split_account_fields；
+ * 登錄廠商一律以名冊為準），只提示。
  */
 function accountChanges(b: Record<string, unknown>, isVendor: boolean, verb = ""): string[] {
   const out: string[] = []
-  const split = b.payeeBankAccountNumber !== undefined || b.payeeAccountHolder !== undefined
-  const account = split ? b.payeeBankAccountNumber : b.payeeBankAccount
   const note = isVendor ? "（登錄廠商以名冊為準）" : ""
-  if (account !== undefined) {
-    out.push(typeof account === "string" && account.trim() ? `${verb}收款帳號 ${maskAccount(account)}${note}` : `${verb ? "AI 要清空" : "清空"}收款帳號${isVendor ? "（將照名冊帶入）" : ""}`)
+  if (b.payeeBankAccountNumber !== undefined) {
+    const a = b.payeeBankAccountNumber
+    out.push(typeof a === "string" && a.trim() ? `${verb}收款帳號 ${maskAccount(a)}${note}` : `${verb ? "AI 要清空" : "清空"}收款帳號${note}`)
   }
-  if (split && b.payeeAccountHolder !== undefined) {
+  if (b.payeeAccountHolder !== undefined) {
     const h = b.payeeAccountHolder
-    out.push(typeof h === "string" && h.trim() ? `${verb}帳戶戶名${aiText(h)}${note}` : `${verb ? "AI 要清空" : "清空"}帳戶戶名`)
+    out.push(typeof h === "string" && h.trim() ? `${verb}帳戶戶名${aiText(h)}${note}` : `${verb ? "AI 要清空" : "清空"}帳戶戶名${note}`)
+  }
+  if (b.payeeBankAccount !== undefined && b.payeeBankAccountNumber === undefined && b.payeeAccountHolder === undefined) {
+    out.push(isVendor ? "收款帳號以名冊為準" : "AI 送了單一字串收款帳號（不採用，「其他」收款須分欄填寫帳號與戶名）")
   }
   return out
 }

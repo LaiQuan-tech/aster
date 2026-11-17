@@ -155,7 +155,7 @@ describe("第六輪第 1 項：「其他」收款同名一律擋（不再看副�
     fake.db.vendors!.push(V(VN, "測試非登錄下包有限公司"))
     fake.db.project_subcontracts = fake.db.project_subcontracts!.map((s) => (s.id === SF ? { ...s, created_at: "2025-01-01T00:00:00.000Z" } : s))
     const b = await uiBodyFromGroup(null)
-    b.payeeName = "測試非登錄下包"; b.payeeBankName = "某銀行"; b.payeeBankAccount = "123"
+    b.payeeName = "測試非登錄下包"; b.payeeBankName = "某銀行"; delete b.payeeBankAccount; b.payeeBankAccountNumber = "123" // 第六輪：分欄
     fake.writes.length = 0
     const c = await create(b)
     expect(c.status).toBe(409)

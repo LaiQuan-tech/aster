@@ -318,18 +318,23 @@ describe("驗收第三輪：「其他」收款分欄、NFKC、草稿不改寫既
     expect(fake.db.disbursements!.at(-1)!.payee_bank_account).toBe(snap)
     expect(res.body.disbursement.payeeAccountMasked).toBe(masked)
   })
-  it("舊的單一字串仍相容；草稿 PATCH 原樣回送既有快照 → 不改寫（舊快照「12345678 7-11」的戶名不會被併進帳號）", async () => {
-    const created = await as("hr-user", request(app).post("/disbursements")).send(otherBody({ payeeBankAccount: "0123 4567 8901 王小明" }))
+  it("第六輪：單一字串 payeeBankAccount 不再接受（400 use_split_account_fields）；原樣回送 DB 現值仍放行、不改寫", async () => {
+    const bad = await as("hr-user", request(app).post("/disbursements")).send(otherBody({ payeeBankAccount: "0123 4567 8901 王小明" }))
+    expect(bad.status).toBe(400)
+    expect(bad.body.error).toBe("use_split_account_fields")
+    const created = await as("hr-user", request(app).post("/disbursements")).send(otherBody({ payeeBankAccountNumber: "0123 4567 8901", payeeAccountHolder: "王小明" }))
     expect(created.status).toBe(201)
-    expect(fake.db.disbursements![0]!.payee_bank_account).toBe("012345678901 王小明")
     const id = created.body.disbursement.id as string
-    fake.db.disbursements![0]!.payee_bank_account = "12345678 7-11" // 舊單快照
-    const patched = await as("hr-user", request(app).patch(`/disbursements/${id}`)).send({ payeeBankAccount: "12345678 7-11", note: "改備註" })
-    expect(patched.status, JSON.stringify(patched.body)).toBe(200)
-    expect(fake.db.disbursements![0]!.payee_bank_account).toBe("12345678 7-11")
+    Object.assign(fake.db.disbursements![0]!, { payee_bank_account: "12345678 7-11", payee_bank_account_number: null, payee_account_holder: null }) // 舊單快照
+    const same = await as("hr-user", request(app).patch(`/disbursements/${id}`)).send({ payeeBankAccount: "12345678 7-11", note: "改備註" })
+    expect(same.status, JSON.stringify(same.body)).toBe(200)
+    expect(fake.db.disbursements![0]).toMatchObject({ payee_bank_account: "12345678 7-11", payee_bank_account_number: null, payee_account_holder: null })
+    const changed = await as("hr-user", request(app).patch(`/disbursements/${id}`)).send({ payeeBankAccount: "99995678 1234" })
+    expect(changed.status).toBe(400)
+    expect(changed.body.error).toBe("use_split_account_fields")
     const split = await as("hr-user", request(app).patch(`/disbursements/${id}`)).send({ payeeBankAccountNumber: "12345678", payeeAccountHolder: "7-11" })
     expect(split.status).toBe(200)
-    expect(fake.db.disbursements![0]!.payee_bank_account).toBe("12345678 7-11")
+    expect(fake.db.disbursements![0]).toMatchObject({ payee_bank_account: "12345678 7-11", payee_bank_account_number: "12345678", payee_account_holder: "7-11" })
   })
   it("登錄廠商：全形／連續空白的名冊帳號照樣比對通過（用 splitAccountSnapshot 的戶名段）", async () => {
     Object.assign(fake.db.vendors![0]!, { bank_account: "０１２３　４５６７", account_holder: "王　小明" })
@@ -469,5 +474,120 @@ describe("驗收第五輪", () => {
     const r2 = await as("hr-user", request(app).patch(`/disbursements/${DISB}`)).send({ payeeBankAccountNumber: "87654321" })
     expect(r2.status).toBe(200)
     expect(Array.from(fake.db.disbursements![0]!.payee_account_holder as string)).toHaveLength(120)
+  })
+})
+
+/**
+ * 驗收第六輪：複驗 harness（scratchpad/harness.ts）情境 a–i 的後端部分轉成正式測試（前端部分在
+ * apps/web/src/components/__tests__/disbursement-form-payee-kind.test.ts）。payload 照前端 buildBody 實際會送的形狀。
+ */
+describe("驗收第六輪：harness 情境 a–i（後端）", () => {
+  const otherRow = (over: Row = {}) =>
+    header("", {
+      payee_kind: "other", vendor_id: null, payee_name: "丙印刷", payee_bank_name: "郵局", payee_bank_code: "700",
+      payee_bank_account: "00012345678901 丙印刷行", payee_bank_account_number: "00012345678901", payee_account_holder: "丙印刷行",
+      status: "draft", approved_at: null, ...over,
+    })
+  const legacy = (snap: string) => otherRow({ payee_bank_account: snap, payee_bank_account_number: null, payee_account_holder: null })
+  const db = () => fake.db.disbursements![0]!
+  const patch = (body: Row) => as("hr-user", request(app).patch(`/disbursements/${DISB}`)).send(body)
+  const vendorRow = (over: Row = {}) => header(VENDOR_A, { status: "draft", approved_at: null, payee_bank_account_number: "0000111", payee_account_holder: "測試甲工程行", payee_bank_account: "0000111 測試甲工程行", ...over })
+  beforeEach(() => {
+    fake.db.disbursement_allocations = []
+  })
+
+  it("a 新建其他單分欄填帳號戶名 → 分欄存、快照相容", async () => {
+    const res = await as("hr-user", request(app).post("/disbursements")).send({
+      payeeKind: "other", vendorId: null, payeeName: "丁快遞", payeeBankName: "台銀", payeeBankCode: "004", payingCompanyId: COMPANY, method: "transfer", amount: 100,
+      status: "draft", allocations: [], payeeBankAccountNumber: "0040-1234-5678", payeeAccountHolder: "丁快遞社",
+    })
+    expect(res.status).toBe(201)
+    expect(fake.db.disbursements!.at(-1)).toMatchObject({ payee_bank_account_number: "004012345678", payee_account_holder: "丁快遞社", payee_bank_account: "004012345678 丁快遞社" })
+  })
+  it("b／b' 有分欄的其他單：只改戶名（前端送兩欄）→ 帳號保留；只改備註（不送帳戶）→ 不動", async () => {
+    fake.db.disbursements = [otherRow()]
+    expect((await patch({ payeeBankAccountNumber: "00012345678901", payeeAccountHolder: "丙印刷有限公司" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "00012345678901", payee_account_holder: "丙印刷有限公司" })
+    fake.db.disbursements = [otherRow()]
+    expect((await patch({ note: "x" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "00012345678901", payee_account_holder: "丙印刷行", payee_bank_account: "00012345678901 丙印刷行" })
+  })
+  it("c1／c2 舊快照其他單：只改備註 → 不寫分欄（只留快照）；只送戶名 → 帳號從舊快照拆出", async () => {
+    fake.db.disbursements = [legacy("00012345678901 丙印刷行")]
+    expect((await patch({ note: "x" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account: "00012345678901 丙印刷行", payee_bank_account_number: null, payee_account_holder: null })
+    expect((await patch({ payeeAccountHolder: "新戶名" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "00012345678901", payee_account_holder: "新戶名" })
+  })
+  it("c3／c4 舊快照帳號段非純數字：只改備註 → 兩欄都不寫；只送戶名 → 400 split_account_required（帳號不會遺失）；兩欄一起送才改", async () => {
+    for (const snap of ["郵局 0001234-5678901 丙印刷行", "TW-12345 丙印刷行"]) {
+      fake.db.disbursements = [legacy(snap)]
+      expect((await patch({ note: "x" })).status, snap).toBe(200)
+      expect(db(), snap).toMatchObject({ payee_bank_account: snap, payee_bank_account_number: null, payee_account_holder: null })
+      // 第二步：同一張單只改戶名 → 擋下，快照不變
+      const step2 = await patch({ payeeAccountHolder: "丙印刷有限公司" })
+      expect(step2.status, snap).toBe(400)
+      expect(step2.body.error).toBe("split_account_required")
+      expect(db().payee_bank_account, snap).toBe(snap)
+      expect((await patch({ payeeBankAccountNumber: "0001234-5678901", payeeAccountHolder: "丙印刷有限公司" })).status).toBe(200)
+      expect(db()).toMatchObject({ payee_bank_account_number: "00012345678901", payee_account_holder: "丙印刷有限公司" })
+    }
+  })
+  it("c5 舊快照英數帳號、前端兩欄一起送（帳號含字母）→ 400 invalid_payee_bank_account，不默默清掉", async () => {
+    fake.db.disbursements = [legacy("TW-12345 丙印刷行")]
+    const res = await patch({ payeeBankAccountNumber: "TW-12345", payeeAccountHolder: "新戶名" })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_payee_bank_account")
+    expect(db().payee_bank_account).toBe("TW-12345 丙印刷行")
+  })
+  it("d 既有其他單 切廠商（未選）再切回其他且沒動帳戶（前端還原、送 {}）→ 不動", async () => {
+    fake.db.disbursements = [otherRow()]
+    expect((await patch({ payeeKind: "other", vendorId: null, payeeName: "丙印刷" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "00012345678901", payee_account_holder: "丙印刷行" })
+  })
+  it("e／e' 廠商單 → 其他沒填帳戶（前端送兩欄 null）→ 帳戶、銀行名／代碼全清空", async () => {
+    for (const name of ["測試甲工程行", "戊個人"]) {
+      fake.db.disbursements = [vendorRow()]
+      const res = await patch({ payeeKind: "other", vendorId: null, payeeName: name, payeeBankName: null, payeeBankCode: null, payeeBankAccountNumber: null, payeeAccountHolder: null, allocations: [] })
+      // 收款名稱沿用廠商名 → 會被「其他收款不可冒用名冊廠商」擋；改名後才成立。
+      if (name === "測試甲工程行") {
+        expect(res.status).toBe(400)
+        expect(res.body.error).toBe("payee_is_registered_vendor")
+        continue
+      }
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(db()).toMatchObject({ payee_kind: "other", payee_bank_account: null, payee_bank_account_number: null, payee_account_holder: null, payee_bank_name: null, payee_bank_code: null })
+    }
+  })
+  it("f／f' 廠商單只改備註：名冊帳號含非數字 → 分欄維持不寫；數字帳號 → 分欄不動", async () => {
+    Object.assign(fake.db.vendors![0]!, { bank_account: "A-0001-1111" })
+    fake.db.disbursements = [vendorRow({ payee_bank_account: "A00011111 測試甲工程行", payee_bank_account_number: null, payee_account_holder: null })]
+    expect((await patch({ note: "x" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: null, payee_account_holder: null })
+    Object.assign(fake.db.vendors![0]!, { bank_account: "0000111" })
+    fake.db.disbursements = [vendorRow()]
+    expect((await patch({ note: "x" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "0000111", payee_account_holder: "測試甲工程行" })
+  })
+  it("g／g' 廠商 → 其他填新帳號（有／無戶名）→ 分欄存新值，不帶原廠商戶名", async () => {
+    fake.db.disbursements = [vendorRow()]
+    expect((await patch({ payeeKind: "other", vendorId: null, payeeName: "戊個人", payeeBankAccountNumber: "1234 5678 9012", payeeAccountHolder: "戊某某", allocations: [] })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "123456789012", payee_account_holder: "戊某某", payee_bank_account: "123456789012 戊某某" })
+    fake.db.disbursements = [vendorRow()]
+    expect((await patch({ payeeKind: "other", vendorId: null, payeeName: "戊個人", payeeBankAccountNumber: "123456789012", payeeAccountHolder: null, allocations: [] })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "123456789012", payee_account_holder: null, payee_bank_account: "123456789012" })
+  })
+  it("h 0106 前廠商單（只有快照）只改備註 → 不寫分欄、快照不變", async () => {
+    fake.db.disbursements = [vendorRow({ payee_bank_account_number: null, payee_account_holder: null })]
+    expect((await patch({ note: "x" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account: "0000111 測試甲工程行", payee_bank_account_number: null, payee_account_holder: null })
+  })
+  it("i 名冊改帳號後，廠商草稿只改備註 → 可存；送審時 409 payee_bank_changed", async () => {
+    fake.db.disbursements = [vendorRow()]
+    fake.db.vendors![0]!.bank_account = "9999-8888"
+    expect((await patch({ note: "x" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "0000111" })
+    fake.db.disbursement_allocations = [alloc()]
+    await expect(submitDisbursement(TENANT_ID, actor, DISB)).rejects.toMatchObject({ code: "payee_bank_changed" })
   })
 })

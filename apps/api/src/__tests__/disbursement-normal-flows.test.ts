@@ -175,7 +175,7 @@ describe("正常業務回歸 N1–N8", () => {
   })
   it("N4 非登錄手打付款（非登錄副委託同名／零分攤一般對象）", async () => {
     const b = await uiBodyFromGroup(null)
-    b.payeeName = "測試非登錄下包"; b.payeeBankName = "某銀行"; b.payeeBankAccount = "123"
+    b.payeeName = "測試非登錄下包"; b.payeeBankName = "某銀行"; delete b.payeeBankAccount; b.payeeBankAccountNumber = "123" // 第六輪：分欄
     const c1 = await create(b)
     expect(c1.status, r(c1)).toBe(201)
     const c2 = await create({ payeeKind: "other", payeeName: "中華郵政", payingCompanyId: COMPANY, method: "cash", amount: 300, withheldAmount: 0, status: "draft", allocations: [] })
