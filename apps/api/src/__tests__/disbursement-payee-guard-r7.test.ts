@@ -556,4 +556,16 @@ describe("2026-11-17 S2 擴大驗收：老闆檢查先於原因、寫入時併�
     }
     expect(fake.db.project_subcontracts!.find((s) => s.id === SF)!.vendor_id).toBe(VB)
   })
+  it("非老闆存檔讀到時已綁定的列（綁定沒變），寫入前老闆改綁了 → 409 conflict_retry、不把改綁蓋回", async () => {
+    const body = await subsBody(P1, (x) => (x.id === SA1 ? { ...x, amount: 1234 } : x))
+    const restore = raceBind(SA1) // 把 SA1 改綁成 VB（模擬老闆在中間改綁）
+    try {
+      const res = await putAs("acc-user", P1, body)
+      expect(res.status, JSON.stringify(res.body)).toBe(409)
+      expect(res.body.error).toBe("conflict_retry")
+    } finally {
+      restore()
+    }
+    expect(fake.db.project_subcontracts!.find((s) => s.id === SA1)!.vendor_id).toBe(VB)
+  })
 })

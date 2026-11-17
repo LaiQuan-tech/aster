@@ -786,6 +786,19 @@ subcontractsRouter.put(
         // #3：副委託結構變動（期款金額重算等）後，順手重算未發放的獎金批次（best-effort；已付的副委託本來就刪不掉，成本多半不變）。
         await recomputeBonusRunsBestEffort(tenantId, [projectId], "PUT /projects/:id/subcontracts")
       }
+      /** 併發重確認：這筆副委託（未刪除）現在綁的廠商是否已不是讀到時的那家（含從未綁變已綁）。 */
+      const rowBindingChanged = async (id: string, readVendorId: string | null): Promise<boolean> => {
+        const { data } = await supabaseAdmin
+          .from("project_subcontracts")
+          .select("id, vendor_id")
+          .eq("tenant_id", tenantId)
+          .eq("id", id)
+          .is("deleted_at", null)
+          .maybeSingle()
+        if (!data) return false
+        const now = ((data as { vendor_id?: string | null }).vendor_id ?? null)?.toLowerCase() ?? null
+        return now !== (readVendorId?.toLowerCase() ?? null)
+      }
       /** 併發重確認：這筆副委託現在是不是「未刪除且已綁定名冊廠商」。 */
       const rowNowBound = async (id: string): Promise<boolean> => {
         const { data } = await supabaseAdmin
@@ -871,18 +884,22 @@ subcontractsRouter.put(
             // 驗收：非老闆改「讀到時未綁定」的列的廠商欄（含送 vendorId: null）→ 寫入條件再確認仍未綁定；
             // 讀完到寫入之間被別人綁上 → 0 列 → 409 conflict_retry（不把剛綁上的廠商洗掉）。
             const recheckUnbound = !actorIsBoss && p.vendorId !== undefined && !prev?.vendor_id
+            // 驗收：非老闆存檔帶 vendorId 的「讀到時已綁定」列（綁定沒變，前面已擋改綁）→ 寫入條件再確認仍綁同一家；
+            // 讀完到寫入之間老闆改綁了 → 0 列 → 409 conflict_retry（不把老闆的改綁蓋回）。
+            const recheckSameBinding = !actorIsBoss && p.vendorId !== undefined && !!prev?.vendor_id
             let updQ = supabaseAdmin
               .from("project_subcontracts")
               .update(fields)
               .eq("tenant_id", tenantId)
               .eq("id", p.id)
             if (recheckUnbound) updQ = updQ.is("vendor_id", null)
+            if (recheckSameBinding) updQ = updQ.eq("vendor_id", prev!.vendor_id!)
             const { data: updated, error } = await updQ
               // 讀到之後這筆副委託（或整個專案）被刪除：不把發票／代扣寫進已刪除的列（2026-11-12 驗收）→ 404。
               .is("deleted_at", null)
               .select("id")
             if (error) throw new Error(`PUT /projects/${projectId}/subcontracts (update): ${error.message}`)
-            if ((!updated || updated.length === 0) && recheckUnbound && (await rowNowBound(p.id))) {
+            if ((!updated || updated.length === 0) && (recheckUnbound || recheckSameBinding) && (await rowBindingChanged(p.id, prev?.vendor_id ?? null))) {
               const n = writeCount()
               await finishPartial()
               res.status(409).json({ error: "conflict_retry", id: p.id, savedCount: n, message: "這筆副委託剛被綁定名冊廠商，沒有儲存這一列；請重新整理後再試" })

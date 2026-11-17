@@ -745,6 +745,7 @@ export const SUBCONTRACT_ERRORS: Record<string, string> = {
   rebind_reason_required: "副委託改綁另一家名冊廠商（或解除名冊綁定），請填寫原因。",
   rebind_requires_boss: "這筆副委託已綁定名冊廠商，解除或改綁（改變收款對象）只限老闆或平台管理員操作。",
   subcontract_delete_requires_boss: "這筆副委託已綁定名冊廠商，刪除只限老闆或平台管理員操作。",
+  conflict_retry: "這筆副委託在你編輯期間被其他人改了綁定的名冊廠商，這次沒有儲存；請重新整理後再試。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_contract: "選到的合約不屬於本專案或已作廢。",
   invalid_company: "選到的公司主體不存在。",
@@ -774,6 +775,12 @@ export function humanizeSubcontractError(err: unknown, fallback: string): string
   const similar = similarNameErrorText(err)
   if (similar) return similar
   if (msg.includes("rebind_reason_required") && typeof server === "string" && server.trim()) return server
+  // 2026-11-17 S2 擴大：權限與併發錯誤優先顯示後端說明（含「前面 N 筆已儲存」等細節）。
+  if (
+    (msg.includes("conflict_retry") || msg.includes("rebind_requires_boss") || msg.includes("subcontract_delete_requires_boss")) &&
+    typeof server === "string" &&
+    server.trim()
+  ) return server
   if (msg.includes("invalid_subcontract_vendor_name")) return invalidSubcontractVendorNameText(err)
   for (const [code, text] of Object.entries(SUBCONTRACT_ERRORS)) {
     if (msg.includes(code)) return text

@@ -843,8 +843,11 @@ export async function serializeMany(tenantId: string, rows: DisbursementRow[]): 
  * 驗收 S2：「其他」（手動帳戶）收款單分攤到的副委託曾經解除或改綁名冊廠商（project_subcontracts 稽核帶 rebindReason）→ 紅框：
  * 這是「解除綁定後改用其他收款繞過名冊帳戶確認」的樣態，請核准人確認收款對象。查詢失敗不擋顯示（記 log）。
  */
-/** S2 擴大紅框（刪除類條件）只計入這天之後的刪除（本功能上線日；更早的刪除不回溯，避免既有專案永久紅框）。 */
-export const S2_DELETE_WARN_SINCE = "2026-11-18T00:00:00+08:00"
+/**
+ * S2 擴大紅框（刪除類條件）只計入這天之後的刪除（更早的刪除不回溯，避免既有專案永久紅框）。
+ * 驗收：提前到 2026-11-01，涵蓋本功能上線前的空窗。不設上限（草稿可換分攤，不能用放款單建立時間截斷）。
+ */
+export const S2_DELETE_WARN_SINCE = "2026-11-01T00:00:00+08:00"
 
 async function attachRebindWarning(tenantId: string, items: SerializedDisbursement[]): Promise<void> {
   const targets = items.filter((d) => d.payeeKind === "other" && d.allocations.length > 0)
@@ -887,7 +890,7 @@ async function attachRebindWarning(tenantId: string, items: SerializedDisburseme
             .eq("table_name", "project_subcontracts")
             .in("record_id", chunk)
             .not("new_row->>rebindReason", "is", null) // 只撈有改綁原因的稽核列
-            .order("record_id")
+            .order("id") // 唯一排序，分頁不漏不重
             .range(from, to),
         "attachRebindWarning (audit)",
       )
@@ -918,8 +921,7 @@ async function attachRebindWarning(tenantId: string, items: SerializedDisburseme
     const subById = new Map(projectSubs.map((x) => [x.id.toLowerCase(), x]))
 
     for (const d of targets) {
-      const createdAt = Date.parse(d.createdAt)
-      const inWindow = (t: number) => t >= since && (Number.isNaN(createdAt) || t < createdAt)
+      const inWindow = (t: number) => !Number.isNaN(t) && t >= since
       const projects = new Set(d.allocations.map((a) => a.projectId?.toLowerCase()).filter((v): v is string => !!v))
       const hit = d.allocations.map((a) => a.subcontractId).filter((v): v is string => !!v && rebound.has(v.toLowerCase()))
       if (hit.length > 0) {

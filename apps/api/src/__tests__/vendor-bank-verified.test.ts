@@ -611,7 +611,7 @@ describe("驗收第六輪：harness 情境 a–i（後端）", () => {
   })
 })
 
-describe("2026-11-17 S2 擴大驗收：其他收款單紅框（刪除類條件，只計上線日之後、放款單建立之前的刪除）", () => {
+describe("2026-11-17 S2 擴大驗收：其他收款單紅框（刪除類條件，只計 S2_DELETE_WARN_SINCE＝2026-11-01 之後的刪除，不設上限）", () => {
   const DEL_SUB = "dddddddd-0000-4000-8000-0000000000d9"
   const after = "2026-11-19T02:00:00.000Z"
   const created = "2026-11-20T02:00:00.000Z"
@@ -628,13 +628,15 @@ describe("2026-11-17 S2 擴大驗收：其他收款單紅框（刪除類條件�
   const warning = async () => (await as("hr-user", request(app).get("/disbursements/pending-approvals"))).body.disbursements[0].payeeRebindWarning
   const deletedSub = (over: Row = {}): Row => ({ id: DEL_SUB, tenant_id: TENANT_ID, project_id: PROJECT, deleted_at: after, kind: "subcontract", amount: "100", vendor_id: VENDOR_A, vendor_name: "測試甲工程行", created_at: "2026-01-01T00:00:00.000Z", ...over })
 
-  it("(c) 同專案已刪除、刪除時有綁廠商的副委託 → 紅框；上線日前刪除或放款單建立後才刪 → 不標", async () => {
+  it("(c) 同專案已刪除、刪除時有綁廠商的副委託 → 紅框；放款單建立後才刪也標（草稿可換分攤）；2026-11-01 前刪除 → 不標", async () => {
     setup()
     fake.db.project_subcontracts!.push(deletedSub())
     expect((await warning())?.message).toContain("曾刪除過綁定名冊廠商的副委託")
-    fake.db.project_subcontracts![1]!.deleted_at = "2026-11-10T00:00:00.000Z"
-    expect(await warning()).toBeUndefined()
-    fake.db.project_subcontracts![1]!.deleted_at = "2026-11-21T00:00:00.000Z"
+    fake.db.project_subcontracts![1]!.deleted_at = "2026-11-21T00:00:00.000Z" // 晚於放款單建立
+    expect((await warning())?.message).toContain("曾刪除過綁定名冊廠商的副委託")
+    fake.db.project_subcontracts![1]!.deleted_at = "2026-11-10T00:00:00.000Z" // 今天上線前的空窗也算
+    expect((await warning())?.message).toContain("曾刪除過綁定名冊廠商的副委託")
+    fake.db.project_subcontracts![1]!.deleted_at = "2026-10-20T00:00:00.000Z"
     expect(await warning()).toBeUndefined()
   })
   it("(c) 已刪除副委託刪除時沒綁、但稽核顯示曾綁過（rebindReason）→ 紅框", async () => {
@@ -649,7 +651,7 @@ describe("2026-11-17 S2 擴大驗收：其他收款單紅框（刪除類條件�
     fake.db.project_subcontracts!.push({ ...deletedSub({ id: "dddddddd-0000-4000-8000-0000000000d8", deleted_at: null }) })
     fake.db.vendors![0]!.deleted_at = after
     expect((await warning())?.message).toContain("已刪除的名冊廠商")
-    fake.db.vendors![0]!.deleted_at = "2026-11-10T00:00:00.000Z"
+    fake.db.vendors![0]!.deleted_at = "2026-10-20T00:00:00.000Z" // 2026-11-01 之前
     expect(await warning()).toBeUndefined()
   })
   it("(b) 分攤的副委託名稱與已刪除廠商名稱 exact 相同（只差空白／全形）→ 紅框", async () => {
