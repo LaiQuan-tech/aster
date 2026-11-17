@@ -1,4 +1,5 @@
 import { dayFlagsOf } from "./day-flags.js"
+import { loadNhiDependentsOverrides, resolveNhiDependents } from "./nhi-dependents-count.js"
 import {
   computePayslip,
   parseRuleConfig,
@@ -367,7 +368,7 @@ export interface PayrollInputs {
   salaryByEmployee: Map<string, SalaryRow>
   /** 假別 code → deduct rate. */
   deductRateByCode: Map<string, number>
-  /** 健保眷屬人數（僅 insured=true）。 */
+  /** 健保眷屬人數：有直接輸入值（employees.nhi_dependents_override）用它，否則明細 insured=true 的筆數。 */
   dependentsByEmployee: Map<string, number>
   /** 本期加在實發的非所得項：已核銷實報實銷 ＋ 預支差額為正（公司補給員工）。 */
   expensesByEmployee: Map<string, number>
@@ -453,9 +454,17 @@ export async function loadPayrollInputs(
     .in("employee_id", scopeIds)
     .eq("insured", true)
   if (depErr) throw new Error(`loadPayrollInputs (nhi_dependents): ${depErr.message}`)
-  const dependentsByEmployee = new Map<string, number>()
+  const detailCountByEmployee = new Map<string, number>()
   for (const row of (depData ?? []) as Array<{ employee_id: string }>) {
-    dependentsByEmployee.set(row.employee_id, (dependentsByEmployee.get(row.employee_id) ?? 0) + 1)
+    detailCountByEmployee.set(row.employee_id, (detailCountByEmployee.get(row.employee_id) ?? 0) + 1)
+  }
+  // 2026-11-17 直接輸入的眷屬人數（employees.nhi_dependents_override）：有填以此為準，沒填沿用明細筆數
+  // （services/nhi-dependents-count.ts；migration 0108 未套用 → 只看明細）。試算與薪資執行都經這裡，健保欄一致。
+  const overrideByEmployee = await loadNhiDependentsOverrides(tenantId, scopeIds)
+  const dependentsByEmployee = new Map<string, number>()
+  for (const id of new Set([...detailCountByEmployee.keys(), ...overrideByEmployee.keys()])) {
+    const n = resolveNhiDependents(overrideByEmployee.get(id), detailCountByEmployee.get(id) ?? 0)
+    if (n > 0) dependentsByEmployee.set(id, n)
   }
 
   // --- 本期已核銷的報銷單（模組三第 1 條）---------------------------------

@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, date, timestamp, boolean, jsonb, uniqueIndex, index,
+  pgTable, uuid, text, date, timestamp, boolean, jsonb, smallint, uniqueIndex, index,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
@@ -48,6 +48,11 @@ export const employees = pgTable(
      * NULL＝未指派（另列、不分攤）。公司被刪 → SET NULL。API 寫入前驗證同租戶。
      */
     companyId: uuid("company_id").references(() => companies.id, { onDelete: "set null" }),
+    /**
+     * 2026-11-17 健保眷屬人數「直接輸入」（migration 0108，CHECK 0–10）：NULL＝沿用 nhi_dependents 投保中筆數；
+     * 有值以此為準（apps/api services/nhi-dependents-count.ts）。計費上限 3 口由 @hr/rules nhiEmployeePremium 裁切。
+     */
+    nhiDependentsOverride: smallint("nhi_dependents_override"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

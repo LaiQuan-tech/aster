@@ -11,6 +11,14 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { insertSalaryAdjustments, type SalaryAdjustmentInput } from "../services/imports/writers.js"
+import { resolveSelf } from "../middleware/scope.js"
+import { writeAuditLog } from "../services/audit.js"
+import { isMissingColumnError } from "../lib/schema-compat.js"
+import {
+  NHI_DEPENDENTS_OVERRIDE_MAX,
+  NHI_DEPENDENTS_OVERRIDE_MIN,
+  resolveNhiDependents,
+} from "../services/nhi-dependents-count.js"
 
 export const payrollTaxRouter = Router()
 
@@ -138,6 +146,143 @@ hrCrud({
     return p
   },
 })
+
+/* ---- 健保眷屬人數「直接輸入」nhi-dependents-count（2026-11-17，migration 0108）----
+ * GET  /nhi-dependents-count/:employeeId → { override, detailCount, effective, billable, available }
+ * PUT  /nhi-dependents-count/:employeeId { count: 0–10 | null } → 寫 employees.nhi_dependents_override（null＝清除，回到明細筆數）
+ * 權限同眷屬明細（requireHrAdmin）；PUT 寫 audit_logs。計算採用規則見 services/nhi-dependents-count.ts。 */
+const NHI_BILLABLE_MAX = 3
+const nhiCountBody = z.object({
+  count: z
+    .number()
+    .int()
+    .min(NHI_DEPENDENTS_OVERRIDE_MIN)
+    .max(NHI_DEPENDENTS_OVERRIDE_MAX)
+    .nullable(),
+})
+
+async function nhiCountView(tenantId: string, employeeId: string, override: number | null) {
+  const { data, error } = await supabaseAdmin
+    .from("nhi_dependents")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .eq("insured", true)
+  if (error) throw new Error(`nhi-dependents-count (detail): ${error.message}`)
+  const detailCount = (data ?? []).length
+  const effective = resolveNhiDependents(override, detailCount)
+  return { override, detailCount, effective, billable: Math.min(effective, NHI_BILLABLE_MAX) }
+}
+
+payrollTaxRouter.get(
+  "/nhi-dependents-count/:employeeId",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req, res, next) => {
+    const tenantId = res.locals.tenantId as string
+    const employeeId = String(req.params.employeeId)
+    if (!z.string().uuid().safeParse(employeeId).success) return res.status(400).json({ error: "invalid_employee_id" })
+    try {
+      let available = true
+      let override: number | null = null
+      const { data, error } = await supabaseAdmin
+        .from("employees")
+        .select("id, nhi_dependents_override")
+        .eq("tenant_id", tenantId)
+        .eq("id", employeeId)
+        .maybeSingle()
+      if (error) {
+        if (!isMissingColumnError(error)) return next(new Error(`GET /nhi-dependents-count: ${error.message}`))
+        available = false
+        const { data: emp, error: empErr } = await supabaseAdmin
+          .from("employees")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .eq("id", employeeId)
+          .maybeSingle()
+        if (empErr) return next(new Error(`GET /nhi-dependents-count: ${empErr.message}`))
+        if (!emp) return res.status(404).json({ error: "not_found" })
+      } else {
+        if (!data) return res.status(404).json({ error: "not_found" })
+        const raw = (data as { nhi_dependents_override: number | string | null }).nhi_dependents_override
+        override = raw == null ? null : Number(raw)
+      }
+      res.status(200).json({ ...(await nhiCountView(tenantId, employeeId, override)), available })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+payrollTaxRouter.put(
+  "/nhi-dependents-count/:employeeId",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req, res, next) => {
+    const tenantId = res.locals.tenantId as string
+    const employeeId = String(req.params.employeeId)
+    if (!z.string().uuid().safeParse(employeeId).success) return res.status(400).json({ error: "invalid_employee_id" })
+    const parsed = nhiCountBody.safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+    const next_ = parsed.data.count
+    try {
+      const { data: before, error: beforeErr } = await supabaseAdmin
+        .from("employees")
+        .select("id, nhi_dependents_override")
+        .eq("tenant_id", tenantId)
+        .eq("id", employeeId)
+        .maybeSingle()
+      if (beforeErr) {
+        if (isMissingColumnError(beforeErr)) {
+          return res
+            .status(503)
+            .json({ error: "nhi_dependents_override_unavailable", message: "眷屬人數欄位尚未套用（migration 0108）" })
+        }
+        return next(new Error(`PUT /nhi-dependents-count (read): ${beforeErr.message}`))
+      }
+      if (!before) return res.status(404).json({ error: "not_found" })
+      const rawBefore = (before as { nhi_dependents_override: number | string | null }).nhi_dependents_override
+      const prev = rawBefore == null ? null : Number(rawBefore)
+
+      const { data, error } = await supabaseAdmin
+        .from("employees")
+        .update({ nhi_dependents_override: next_ })
+        .eq("tenant_id", tenantId)
+        .eq("id", employeeId)
+        .select("id")
+        .maybeSingle()
+      if (error) {
+        if (isMissingColumnError(error)) {
+          return res
+            .status(503)
+            .json({ error: "nhi_dependents_override_unavailable", message: "眷屬人數欄位尚未套用（migration 0108）" })
+        }
+        return next(new Error(`PUT /nhi-dependents-count: ${error.message}`))
+      }
+      if (!data) return res.status(404).json({ error: "not_found" })
+
+      if (prev !== next_) {
+        const userId = req.auth?.userId
+        const self = userId ? await resolveSelf(tenantId, userId) : null
+        await writeAuditLog({
+          tenantId,
+          tableName: "employees",
+          recordId: employeeId,
+          action: "UPDATE",
+          oldRow: { nhi_dependents_override: prev },
+          newRow: { nhi_dependents_override: next_ },
+          actorEmpId: self?.id ?? null,
+          context: "PUT /nhi-dependents-count/:employeeId — 健保眷屬人數直接輸入",
+        })
+      }
+      res.status(200).json({ ...(await nhiCountView(tenantId, employeeId, next_)), available: true })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
 
 /* ---- 所得稅扶養親屬 income-tax-dependents ---- */
 hrCrud({
