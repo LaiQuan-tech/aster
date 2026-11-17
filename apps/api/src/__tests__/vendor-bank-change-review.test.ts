@@ -38,7 +38,6 @@ const EMP = {
   hrInactive: "bbbbbbbb-0000-4000-8000-0000000000a6",
 }
 const unpaid = () => [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, amount: "1000", override_amount: null, paid_on: null }]
-const OPEN = ["draft", "pending_approval", "approved"]
 
 /** 模擬 DB 函式 decide_vendor_bank_change（真函式已在本機 Postgres 驗過，見回報）。 */
 function installDecideRpc() {
@@ -52,13 +51,15 @@ function installDecideRpc() {
       if (r.requested_by_emp_id === args.p_actor_emp_id) return { data: null, error: { message: "vendor_bank_change_self_review" } }
       const v = (fake.db.vendors ?? []).find((x) => x.id === r.vendor_id && !x.deleted_at)
       if (!v) return { data: null, error: { message: "vendor_not_found" } }
-      if ((fake.db.disbursements ?? []).some((d) => d.vendor_id === r.vendor_id && OPEN.includes(d.status))) {
+      if ((fake.db.disbursements ?? []).some((d) => d.vendor_id === r.vendor_id && ["pending_approval", "approved"].includes(d.status))) {
         return { data: null, error: { message: "vendor_has_open_disbursements" } }
       }
       const same = (["bank_code", "bank_name", "bank_account", "account_holder"] as const).every((c) => (v[c] ?? null) === (r[`old_${c}`] ?? null))
       if (!same) return { data: null, error: { message: "vendor_bank_change_stale" } }
       for (const c of ["bank_code", "bank_name", "bank_account", "account_holder"]) v[c] = r[`new_${c}`]
       v.bank_changed_at = new Date().toISOString()
+      v.bank_verified_at = v.bank_changed_at
+      v.bank_verified_by = args.p_actor_emp_id
       status = "approved"
     }
     r.status = status
@@ -100,8 +101,12 @@ async function requestChange(token = "hr1-user", account = "0000000000002") {
 }
 
 describe("末 4 碼遮罩", () => {
-  it("maskBankAccount：只露末 4 碼、戶名裡的數字不混入", () => {
+  it("maskBankAccount：只露末 4 碼、戶名裡的數字不混入（驗收 A：戶名開頭是數字）", () => {
     expect(maskBankAccount("0000-0000-1234 測試戶名2號")).toBe("****1234")
+    expect(maskBankAccount("0001234567890 104人力銀行")).toBe("****7890")
+    expect(maskBankAccount("0001234567890 104人力銀行", "104人力銀行")).toBe("****7890")
+    expect(maskBankAccount("0000 1111 2222 3M台灣", "3M台灣")).toBe("****2222")
+    expect(maskBankAccount("0000111222 3M台灣")).toBe("****1222")
     expect(maskBankAccount("0000000005678")).toBe("****5678")
     expect(maskBankAccount("")).toBeNull()
     expect(maskBankAccount(null)).toBeNull()
@@ -121,9 +126,9 @@ describe("末 4 碼遮罩", () => {
       { ...base, id: "d-other", payee_kind: "other", vendor_id: null, payee_bank_account: "1111-2222-3333" },
     ] as unknown as DisbursementRow[]
     const [v, o] = await serializeMany(TENANT_ID, rows)
-    expect(v).toMatchObject({ payeeAccountMasked: "****0001", payeeAccountSource: "roster", vendorBankChangePending: true })
+    expect(v).toMatchObject({ payeeAccountMasked: "****0001", payeeAccountSource: "roster", vendorBankChangePending: true, payeeAccountHolder: "測試丙廠商" })
     expect(v!.payeeBankChangedAt).toBe(vendor().bank_changed_at)
-    expect(o).toMatchObject({ payeeAccountMasked: "****3333", payeeAccountSource: "manual" })
+    expect(o).toMatchObject({ payeeAccountMasked: "****3333", payeeAccountSource: "manual", payeeAccountHolder: null })
     // 超過 30 天不帶警示。
     vendor().bank_changed_at = new Date(Date.now() - 31 * 86_400_000).toISOString()
     resetColumnProbeCache()
@@ -142,34 +147,51 @@ describe("名冊改帳戶：有未付期款 → 送覆核", () => {
     expect(requests()).toHaveLength(1)
     expect(requests()[0]).toMatchObject({ vendor_id: VENDOR, requested_by_emp_id: EMP.hr1, old_bank_account: "0000000000001", new_bank_account: "0000000000002", new_bank_code: "000", status: "pending" })
     const notified = (fake.db.notifications ?? []).map((n) => n.employee_id)
+    // 驗收 C：非後台角色的設定老闆收到的連結是 ESS（recipientRole ess），HR 是後台（admin）。
+    expect((fake.db.notifications ?? []).find((n) => n.employee_id === EMP.boss.toLowerCase())!.payload).toMatchObject({ recipientRole: "ess", event: "submitted" })
+    expect((fake.db.notifications ?? []).find((n) => n.employee_id === EMP.hr2.toLowerCase())!.payload).toMatchObject({ recipientRole: "admin" })
     expect(notified).toEqual(expect.arrayContaining([EMP.boss.toLowerCase(), EMP.hr2.toLowerCase()]))
     expect(notified).not.toContain(EMP.hr1.toLowerCase())
     expect(notified).not.toContain(EMP.hrInactive.toLowerCase())
     expect(JSON.stringify(fake.db.notifications)).not.toContain("0000000000002")
   })
 
-  it("無未付 → 200 直接改並記 bank_changed_at；不建申請", async () => {
+  it("驗收 H1：無未付也不能直接改 → 沒原因 400；有原因 202 送覆核、名冊不改", async () => {
+    const noReason = await as("hr1-user", request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002" })
+    expect(noReason.status).toBe(400)
+    expect(noReason.body.error).toBe("change_reason_required")
     const res = await requestChange()
-    expect(res.status).toBe(200)
-    expect(vendor().bank_account).toBe("0000000000002")
-    expect(vendor().bank_changed_at).toBeTruthy()
-    expect(requests()).toHaveLength(0)
+    expect(res.status).toBe(202)
+    expect(vendor().bank_account).toBe("0000000000001")
+    expect(requests()).toHaveLength(1)
   })
 
-  it("第一次補帳號（原本空白）：有未付 → 也送覆核（不需原因）；無未付 → 直接改", async () => {
+  it("第一次補帳號（原本空白）：有無未付都送覆核、不需原因", async () => {
     Object.assign(vendor(), { bank_code: null, bank_name: null, bank_account: null })
-    fake.db.project_subcontract_payments = unpaid()
-    const r1 = await as("acct-user", request(app).patch(`/vendors/${VENDOR}`)).send({ bankCode: "000", bankName: "測試銀行", bankAccount: "0000000000009" })
-    expect(r1.status).toBe(202)
-    expect(vendor().bank_account).toBeNull()
-    fake.db.project_subcontract_payments = []
-    fake.db.vendor_bank_change_requests = []
-    const r2 = await as("acct-user", request(app).patch(`/vendors/${VENDOR}`)).send({ bankCode: "000", bankName: "測試銀行", bankAccount: "0000000000009" })
-    expect(r2.status).toBe(200)
-    expect(vendor().bank_account).toBe("0000000000009")
+    for (const payments of [unpaid(), []]) {
+      fake.db.project_subcontract_payments = payments
+      fake.db.vendor_bank_change_requests = []
+      const r = await as("acct-user", request(app).patch(`/vendors/${VENDOR}`)).send({ bankCode: "000", bankName: "測試銀行", bankAccount: "0000000000009" })
+      expect(r.status).toBe(202)
+      expect(vendor().bank_account).toBeNull()
+    }
   })
 
-  it("同廠商第二筆 pending → 409 vendor_bank_change_pending（即使已無未付也不能繞過）", async () => {
+  it("驗收 H2：POST 新建廠商帶帳號 → 廠商照建但銀行欄位留空、未確認，另建待覆核", async () => {
+    const res = await as("acct-user", request(app).post("/vendors")).send({ name: "測試新建丁行", bankCode: "000", bankName: "測試銀行", bankAccount: "0000000000055", accountHolder: "測試新建丁行" })
+    expect(res.status).toBe(201)
+    expect(res.body.bankChangeRequested).toBe(true)
+    const created = fake.db.vendors!.find((v) => v.name === "測試新建丁行")!
+    expect(created.bank_account ?? null).toBeNull()
+    expect(created.bank_code ?? null).toBeNull()
+    expect(created.bank_verified_at).toBeNull()
+    expect(requests().find((r) => r.vendor_id === created.id)).toMatchObject({ status: "pending", old_bank_account: null, new_bank_account: "0000000000055" })
+    const approve = await as("hr2-user", request(app).post(`/vendor-bank-changes/${res.body.bankChangeRequest.id}/approve`)).send({})
+    expect(approve.status).toBe(200)
+    expect(fake.db.vendors!.find((v) => v.id === created.id)).toMatchObject({ bank_account: "0000000000055", bank_verified_by: EMP.hr2 })
+  })
+
+  it("同廠商第二筆 pending → 409 vendor_bank_change_pending", async () => {
     fake.db.project_subcontract_payments = unpaid()
     expect((await requestChange()).status).toBe(202)
     const again = await requestChange("acct-user", "0000000000003")
@@ -228,7 +250,7 @@ describe("覆核：誰能核准、核准套用、stale、退回", () => {
     expect(requests()[0]!.status).toBe("pending")
   })
 
-  it("另一位 HR 核准 → 套用到名冊、記 bank_changed_at、狀態 approved；列表給覆核者完整新舊帳號", async () => {
+  it("另一位 HR 核准 → 套用到名冊、記 bank_changed_at／bank_verified_at／by、狀態 approved；列表給覆核者完整新舊帳號", async () => {
     const id = await pendingId()
     const list = await as("hr2-user", request(app).get("/vendor-bank-changes"))
     expect(list.status).toBe(200)
@@ -238,6 +260,7 @@ describe("覆核：誰能核准、核准套用、stale、退回", () => {
     expect(res.body.status).toBe("approved")
     expect(vendor()).toMatchObject({ bank_account: "0000000000002" })
     expect(vendor().bank_changed_at).toBeTruthy()
+    expect(vendor()).toMatchObject({ bank_verified_by: EMP.hr2 })
     expect(requests()[0]).toMatchObject({ status: "approved", decided_by_emp_id: EMP.hr2 })
   })
 

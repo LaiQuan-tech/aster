@@ -63,6 +63,8 @@ export default function VendorDetailPage() {
   const [notFound, setNotFound] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** 2026-11-17 驗收 F：帳戶已送覆核的提示（資訊樣式，不佔錯誤欄、不擋儲存鈕；覆核處理後清除）。 */
+  const [bankInfo, setBankInfo] = useState<string | null>(null);
   const [cardPath, setCardPath] = useState<string | null>(null);
   const [cardPreview, setCardPreview] = useState<string | null>(null);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
@@ -184,7 +186,11 @@ export default function VendorDetailPage() {
       let bankChangeQueued = false;
       for (let attempt = 0; ; attempt++) {
         try {
-          if (isNew) createdId = (await createVendor({ ...body, ...extra })).vendor.id;
+          if (isNew) {
+            const r = await createVendor({ ...body, ...extra });
+            createdId = r.vendor.id;
+            bankChangeQueued = r.bankChangeRequested === true;
+          }
           else bankChangeQueued = (await updateVendor(id, { ...body, ...extra })).bankChangeRequested === true;
           break;
         } catch (err) {
@@ -200,7 +206,7 @@ export default function VendorDetailPage() {
             continue;
           }
           if (!isNew && !extra.changeReason && err instanceof Error && isChangeReasonRequired(err.message)) {
-            const reason = window.prompt("此廠商仍有未付期款，更改收款帳戶請填寫變更原因（會留稽核紀錄，並送老闆／HR 覆核後才生效）：")?.trim();
+            const reason = window.prompt("更改收款帳戶請填寫變更原因（會留稽核紀錄，並送老闆／HR 覆核後才生效）：")?.trim();
             if (!reason) {
               setSaveError("未填寫變更原因，收款帳戶沒有更改。");
               return;
@@ -212,7 +218,7 @@ export default function VendorDetailPage() {
         }
       }
       if (isNew && createdId) {
-        toast.show("已新增廠商", "success");
+        toast.show(bankChangeQueued ? "已新增廠商；收款帳戶已送老闆／HR 覆核，核准後才寫入名冊" : "已新增廠商", "success");
         leave(rosterDetailHref("vendors", createdId));
         return;
       }
@@ -220,7 +226,7 @@ export default function VendorDetailPage() {
         setReviewsKey((k) => k + 1);
         // 2026-11-17 雙人覆核：有未付期款 → 收款帳戶變更已送覆核（尚未生效），其他欄位已存。
         toast.show("已送覆核：收款帳戶變更需老闆／HR 核准後才生效（其他欄位已儲存）", "success");
-        setSaveError("收款帳戶變更已送覆核，核准前名冊仍是原帳戶；覆核進度見本頁上方或「放款簽核」頁。");
+        setBankInfo("收款帳戶變更已送覆核，核准前名冊仍是原帳戶；覆核進度見本頁上方或「放款簽核」頁。");
       } else {
         toast.show("已儲存", "success");
       }
@@ -306,7 +312,22 @@ export default function VendorDetailPage() {
   return (
     <>
       {/* 2026-11-17：這家廠商的收款帳戶變更待覆核（老闆／HR 可在此核准）。 */}
-      {!isNew && <VendorBankChangeReviews key={reviewsKey} vendorId={id} onChanged={() => void fetchVendor()} />}
+      {!isNew && (
+        <VendorBankChangeReviews
+          key={reviewsKey}
+          vendorId={id}
+          onChanged={() => {
+            setBankInfo(null);
+            void fetchVendor();
+          }}
+        />
+      )}
+      {bankInfo && (
+        <p role="status" className="mb-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+          ℹ {bankInfo}
+          <button type="button" className="ml-2 text-xs text-blue-600 underline" onClick={() => setBankInfo(null)}>知道了</button>
+        </p>
+      )}
       <RosterDetailHeader
         backHref={LIST_HREF}
         backLabel="返回廠商列表"

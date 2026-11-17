@@ -166,7 +166,8 @@ export function notificationLink(n: NotificationLinkInput): string | null {
       return "/ess/approvals"
     // 2026-11-17 廠商收款帳戶變更雙人覆核：送出 → 覆核者到放款簽核頁上方的待覆核區塊；結果 → 申請人回該廠商頁。
     case "vendor_bank_change_request": {
-      if (str(payload.event) === "submitted") return "/admin/disbursements/approvals"
+      // 送出 → 覆核者：後台角色（recipientRole admin，或舊通知沒帶）到後台放款簽核頁；其他（非後台角色的設定老闆）到 ESS 簽核頁。
+      if (str(payload.event) === "submitted") return role === "ess" ? "/ess/approvals" : "/admin/disbursements/approvals"
       const vendorId = str(payload.vendorId)
       return vendorId ? `/admin/vendors/${enc(vendorId)}` : "/admin/vendors"
     }

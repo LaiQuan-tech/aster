@@ -99,7 +99,7 @@ function BillingDisbursementsPage() {
     try {
       const [s, v, c, p, pay, list, rec] = await Promise.all([
         getDisbursementSummary(),
-        listVendors(),
+        listVendors(undefined, { bankVerified: true }),
         listCompanies(),
         listProjects(),
         getPayables(),

@@ -92,6 +92,8 @@ export interface Vendor {
   bankCode: string | null
   bankAccount: string | null
   accountHolder: string | null
+  /** 收款帳戶是否經老闆／HR 確認（0104）；只有 listVendors(…, { bankVerified: true }) 才帶。 */
+  bankVerified?: boolean
   hasCard: boolean
   source: "manual" | "card_ocr"
   createdAt: string
@@ -108,16 +110,21 @@ export type VendorInput = Partial<Omit<Vendor, "id" | "taxIdValid" | "hasCard" |
 export function vendorOptionLabel(v: Pick<Vendor, "name" | "shortName">): string {
   return v.shortName && v.shortName !== v.name ? `${v.shortName}（${v.name}）` : v.name
 }
-export function listVendors(q?: string) {
-  return apiFetch<{ vendors: Vendor[] }>(`/vendors${q ? `?q=${encodeURIComponent(q)}` : ""}`)
+export function listVendors(q?: string, opts: { bankVerified?: boolean } = {}) {
+  const qs = new URLSearchParams()
+  if (q) qs.set("q", q)
+  if (opts.bankVerified) qs.set("bankVerified", "1")
+  const s = qs.toString()
+  return apiFetch<{ vendors: Vendor[] }>(`/vendors${s ? `?${s}` : ""}`)
 }
 /** `confirmDistinctReason`：名稱與名冊廠商相近（409 vendor_name_similar）但確為不同公司的說明（第八輪，寫嚴格稽核）。 */
 export function createVendor(body: VendorInput & { confirmDistinctReason?: string }) {
-  return apiFetch<{ vendor: Vendor }>("/vendors", { method: "POST", body: JSON.stringify(body) })
+  // 2026-11-17：帶收款帳戶新建 → 廠商照建，帳戶送老闆／HR 覆核（bankChangeRequested）。
+  return apiFetch<{ vendor: Vendor; bankChangeRequested?: boolean; bankChangeError?: string; message?: string }>("/vendors", { method: "POST", body: JSON.stringify(body) })
 }
 /** `changeReason`：只有未付期款時改收款帳戶必填（後端寫稽核，2026-11-16 R2）。 */
 export function updateVendor(id: string, body: Partial<VendorInput> & { changeReason?: string; confirmDistinctReason?: string }) {
-  // 2026-11-17：有未付期款時改收款帳戶 → 202＋bankChangeRequested（送老闆／HR 覆核，帳戶尚未生效；其他欄位已存）。
+  // 2026-11-17：改收款帳戶一律 202＋bankChangeRequested（送老闆／HR 覆核，帳戶尚未生效；其他欄位已存）。
   return apiFetch<{ vendor: Vendor; bankChangeRequested?: boolean; bankChangeRequest?: { id: string; status: string }; message?: string }>(
     `/vendors/${id}`,
     { method: "PATCH", body: JSON.stringify(body) },

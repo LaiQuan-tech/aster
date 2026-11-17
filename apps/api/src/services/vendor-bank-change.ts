@@ -10,13 +10,15 @@ import { enqueue } from "./notify.js"
 /**
  * 廠商收款帳戶變更雙人覆核（2026-11-17 業主決定；packages/db migration 0103 ＝ sql/0093）。
  *
- * - 廠商有未付期款（services/vendor-unpaid.ts）時，名冊改帳戶（代碼／銀行名／帳號／戶名）不直接生效，
+ * - 名冊任何收款帳戶寫入（新建帶帳號、第一次補、改帳戶；不論有無未付款項——驗收 H1／H2 後改，0104）都不直接生效，
  *   改建一筆 vendor_bank_change_requests（status pending）；同一廠商同時只能一筆（partial unique index）。
- *   未匯款放款單照舊硬擋（routes/vendors.ts），不會走到這裡。
+ *   核准後才寫入名冊並設 bank_verified_at／by；放款收款對象是登錄廠商時，帳戶未確認 → 409 vendor_bank_unverified。
+ *   未匯款放款單照舊硬擋改帳戶（routes/vendors.ts）；核准時只擋送簽中／已核准的單（草稿送審時會被要求重新帶入名冊帳戶）。
  * - 覆核者：在職的老闆（lib/boss.ts isBossOrPlatformAdmin：設定的老闆或 platform_admin）或 HR（isHrRole），且不是申請人本人。
  * - 核准／退回／取消一律走 DB 函式 decide_vendor_bank_change（同一交易：鎖列、舊值樂觀檢查、套用、寫稽核）。
  * - 廠商有 pending 變更時，該廠商的放款單送審／核准／付款 409 vendor_bank_change_pending（services/disbursements.ts）。
  * - 0103 尚未套用（表不存在）：pending 查詢一律當「沒有」、建立申請回 409 migration_required（不會默默直接改帳戶）。
+ * - 申請／核准通知：後台角色連 /admin/disbursements/approvals、其他（非後台角色的設定老闆）連 /ess/approvals（payload.recipientRole）。
  */
 
 export const BANK_CHANGE_TABLE = "vendor_bank_change_requests"
@@ -65,15 +67,34 @@ export class BankChangeError extends Error {
   }
 }
 
-/** 帳號只露末 4 碼（取開頭帳號段的數字；沒有數字回「****」；空值回 null）。核准放款的畫面一律用這個，完整帳號不送到核准者前端。 */
-export function maskBankAccount(account: string | null | undefined): string | null {
-  if (account == null) return null
-  const raw = String(account).trim()
-  if (!raw) return null
-  // 放款單快照是「帳號 戶名」：只取開頭的帳號段（數字／空白／連字號），免得戶名裡的數字混進末 4 碼。
-  const lead = (raw.match(/^[\d\s\-－‐–—]+/)?.[0] ?? "").replace(/\D/g, "")
-  const digits = lead || raw.replace(/\D/g, "")
-  return `****${digits.slice(-4)}`
+/**
+ * 放款單快照「帳號 戶名」拆出帳號段：知道戶名且快照以「 戶名」結尾 → 去掉戶名；否則取第一個空白前的那一段
+ * （驗收 A：戶名開頭是數字時——「0001234567890 104人力銀行」——不可把 104 當成帳號）。
+ */
+export function accountSegment(account: string | null | undefined, holder?: string | null): string {
+  const raw = String(account ?? "").trim()
+  if (!raw) return ""
+  const h = (holder ?? "").trim()
+  if (h && raw.length > h.length && raw.endsWith(h) && /\s/.test(raw.charAt(raw.length - h.length - 1))) {
+    return raw.slice(0, raw.length - h.length).trim()
+  }
+  return raw.split(/\s+/)[0] ?? ""
+}
+
+/** 快照的戶名段（第一個空白之後）；沒有回 null。 */
+export function holderSegment(account: string | null | undefined): string | null {
+  const raw = String(account ?? "").trim()
+  const i = raw.search(/\s/)
+  if (i < 0) return null
+  const rest = raw.slice(i).trim()
+  return rest || null
+}
+
+/** 帳號只露末 4 碼（帳號段的數字；沒有數字回「****」；空值回 null）。核准放款的畫面一律用這個，完整帳號不送到核准者前端。 */
+export function maskBankAccount(account: string | null | undefined, holder?: string | null): string | null {
+  const seg = accountSegment(account, holder)
+  if (!seg) return null
+  return `****${seg.replace(/\D/g, "").slice(-4)}`
 }
 
 /** 表不存在（0103 未套）→ true 並記一次 log。 */
@@ -123,7 +144,7 @@ export async function canReviewBankChange(
 }
 
 /** 覆核通知收件人：老闆＋在職 platform_admin＋在職 hr_admin，排除申請人。 */
-async function reviewerRecipients(tenantId: string, requesterEmpId: string | null): Promise<string[]> {
+async function reviewerRecipients(tenantId: string, requesterEmpId: string | null): Promise<{ admin: string[]; ess: string[] }> {
   const boss = await loadConfiguredBossEmpId(tenantId).catch(() => null)
   const bossAndAdmins = await bossNotificationRecipients(tenantId, boss, [requesterEmpId])
   const { data, error } = await supabaseAdmin
@@ -134,12 +155,21 @@ async function reviewerRecipients(tenantId: string, requesterEmpId: string | nul
     .eq("status", "active")
   const hr = error ? [] : ((data ?? []) as Array<{ id: string }>).map((r) => r.id.toLowerCase())
   const skip = requesterEmpId?.toLowerCase()
-  return [...new Set([...bossAndAdmins, ...hr])].filter((id) => id !== skip)
+  const all = [...new Set([...bossAndAdmins, ...hr])].filter((id) => id !== skip)
+  if (all.length === 0) return { admin: [], ess: [] }
+  // 驗收 C：收件人是後台角色（HR／平台管理員）→ 連到後台放款簽核頁；其他（例如非後台角色的設定老闆）→ ESS 簽核頁。
+  const { data: roles } = await supabaseAdmin.from("employees").select("id, role").eq("tenant_id", tenantId).in("id", all)
+  const adminIds = new Set(
+    ((roles ?? []) as Array<{ id: string; role: string | null }>)
+      .filter((r) => r.role === "hr_admin" || r.role === "platform_admin")
+      .map((r) => r.id.toLowerCase()),
+  )
+  return { admin: all.filter((id) => adminIds.has(id)), ess: all.filter((id) => !adminIds.has(id)) }
 }
 
 /**
- * 建立待覆核申請（呼叫端已確認：帳戶有變、有未付期款、沒有未匯款放款單、名稱沒同時改）。
- * 先寫嚴格稽核（寫不進去就不建），再 insert；同廠商已有 pending → 409 vendor_bank_change_pending。
+ * 建立待覆核申請（2026-11-17 驗收後：名冊任何銀行欄位寫入都走這裡——新建帶帳號、第一次補、改帳戶；呼叫端已確認帳戶有變、
+ * 沒有未匯款放款單、名稱沒同時改）。同廠商已有 pending → 409 vendor_bank_change_pending。
  */
 export async function createBankChangeRequest(params: {
   tenantId: string
@@ -149,6 +179,7 @@ export async function createBankChangeRequest(params: {
   before: BankFields
   after: BankFields
   reason: string | null
+  context?: string
 }): Promise<BankChangeRow> {
   const { tenantId, vendorId } = params
   if (await vendorHasPendingBankChange(tenantId, vendorId)) {
@@ -171,36 +202,41 @@ export async function createBankChangeRequest(params: {
     reason: params.reason ? params.reason.slice(0, 500) : null,
     status: "pending",
   }
-  await writeAuditLogStrict({
-    tenantId,
-    tableName: BANK_CHANGE_TABLE,
-    recordId: id,
-    action: "INSERT",
-    oldRow: { vendor_id: vendorId, ...params.before },
-    newRow: { vendor_id: vendorId, ...params.after, status: "pending", reason: row.reason },
-    actorEmpId: params.requestedByEmpId,
-    context: "PATCH /vendors/:id 更改收款帳戶（有未付期款）→ 送雙人覆核",
-  })
   const { data, error } = await supabaseAdmin.from(BANK_CHANGE_TABLE).insert(row).select(COLS).single()
   if (error) {
     if (tableMissing(error)) {
-      throw new BankChangeError(409, "migration_required", { message: "帳戶變更覆核尚未套用資料庫更新（migration 0103），此廠商有未付期款，暫時不能改收款帳戶" })
+      throw new BankChangeError(409, "migration_required", { message: "帳戶變更覆核尚未套用資料庫更新（migration 0103／0104），暫時不能改收款帳戶" })
     }
     if (error.code === "23505") {
       throw new BankChangeError(409, "vendor_bank_change_pending", { message: "此廠商已有一筆收款帳戶變更待覆核，請等覆核完成或取消後再改" })
     }
     throw new Error(`createBankChangeRequest: ${error.message}`)
   }
+  // 驗收 D：申請 insert 成功後才寫嚴格稽核（不留「有稽核沒申請」）；稽核寫不進去 → 刪掉這筆申請再丟錯（不留「有申請沒稽核」）。
+  try {
+    await writeAuditLogStrict({
+      tenantId,
+      tableName: BANK_CHANGE_TABLE,
+      recordId: id,
+      action: "INSERT",
+      oldRow: { vendor_id: vendorId, ...params.before },
+      newRow: { vendor_id: vendorId, ...params.after, status: "pending", reason: row.reason },
+      actorEmpId: params.requestedByEmpId,
+      context: params.context ?? "PATCH /vendors/:id 更改收款帳戶 → 送雙人覆核",
+    })
+  } catch (err) {
+    const { error: delErr } = await supabaseAdmin.from(BANK_CHANGE_TABLE).delete().eq("tenant_id", tenantId).eq("id", id)
+    if (delErr) logger.error({ err: delErr.message, tenantId, requestId: id }, "vendor bank change: audit failed and rollback delete failed")
+    throw err
+  }
   try {
     const recipients = await reviewerRecipients(tenantId, params.requestedByEmpId)
-    await enqueue({
-      tenantId,
-      employeeIds: recipients,
-      type: "vendor_bank_change_request",
-      title: `待覆核：廠商收款帳戶變更（${params.vendorName}）`,
-      body: `新帳號 ${maskBankAccount(params.after.bank_account) ?? "—"}${params.reason ? `\n原因：${params.reason}` : ""}`,
-      payload: { requestId: id, vendorId, event: "submitted" },
-    })
+    const title = `待覆核：廠商收款帳戶${params.before.bank_account ? "變更" : "登錄"}（${params.vendorName}）`
+    const body = `新帳號 ${maskBankAccount(params.after.bank_account) ?? "—"}${params.reason ? `\n原因：${params.reason}` : ""}`
+    for (const [ids, recipientRole] of [[recipients.admin, "admin"], [recipients.ess, "ess"]] as const) {
+      if (ids.length === 0) continue
+      await enqueue({ tenantId, employeeIds: ids, type: "vendor_bank_change_request", title, body, payload: { requestId: id, vendorId, event: "submitted", recipientRole } })
+    }
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : String(err), tenantId }, "vendor bank change: notify reviewers failed")
   }
@@ -351,7 +387,7 @@ export async function decideBankChange(params: {
         type: "vendor_bank_change_request",
         title: out.status === "approved" ? "廠商收款帳戶變更已核准生效" : out.status === "rejected" ? "廠商收款帳戶變更被退回" : "廠商收款帳戶變更已取消",
         body: note ? `說明：${note}` : null,
-        payload: { requestId, vendorId: out.vendor_id ?? null, event: out.status },
+        payload: { requestId, vendorId: out.vendor_id ?? null, event: out.status, recipientRole: "admin" },
       })
     }
   } catch (err) {

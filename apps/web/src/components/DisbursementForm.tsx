@@ -509,6 +509,12 @@ export default function DisbursementForm({
           <label className={labelCls}>收款帳號</label>
           <input className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`} value={state.payeeBankAccount} onChange={(e) => set("payeeBankAccount", e.target.value)} readOnly={state.payeeKind === "vendor"} />
         </div>
+        {/* 2026-11-17：名冊帳戶尚未經老闆／HR 確認（或變更待覆核）→ 可以存草稿，但送審／核准／付款會被擋。 */}
+        {selectedVendor && selectedVendor.bankVerified === false && (
+          <div className="col-span-full rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800" role="alert">
+            此廠商帳戶尚待確認，無法送審（需老闆／HR 在廠商名冊核准收款帳戶後才能送審、核准或付款）。
+          </div>
+        )}
         {bankDiffersFromRoster && (
           <div className="col-span-full rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800" role="alert">
             <p>這張單上的收款帳戶與廠商名冊目前的帳戶不同（可能是開單後名冊有更新）。</p>

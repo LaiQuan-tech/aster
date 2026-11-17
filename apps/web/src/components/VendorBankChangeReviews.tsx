@@ -18,6 +18,10 @@ const ERR: Record<string, string> = {
   vendor_has_open_disbursements: "此廠商仍有未匯款的放款單，請先作廢或匯款後再核准帳戶變更。",
   vendor_bank_change_not_pending: "這筆帳戶變更已處理過。",
   decision_note_required: "退回請填寫理由。",
+  vendor_not_found: "找不到這家廠商（可能已刪除）。",
+  vendor_bank_change_not_found: "找不到這筆帳戶變更申請。",
+  vendor_bank_unverified: "此廠商的收款帳戶尚未經老闆／HR 確認。",
+  forbidden: "沒有權限處理這筆帳戶變更（取消限申請人本人或 HR）。",
 };
 function humanize(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback;
@@ -86,7 +90,7 @@ export function VendorBankChangeReviews({ vendorId, onChanged }: { vendorId?: st
   return (
     <Card className="mb-4 border-amber-300">
       <h2 className="mb-2 text-sm font-semibold text-amber-800">廠商收款帳戶變更待覆核（{rows.length}）</h2>
-      <p className="mb-3 text-xs text-gray-500">廠商仍有未付款項時改收款帳戶，需老闆或 HR（不能是申請人本人）核准後才生效；覆核期間該廠商的放款單不能送審、核准或付款。</p>
+      <p className="mb-3 text-xs text-gray-500">名冊收款帳戶的新增或變更，需老闆或 HR（不能是申請人本人）核准後才生效；覆核期間與核准前，該廠商的放款單不能送審、核准或付款。</p>
       {error && <div className="mb-2"><ErrorText>{error}</ErrorText></div>}
       {msg && <p className="mb-2 text-sm text-green-700">{msg}</p>}
       <ul className="space-y-3">
@@ -95,7 +99,7 @@ export function VendorBankChangeReviews({ vendorId, onChanged }: { vendorId?: st
             <p className="text-sm font-medium text-gray-900">{r.vendorName ?? "（廠商）"}</p>
             <p className="mb-2 text-xs text-gray-500">
               申請人：{r.requestedByName ?? "—"} · {taipeiDate(r.createdAt)}
-              {r.reason ? ` · 原因：${r.reason}` : " · （第一次填寫帳戶，未填原因）"}
+              {r.reason ? ` · 原因：${r.reason}` : " · （第一次登錄帳戶，免填原因）"}
             </p>
             <div className="grid gap-2 sm:grid-cols-2">
               <BankBlock label="目前（舊）" b={r.old} />

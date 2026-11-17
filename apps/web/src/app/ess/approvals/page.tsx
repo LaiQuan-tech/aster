@@ -1,5 +1,6 @@
 "use client";
 
+import { VendorBankChangeReviews } from "@/components/VendorBankChangeReviews";
 import { PayeeAccountInfo } from "@/components/PayeeAccountInfo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -869,6 +870,8 @@ export default function ApprovalsPage() {
 
       {/* 遲到說明（2026-10-11）：主管看部屬的（唯讀）、老闆直接按「影響／不影響全勤」；沒有就不顯示 */}
       {!loading && <BonusRunApprovalsSection />}
+      {/* 2026-11-17 驗收 C：廠商收款帳戶變更待覆核——非後台角色的設定老闆也在這裡覆核（API 判權限；沒有／沒權限不顯示） */}
+      {!loading && <VendorBankChangeReviews />}
       {!loading && <LateReportsSection />}
 
       {/* 多選批次簽核：底部固定列（手機浮在底部分頁列之上，桌機貼底）＋預留空間，最後一張卡不會被蓋住 */}

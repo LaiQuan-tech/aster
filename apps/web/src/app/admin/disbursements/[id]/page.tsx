@@ -1,7 +1,6 @@
 "use client";
 
 import { PayeeAccountInfo } from "@/components/PayeeAccountInfo";
-import { maskAccountTail } from "@/lib/payee-account";
 import { withSimilarNameConfirm } from "@/lib/vendor-name-binding";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatMoney } from "@/lib/money";
@@ -95,7 +94,7 @@ export default function DisbursementDetailPage() {
     try {
       const [d, v, c, p] = await Promise.all([
         getDisbursement(id),
-        listVendors(),
+        listVendors(undefined, { bankVerified: true }),
         listCompanies(),
         listProjects(),
       ]);
@@ -473,7 +472,7 @@ export default function DisbursementDetailPage() {
                 <div><p className="text-xs text-gray-500">方式</p><p className="font-medium text-gray-800">{DISBURSEMENT_METHOD_LABELS[d.method]}</p></div>
                 <div><p className="text-xs text-gray-500">付款公司</p><p className="font-medium text-gray-800">{d.payingCompanyName ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">收款方</p><p className="font-medium text-gray-800">{d.payeeName}</p></div>
-                <div><p className="text-xs text-gray-500">收款銀行／帳號</p><p className="font-medium text-gray-800">{[d.payeeBankName, d.payeeAccountMasked ?? maskAccountTail(d.payeeBankAccount)].filter(Boolean).join(" / ") || "—"}</p></div>
+                <div><p className="text-xs text-gray-500">收款銀行／帳號</p><p className="font-medium text-gray-800">{[d.payeeBankName, d.payeeBankAccount].filter(Boolean).join(" / ") || "—"}</p></div>
                 <div><p className="text-xs text-gray-500">收款銀行代碼</p><p className="font-medium text-gray-800">{d.payeeBankCode ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">實付</p><p className="font-medium text-gray-900">{fmtMoney(d.amount)}</p></div>
                 <div><p className="text-xs text-gray-500">代扣</p><p className="font-medium text-gray-700">{fmtMoney(d.withheldAmount)}</p></div>

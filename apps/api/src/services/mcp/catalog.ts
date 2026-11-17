@@ -132,9 +132,9 @@ const SPECIFIC: Record<string, string> = {
   "PATCH /disbursements/:id":
     "修改放款單（只限草稿／已核准的備註類欄位）：已分攤的單不可改成零分攤（400 cannot_clear_allocations）；登錄廠商零分攤單改金額／用途／分攤，廠商有未付期款時須帶 confirmNonInstallment: true；「其他」收款改戶名後與名冊廠商相近須帶 confirmDistinctReason（最高風險）；其餘錯誤碼同 POST /disbursements。",
   "POST /vendors":
-    "新增廠商：只有名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate（回 matchedVendorName）；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險、寫嚴格稽核）；名稱／簡稱／帳戶戶名含不可見字元或西里爾／希臘字母 → 400 invalid_vendor_name。",
+    "新增廠商：只有名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate（回 matchedVendorName）；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險、寫嚴格稽核）；名稱／簡稱／帳戶戶名含不可見字元或西里爾／希臘字母 → 400 invalid_vendor_name。帶收款帳戶新建時廠商照建、帳戶不直接寫入（回 bankChangeRequested，需老闆／HR 在後台核准）。",
   "PATCH /vendors/:id":
-    "修改廠商：只有改後名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險）；名稱不合法 → 400 invalid_vendor_name；有未匯款放款單時不可改帳戶（409 vendor_has_open_disbursements）；有未付期款時改帳戶須帶 changeReason（第一次補帳戶免），且不會直接生效——回 202 bankChangeRequested，建立「帳戶變更待覆核」，需老闆或 HR（非申請人）在後台核准後才套用；已有待覆核 → 409 vendor_bank_change_pending。",
+    "修改廠商：只有改後名稱與名冊既有廠商名稱完全相同才硬擋 → 409 vendor_name_duplicate；簡稱、帳戶戶名相同或名稱包含／相近 → 409 vendor_name_similar，確為不同公司請帶 confirmDistinctReason 說明（最高風險）；名稱不合法 → 400 invalid_vendor_name；有未匯款放款單時不可改帳戶（409 vendor_has_open_disbursements）；改帳戶一律須帶 changeReason（第一次補帳戶免），且不會直接生效——回 202 bankChangeRequested，建立「帳戶變更待覆核」，需老闆或 HR（非申請人）在後台核准後才寫入名冊並視為已確認；已有待覆核 → 409 vendor_bank_change_pending。",
   "DELETE /vendors/:id": "刪除廠商（HR）：仍有未付期款或未匯款放款單 → 409 vendor_in_use。",
   "GET /punch": "打卡紀錄；query: employeeId, deptId, from, to, type, source",
   "GET /attendance/punch-overview": "打卡當日總覽／週表；query: date 或 from/to, deptId, employeeId",

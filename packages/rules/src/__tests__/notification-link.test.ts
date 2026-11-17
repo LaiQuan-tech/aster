@@ -112,3 +112,17 @@ describe("notificationNeedsAction／fallback／absoluteAppUrl", () => {
     expect(absoluteAppUrl("https://hr.example.com", "ess")).toBe("https://hr.example.com/ess")
   })
 })
+
+describe("vendor_bank_change_request（2026-11-17 廠商收款帳戶變更覆核）", () => {
+  it("送出：後台角色 → 後台放款簽核頁；非後台角色（設定老闆）→ ESS 簽核頁；結果 → 廠商頁", () => {
+    expect(notificationLink({ type: "vendor_bank_change_request", payload: { event: "submitted", recipientRole: "admin" } })).toBe("/admin/disbursements/approvals")
+    expect(notificationLink({ type: "vendor_bank_change_request", payload: { event: "submitted" } })).toBe("/admin/disbursements/approvals")
+    expect(notificationLink({ type: "vendor_bank_change_request", payload: { event: "submitted", recipientRole: "ess" } })).toBe("/ess/approvals")
+    expect(notificationLink({ type: "vendor_bank_change_request", payload: { event: "approved", vendorId: "v-1" } })).toBe("/admin/vendors/v-1")
+    expect(notificationLink({ type: "vendor_bank_change_request", payload: { event: "rejected" } })).toBe("/admin/vendors")
+  })
+  it("送出是待辦（前往處理），結果不是", () => {
+    expect(notificationNeedsAction({ type: "vendor_bank_change_request", payload: { event: "submitted" } })).toBe(true)
+    expect(notificationNeedsAction({ type: "vendor_bank_change_request", payload: { event: "approved" } })).toBe(false)
+  })
+})

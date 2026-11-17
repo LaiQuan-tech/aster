@@ -195,7 +195,9 @@ describe("第七輪 H2：封存專案的未付期款照算（同應付清單）"
   })
   it("對照：封存案期款已付 → 都放行；已刪專案仍不算", async () => {
     fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.id === PE ? { ...p, paid_on: "2026-11-01" } : p))
-    expect((await as(request(app).patch(`/vendors/${VE}`)).send({ bankAccount: "444" })).status).toBe(200)
+    // 2026-11-17 驗收 H1：改帳戶不再看有無未付——一律要原因、一律送覆核（202，名冊不直接改）。
+    expect((await as(request(app).patch(`/vendors/${VE}`)).send({ bankAccount: "444" })).body.error).toBe("change_reason_required")
+    expect((await as(request(app).patch(`/vendors/${VE}`)).send({ bankAccount: "444", changeReason: "測試" })).status).toBe(202)
     fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.id === PE ? { ...p, paid_on: null } : p))
     fake.db.projects = fake.db.projects!.map((p) => (p.id === P2 ? { ...p, deleted_at: "2026-11-02T00:00:00.000Z" } : p))
     expect((await create(zeroAllocE())).status).toBe(201)

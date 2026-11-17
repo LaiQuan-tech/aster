@@ -39,7 +39,7 @@ import { writeAuditLog, writeAuditLogStrict } from "./audit.js"
 import { firstNewlyPickedInactive } from "./company-lifecycle.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { isHrRole } from "../middleware/scope.js"
-import { maskBankAccount, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
+import { holderSegment, maskBankAccount, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
 
 /**
  * 放款專區——匯款紀錄（disbursements）× 分攤（disbursement_allocations）×
@@ -555,7 +555,11 @@ export type SerializedDisbursement = {
   payeeAccountMasked?: string | null
   /** 帳戶來源：roster＝照名冊（登錄廠商）／manual＝手動輸入（非登錄收款方）。 */
   payeeAccountSource?: "roster" | "manual"
-  /** 登錄廠商的名冊收款帳戶 30 天內變更過 → 變更時間（vendors.bank_changed_at，0103）；否則 null。 */
+  /** 驗收 M2：真正的帳戶戶名（登錄廠商取名冊 account_holder；手動取快照「帳號 戶名」的戶名段）；查不到 null。 */
+  payeeAccountHolder?: string | null
+  /** 登錄廠商的名冊收款帳戶是否經第二人確認（0104 bank_verified_at）；未確認時送審／核准／付款 409 vendor_bank_unverified。 */
+  vendorBankVerified?: boolean
+  /** 登錄廠商的名冊收款帳戶 30 天內變更或確認過 → 該時間（vendors.bank_changed_at／bank_verified_at 取較晚者）；否則 null。 */
   payeeBankChangedAt?: string | null
   /** 登錄廠商有「帳戶變更待覆核」→ true（送審／核准／付款會被擋）。 */
   vendorBankChangePending?: boolean
@@ -689,6 +693,7 @@ export function serializeDisbursement(
     payeeBankCode: d.payee_bank_code,
     payeeAccountMasked: maskBankAccount(d.payee_bank_account),
     payeeAccountSource: d.payee_kind === "vendor" && d.vendor_id ? "roster" : "manual",
+    payeeAccountHolder: holderSegment(d.payee_bank_account),
     payingCompanyId: d.paying_company_id,
     payingCompanyName: d.paying_company_name ?? companies.get(d.paying_company_id)?.name ?? null,
     payingBankAccount: d.paying_bank_account,
@@ -822,12 +827,21 @@ async function attachVendorBankStatus(tenantId: string, items: SerializedDisburs
   if (vendorIds.length === 0) return
   try {
     const changedAt = new Map<string, string>()
-    if (await columnsExist("vendors", "bank_changed_at")) {
-      const rows = await batch<{ id: string; bank_changed_at: string | null }>("vendors", "id, bank_changed_at", tenantId, vendorIds, "id", false)
-      const cutoff = Date.now() - BANK_CHANGED_WARN_DAYS * 86_400_000
-      for (const r of rows) {
-        if (r.bank_changed_at && Date.parse(r.bank_changed_at) >= cutoff) changedAt.set(r.id.toLowerCase(), r.bank_changed_at)
-      }
+    const verified = new Map<string, boolean>()
+    const holders = new Map<string, string | null>()
+    const changedCol = await columnsExist("vendors", "bank_changed_at")
+    const verifiedCol = changedCol && (await columnsExist("vendors", "bank_verified_at"))
+    const cols = `id, account_holder${changedCol ? ", bank_changed_at" : ""}${verifiedCol ? ", bank_verified_at" : ""}`
+    const rows = await batch<{ id: string; account_holder: string | null; bank_changed_at?: string | null; bank_verified_at?: string | null }>(
+      "vendors", cols, tenantId, vendorIds, "id", false,
+    )
+    const cutoff = Date.now() - BANK_CHANGED_WARN_DAYS * 86_400_000
+    for (const r of rows) {
+      const key = r.id.toLowerCase()
+      holders.set(key, r.account_holder ?? null)
+      if (verifiedCol && r.bank_verified_at !== undefined) verified.set(key, r.bank_verified_at !== null)
+      const latest = [r.bank_changed_at, r.bank_verified_at].filter((v): v is string => !!v).sort().pop()
+      if (latest && Date.parse(latest) >= cutoff) changedAt.set(key, latest)
     }
     const pending = await vendorsWithPendingBankChange(tenantId, vendorIds)
     for (const d of items) {
@@ -835,6 +849,13 @@ async function attachVendorBankStatus(tenantId: string, items: SerializedDisburs
       const key = d.vendorId.toLowerCase()
       d.payeeBankChangedAt = changedAt.get(key) ?? null
       d.vendorBankChangePending = pending.has(key)
+      if (verified.has(key)) d.vendorBankVerified = verified.get(key)
+      const holder = holders.get(key)
+      if (holder) {
+        d.payeeAccountHolder = holder
+        // 快照是「帳號 戶名」：知道戶名後重新遮，避免戶名開頭數字混進末 4 碼。
+        if (d.payeeBankAccount) d.payeeAccountMasked = maskBankAccount(d.payeeBankAccount, holder)
+      }
     }
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "attachVendorBankStatus: lookup failed")
@@ -1894,7 +1915,8 @@ function bankNameSnapshotMatchesVendor(v: VendorLite, snapshot: string | null | 
 }
 
 /**
- * N-1（2026-11-16 第四輪）：送簽／核准／付款（含批次付款）前，登錄廠商單的收款帳號與銀行代碼快照必須等於名冊現值，
+ * N-1（2026-11-16 第四輪）：送簽／核准／付款（含批次付款、直接建成已匯款）前，登錄廠商單的收款帳號與銀行代碼快照必須等於名冊現值，
+ * 且名冊帳戶已經第二人確認（0104 bank_verified_at，否則 409 vendor_bank_unverified）、沒有待覆核的帳戶變更（409 vendor_bank_change_pending），
  * 否則 409 payee_bank_changed（名冊改了帳戶，舊單還掛舊帳戶／或名冊被改成他人帳戶後又改回）。駁回、作廢不呼叫。
  */
 export async function assertPayeeBankStillMatchesVendor(
@@ -1908,14 +1930,22 @@ export async function assertPayeeBankStillMatchesVendor(
       message: "此廠商的收款帳戶變更正在等待覆核，覆核完成前不能送審、核准或付款",
     })
   }
+  const verifiedCol = await columnsExist("vendors", "bank_verified_at")
   const { data, error } = await supabaseAdmin
     .from("vendors")
-    .select(VENDOR_LITE_COLS)
+    .select(verifiedCol ? `${VENDOR_LITE_COLS}, bank_verified_at` : VENDOR_LITE_COLS)
     .eq("tenant_id", tenantId)
     .eq("id", current.vendor_id)
     .maybeSingle()
   if (error) throw new Error(`assertPayeeBankStillMatchesVendor: ${error.message}`)
-  const vendor = (data ?? null) as unknown as VendorLite | null
+  const vendor = (data ?? null) as unknown as (VendorLite & { bank_verified_at?: string | null }) | null
+  // 驗收 H1／H2（0104）：名冊帳戶要經第二人（老闆／HR）確認過才能收款。PostgREST 對存在的欄位一定回該鍵（未確認＝null）；
+  // 鍵不存在（undefined）只會是欄位尚未套用或測試假資料，視為未知、不擋（schema-compat 慣例）。
+  if (vendor && vendor.bank_verified_at === null) {
+    throw new DisbursementError(409, "vendor_bank_unverified", {
+      message: "此廠商的收款帳戶尚未經老闆／HR 確認，確認前不能送審、核准或付款",
+    })
+  }
   const ok =
     !!vendor &&
     bankSnapshotMatchesVendor(vendor, "payeeBankAccount", current.payee_bank_account) &&
@@ -2663,6 +2693,8 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
     forcedPayReason = assertForcePayAllowed(actor, input.forceReason)
     if (!header.paid_on) throw new DisbursementError(400, "paid_on_required")
     await assertPaymentsPayable(tenantId, null, payments)
+    // 驗收 M1：直接建成「已匯款」也要過收款帳戶防線（帳戶變更待覆核、帳戶未確認、快照不等於名冊）。
+    await assertPayeeBankStillMatchesVendor(tenantId, header)
   }
   // 第 5 項：確認非期款支出的稽核嚴格、且在建單之前寫（寫不進去就不建）。
   if (nonInstallmentConfirmed) await auditNonInstallmentConfirm(tenantId, actor, null, header, "POST /disbursements")

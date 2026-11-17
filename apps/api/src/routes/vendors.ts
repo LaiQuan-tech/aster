@@ -242,7 +242,19 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
     const userId = req.auth?.userId
     const self = userId ? await resolveSelf(tenantId, userId) : null
     const canSeeBank = isFinanceRole(self?.role)
-    const vendors = (data ?? []).map((r) => serialize(r as unknown as Record<string, unknown>))
+    const vendors: Array<ReturnType<typeof serialize> & { bankVerified?: boolean }> = (data ?? []).map((r) => serialize(r as unknown as Record<string, unknown>))
+    // 2026-11-17：帳戶是否經第二人確認（0104）；放款建單畫面據此提示「帳戶尚待確認，無法送審」。查不到不擋列表。
+    // 只有帶 ?bankVerified=1 才查（放款建單畫面用），一般名冊列表不多打一次查詢。
+    if (req.query.bankVerified === "1" && vendors.length > 0 && (await columnsExist("vendors", "bank_verified_at").catch(() => false))) {
+      const verified = await selectAllPages<{ id: string; bank_verified_at: string | null }>(
+        (from, to) => supabaseAdmin.from("vendors").select("id, bank_verified_at").eq("tenant_id", tenantId).is("deleted_at", null).order("id").range(from, to),
+        "vendors (bank_verified_at)",
+      ).catch(() => null)
+      if (verified) {
+        const map = new Map(verified.map((v) => [v.id, v.bank_verified_at]))
+        for (const v of vendors) if (map.has(v.id as string)) v.bankVerified = map.get(v.id as string) != null
+      }
+    }
     res.status(200).json({ vendors: canSeeBank ? vendors : vendors.map(maskVendorBank) })
   } catch (err) {
     next(err)
@@ -295,21 +307,61 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
       })
     }
     const present = rosterFieldsPresent(parsed.data)
-    const { data, error } = await withVendorCols((cols, roster) =>
-      !roster && present.length > 0
-        ? migrationBlocked()
-        : supabaseAdmin
-            .from("vendors")
-            .insert({ id: newId, tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data, roster) })
-            .select(cols)
-            .single(),
-    )
+    // 驗收 H2（2026-11-17）：新建廠商帶的收款帳戶不直接寫進名冊——廠商照建（銀行欄位留空、bank_verified_at 空），
+    // 另建「帳戶登錄待覆核」，老闆／HR（非申請人）核准後才寫入並視為已確認。
+    const norm = (v: unknown) => {
+      const t = typeof v === "string" ? v.trim() : ""
+      return t === "" ? null : t
+    }
+    const sentBank = Object.fromEntries(BANK_FIELDS.map(([k, col]) => [col, norm(parsed.data[k])])) as BankFields
+    const hasSentBank = Object.values(sentBank).some((v) => v !== null)
+    const verifiedCol = await columnsExist("vendors", "bank_verified_at")
+    const { data, error } = await withVendorCols((cols, roster) => {
+      if (!roster && present.length > 0) return migrationBlocked()
+      const row = toRow(parsed.data, roster)
+      for (const [, col] of BANK_FIELDS) delete row[col]
+      if (verifiedCol) row.bank_verified_at = null
+      return supabaseAdmin
+        .from("vendors")
+        .insert({ id: newId, tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...row })
+        .select(cols)
+        .single()
+    })
     if (error?.code === MIGRATION_REQUIRED_CODE) {
       res.status(409).json(MIGRATION_REQUIRED(present))
       return
     }
     if (error || !data) {
       next(new Error(`POST /vendors: ${error?.message}`))
+      return
+    }
+    if (hasSentBank) {
+      try {
+        const created = await createBankChangeRequest({
+          tenantId,
+          vendorId: newId,
+          vendorName: parsed.data.name,
+          requestedByEmpId: self?.id ?? null,
+          before: { bank_code: null, bank_name: null, bank_account: null, account_holder: null },
+          after: sentBank,
+          reason: null,
+          context: "POST /vendors 新建廠商帶收款帳戶 → 送雙人覆核",
+        })
+        res.status(201).json({
+          vendor: serialize(data as unknown as Record<string, unknown>),
+          bankChangeRequested: true,
+          bankChangeRequest: { id: created.id, status: "pending" },
+          message: "廠商已建立；收款帳戶已送老闆／HR 覆核，核准後才寫入名冊",
+        })
+      } catch (err) {
+        // 廠商已建好（沒有帳戶）；帳戶申請失敗 → 回 201 並告知，讓使用者到廠商頁重填帳戶。
+        res.status(201).json({
+          vendor: serialize(data as unknown as Record<string, unknown>),
+          bankChangeRequested: false,
+          bankChangeError: err instanceof BankChangeError ? err.code : "bank_change_request_failed",
+          message: "廠商已建立，但收款帳戶沒有送出覆核，請到廠商頁重新填寫帳戶",
+        })
+      }
       return
     }
     res.status(201).json({ vendor: serialize(data as unknown as Record<string, unknown>) })
@@ -482,11 +534,12 @@ async function checkBankChange(tenantId: string, vendorId: string, body: Partial
   return {
     identityBlocked: nameChanged && (hasOpen || hasUnpaid),
     openDisbursements: hasOpen,
-    needsReason: !hasOpen && hasUnpaid && !firstFill,
+    // 驗收後（2026-11-17，取代「有未付才要原因」）：改帳戶一律要原因；第一次補帳戶免。
+    needsReason: !firstFill,
     before,
     bankChanged: true,
-    // 2026-11-17：有未付期款 → 走雙人覆核（第一次補帳戶也是：第一次填也可能被冒填）。
-    needsReview: !hasOpen && hasUnpaid,
+    // 驗收 H1：「有未付才覆核」可先把期款標已付來繞過 → 任何帳戶寫入一律走雙人覆核（第一次補也是）。
+    needsReview: true,
     pendingReview: await vendorHasPendingBankChange(tenantId, vendorId),
     after,
     vendorName: cur.name ?? null,
@@ -621,43 +674,19 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     if (bankCheck.needsReason && !changeReason) {
       res.status(400).json({
         error: "change_reason_required",
-        message: "此廠商仍有未付期款，更改收款帳戶請填寫變更原因",
+        message: "更改收款帳戶請填寫變更原因（會送老闆／HR 覆核）",
       })
       return
     }
     if (similarAudit) await similarAudit()
-    // 2026-11-17 雙人覆核：有未付期款時帳戶不直接改——先建「帳戶變更待覆核」（嚴格稽核＋通知覆核者），
-    // 這次 PATCH 的其他欄位照常存，收款帳戶四欄從 update 剔除。
-    let bankChangeRequestId: string | null = null
-    if (bankCheck.needsReview && bankCheck.before && bankCheck.after) {
-      const actor = userId ? await resolveSelf(tenantId, userId) : null
-      try {
-        const created = await createBankChangeRequest({
-          tenantId,
-          vendorId: id,
-          vendorName: bankCheck.vendorName ?? "",
-          requestedByEmpId: actor?.id ?? null,
-          before: bankCheck.before as BankFields,
-          after: bankCheck.after,
-          reason: changeReason || null,
-        })
-        bankChangeRequestId = created.id
-      } catch (err) {
-        if (err instanceof BankChangeError) {
-          res.status(err.httpStatus).json({ error: err.code, ...(err.details ?? {}) })
-          return
-        }
-        throw err
-      }
-    }
-    // 直接改帳戶（沒有未付款項）→ 記 bank_changed_at（0103；欄位未套用就不帶）。
-    const stampBankChanged = bankCheck.bankChanged && !bankCheck.needsReview && (await columnsExist("vendors", "bank_changed_at"))
+    // 2026-11-17 雙人覆核（驗收後：任何帳戶寫入都走覆核）：收款帳戶四欄從 update 剔除，其他欄位照常存；
+    // 驗收 D：先存其他欄位（migration／欄位檢查都在這一步），成功後才建「帳戶變更待覆核」——不留孤兒申請。
+    const wantsBankChange = bankCheck.needsReview && !!bankCheck.before && !!bankCheck.after
     const { data, error } = await withVendorCols((cols, roster) => {
       if (!roster && present.length > 0) return migrationBlocked()
       const row = toRow(parsed.data as z.infer<typeof vendorBody>, roster)
       if (dropAffiliate) delete row.is_affiliate
-      if (bankChangeRequestId) for (const [, col] of BANK_FIELDS) delete row[col]
-      if (stampBankChanged) row.bank_changed_at = new Date().toISOString()
+      for (const [, col] of BANK_FIELDS) delete row[col]
       return supabaseAdmin
         .from("vendors")
         .update({ ...row, updated_at: new Date().toISOString() })
@@ -679,13 +708,31 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
       res.status(404).json({ error: "not_found" })
       return
     }
-    if (bankChangeRequestId) {
-      res.status(202).json({
-        vendor: serialize(data as unknown as Record<string, unknown>),
-        bankChangeRequested: true,
-        bankChangeRequest: { id: bankChangeRequestId, status: "pending" },
-        message: "此廠商仍有未付期款：收款帳戶變更已送老闆／HR 覆核，核准後才生效；其他欄位已儲存",
-      })
+    if (wantsBankChange) {
+      const actor = userId ? await resolveSelf(tenantId, userId) : null
+      try {
+        const created = await createBankChangeRequest({
+          tenantId,
+          vendorId: id,
+          vendorName: bankCheck.vendorName ?? "",
+          requestedByEmpId: actor?.id ?? null,
+          before: bankCheck.before as BankFields,
+          after: bankCheck.after as BankFields,
+          reason: changeReason || null,
+        })
+        res.status(202).json({
+          vendor: serialize(data as unknown as Record<string, unknown>),
+          bankChangeRequested: true,
+          bankChangeRequest: { id: created.id, status: "pending" },
+          message: "收款帳戶變更已送老闆／HR 覆核，核准後才生效；其他欄位已儲存",
+        })
+      } catch (err) {
+        if (err instanceof BankChangeError) {
+          res.status(err.httpStatus).json({ error: err.code, ...(err.details ?? {}), otherFieldsSaved: true })
+          return
+        }
+        throw err
+      }
       return
     }
     res.status(200).json({ vendor: serialize(data as unknown as Record<string, unknown>) })
