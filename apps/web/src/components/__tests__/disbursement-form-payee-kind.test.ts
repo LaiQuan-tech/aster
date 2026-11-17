@@ -67,3 +67,10 @@ describe("bankSnapshotDiffersFromVendor（f／i）", () => {
     expect(bankSnapshotDiffersFromVendor({ ...base, payeeAccountHolder: long }, { ...V1, accountHolder: "😀".repeat(120) })).toBe(false);
   });
 });
+
+describe("終驗：舊快照前綴當銀行名提示", () => {
+  it("單上沒有銀行名 → 「郵局」帶進銀行名、帳號欄是數字段", () => {
+    const s0 = initFromDisbursement({ id: "x", payeeKind: "other", vendorId: null, payeeName: "丙", payeeBankName: null, payeeBankCode: null, payeeBankAccount: "郵局 0001234-5678901 丙印刷行", payeeAccountSplit: false });
+    expect(s0).toMatchObject({ payeeBankName: "郵局", payeeBankAccount: "0001234-5678901", payeeAccountHolder: "丙印刷行" });
+  });
+});

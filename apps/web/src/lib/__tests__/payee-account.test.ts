@@ -72,3 +72,11 @@ describe("驗收第三輪：與 API 同一套拆法（完整帳號後一律戶�
     expect(maskAccountTail("０００１２３４５６７８９０ 104 人力銀行")).toBe("****7890");
   });
 });
+
+describe("終驗：舊快照非數字前綴（與 API 同一套）", () => {
+  it("「郵局 0001234-5678901 丙印刷行」→ 帳號取數字段、前綴另回 prefix", () => {
+    expect(splitAccountSnapshot("郵局 0001234-5678901 丙印刷行")).toEqual({ account: "0001234-5678901", holder: "丙印刷行", prefix: "郵局" });
+    expect(maskAccountTail("郵局 0001234-5678901 丙印刷行")).toBe("****8901");
+    expect(splitAccountSnapshot("TW-12345 丙印刷行")).toEqual({ account: "TW-12345", holder: "丙印刷行" });
+  });
+});

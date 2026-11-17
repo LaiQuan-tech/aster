@@ -35,7 +35,7 @@ const ACCOUNT_TOKEN = /^[\d\-－‐–—]+$/;
  * 知道戶名且以「空白＋戶名」結尾 → 精確去掉戶名；否則帳號段＝開頭連續的「純數字／連字號」token（帳號可含空白，
  * 最後一段純數字不當戶名），第一個含其他字元的 token 起是戶名（「0001234567890 104人力銀行」的 104 不算帳號）。
  */
-export function splitAccountSnapshot(account: string | null | undefined, holder?: string | null): { account: string; holder: string | null } {
+export function splitAccountSnapshot(account: string | null | undefined, holder?: string | null): { account: string; holder: string | null; prefix?: string } {
   // 先做 NFKC（全形數字／空白／連字號 → 半形），連續空白當一個（與 API 同一套）。
   const raw = (account ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
   if (!raw) return { account: "", holder: null };
@@ -44,15 +44,24 @@ export function splitAccountSnapshot(account: string | null | undefined, holder?
     return { account: raw.slice(0, raw.length - h.length).trim(), holder: h };
   }
   const tokens = raw.split(/\s+/);
+  // 終驗：開頭是非數字文字、後面才是數字帳號（「郵局 0001234-5678901 丙印刷行」）→ 前綴文字另回 prefix（銀行名提示），
+  // 帳號從第一個數字段算起；整串都找不到數字段才退回「第一段當帳號」。
+  let start = 0;
+  if (tokens.length > 1 && !ACCOUNT_TOKEN.test(tokens[0]!)) {
+    const k = tokens.findIndex((t) => ACCOUNT_TOKEN.test(t));
+    if (k > 0) start = k;
+  }
+  const prefix = start > 0 ? tokens.slice(0, start).join(" ") : undefined;
+  const rest0 = tokens.slice(start);
   let n = 0;
   // 第一段本身已是完整帳號（≥ 8 碼數字）→ 帳號就是第一段，後面一律是戶名（「12345678 7-11」「0001234567890 104 人力銀行」）；
   // 第一段很短（分組寫法「0123 4567 8901」「012-345 678」）才往後接續純數字／連字號段。
   const digitsOf = (t: string) => t.replace(/\D/g, "").length;
-  if (tokens.length > 0 && ACCOUNT_TOKEN.test(tokens[0]!) && digitsOf(tokens[0]!) >= 8) n = 1;
-  else while (n < tokens.length && ACCOUNT_TOKEN.test(tokens[n]!)) n++;
+  if (rest0.length > 0 && ACCOUNT_TOKEN.test(rest0[0]!) && digitsOf(rest0[0]!) >= 8) n = 1;
+  else while (n < rest0.length && ACCOUNT_TOKEN.test(rest0[n]!)) n++;
   if (n === 0) n = 1;
-  const rest = tokens.slice(n).join(" ");
-  return { account: tokens.slice(0, n).join(" "), holder: rest || null };
+  const rest = rest0.slice(n).join(" ");
+  return { account: rest0.slice(0, n).join(" "), holder: rest || null, ...(prefix ? { prefix } : {}) };
 }
 
 export function accountSegment(account: string | null | undefined, holder?: string | null): string {

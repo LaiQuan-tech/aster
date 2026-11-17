@@ -125,6 +125,10 @@ describe("末 4 碼遮罩", () => {
     expect(splitAccountSnapshot("0123   4567  8901")).toEqual({ account: "0123 4567 8901", holder: null })
     expect(composeAccountSnapshot("０１２３－４５６７ ８９０１", " 7-11 ")).toBe("012345678901 7-11")
     expect(composeAccountSnapshot("", "")).toBeNull()
+    // 終驗：非數字前綴（銀行名）不當帳號
+    expect(splitAccountSnapshot("郵局 0001234-5678901 丙印刷行")).toEqual({ account: "0001234-5678901", holder: "丙印刷行", prefix: "郵局" })
+    expect(maskBankAccount("郵局 0001234-5678901 丙印刷行")).toBe("****8901")
+    expect(splitAccountSnapshot("TW-12345 丙印刷行")).toEqual({ account: "TW-12345", holder: "丙印刷行" })
   })
 
   it("放款單序列化：masked、帳戶來源、30 天內變更時間、待覆核旗標", async () => {

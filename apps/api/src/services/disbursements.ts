@@ -2200,7 +2200,7 @@ function resolvePayeeAccount(
     return { number, holder, snapshot: composeAccountSnapshot(number, holder) }
   }
   // 驗收第六輪 #1：「其他」收款不再接受單一字串 payeeBankAccount 作為新帳戶（"99995678 1234" 這種拆法有歧義）——
-  // 原樣回送 DB 現值才放行（維持不變），否則 400 use_split_account_fields（建單／改單入口另有同樣檢查）。
+  // 原樣回送 DB 現值才放行（維持不變），否則 400 use_split_account_fields（建單與改單都經 resolveHeader → 這裡，是唯一拋出點）。
   const sent = input.payeeBankAccount
   if (sent === undefined || sameAsStored(sent)) return unchanged()
   throw new DisbursementError(400, "use_split_account_fields", {

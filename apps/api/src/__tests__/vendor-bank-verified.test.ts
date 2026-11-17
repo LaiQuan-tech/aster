@@ -519,19 +519,25 @@ describe("驗收第六輪：harness 情境 a–i（後端）", () => {
     expect((await patch({ payeeAccountHolder: "新戶名" })).status).toBe(200)
     expect(db()).toMatchObject({ payee_bank_account_number: "00012345678901", payee_account_holder: "新戶名" })
   })
-  it("c3／c4 舊快照帳號段非純數字：只改備註 → 兩欄都不寫；只送戶名 → 400 split_account_required（帳號不會遺失）；兩欄一起送才改", async () => {
-    for (const snap of ["郵局 0001234-5678901 丙印刷行", "TW-12345 丙印刷行"]) {
-      fake.db.disbursements = [legacy(snap)]
-      expect((await patch({ note: "x" })).status, snap).toBe(200)
-      expect(db(), snap).toMatchObject({ payee_bank_account: snap, payee_bank_account_number: null, payee_account_holder: null })
-      // 第二步：同一張單只改戶名 → 擋下，快照不變
-      const step2 = await patch({ payeeAccountHolder: "丙印刷有限公司" })
-      expect(step2.status, snap).toBe(400)
-      expect(step2.body.error).toBe("split_account_required")
-      expect(db().payee_bank_account, snap).toBe(snap)
-      expect((await patch({ payeeBankAccountNumber: "0001234-5678901", payeeAccountHolder: "丙印刷有限公司" })).status).toBe(200)
-      expect(db()).toMatchObject({ payee_bank_account_number: "00012345678901", payee_account_holder: "丙印刷有限公司" })
-    }
+  it("c3 舊快照「郵局 0001234-5678901 丙印刷行」（非數字前綴）：只改備註 → 不寫分欄；只送戶名 → 帳號取數字段（前綴不當帳號）", async () => {
+    const snap = "郵局 0001234-5678901 丙印刷行"
+    fake.db.disbursements = [legacy(snap)]
+    expect((await patch({ note: "x" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account: snap, payee_bank_account_number: null, payee_account_holder: null })
+    expect((await patch({ payeeAccountHolder: "丙印刷有限公司" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "00012345678901", payee_account_holder: "丙印刷有限公司" })
+  })
+  it("c4 舊快照帳號段非純數字（TW-12345）：只改備註 → 兩欄都不寫；只送戶名 → 400 split_account_required（帳號不會遺失）；兩欄一起送才改", async () => {
+    const snap = "TW-12345 丙印刷行"
+    fake.db.disbursements = [legacy(snap)]
+    expect((await patch({ note: "x" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account: snap, payee_bank_account_number: null, payee_account_holder: null })
+    const step2 = await patch({ payeeAccountHolder: "丙印刷有限公司" })
+    expect(step2.status).toBe(400)
+    expect(step2.body.error).toBe("split_account_required")
+    expect(db().payee_bank_account).toBe(snap)
+    expect((await patch({ payeeBankAccountNumber: "12345", payeeAccountHolder: "丙印刷有限公司" })).status).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "12345", payee_account_holder: "丙印刷有限公司" })
   })
   it("c5 舊快照英數帳號、前端兩欄一起送（帳號含字母）→ 400 invalid_payee_bank_account，不默默清掉", async () => {
     fake.db.disbursements = [legacy("TW-12345 丙印刷行")]
@@ -559,34 +565,47 @@ describe("驗收第六輪：harness 情境 a–i（後端）", () => {
       expect(db()).toMatchObject({ payee_kind: "other", payee_bank_account: null, payee_bank_account_number: null, payee_account_holder: null, payee_bank_name: null, payee_bank_code: null })
     }
   })
-  it("f／f' 廠商單只改備註：名冊帳號含非數字 → 分欄維持不寫；數字帳號 → 分欄不動", async () => {
+  // 終驗：f／h／i 用前端 buildBody 實際送的 payload（廠商單：payeeBankName／payeeBankAccount（帳號欄）／payeeBankCode＋備註）。
+  const vendorUiBody = (row: Row, over: Row = {}): Row => ({
+    payeeKind: "vendor", vendorId: row.vendor_id, payeeName: row.payee_name,
+    payeeBankName: row.payee_bank_name, payeeBankCode: row.payee_bank_code,
+    // 表單「帳號」欄：分欄實存用分欄，否則解析舊快照的帳號段（initFromDisbursement）
+    payeeBankAccount: row.payee_bank_account_number ?? String(row.payee_bank_account ?? "").split(/\s+/)[0],
+    note: "x", ...over,
+  })
+  it("f／f' 廠商單只改備註（UI payload）：名冊帳號含非數字 → 200、分欄不寫；數字帳號 → 200、分欄照名冊", async () => {
     Object.assign(fake.db.vendors![0]!, { bank_account: "A-0001-1111" })
     fake.db.disbursements = [vendorRow({ payee_bank_account: "A00011111 測試甲工程行", payee_bank_account_number: null, payee_account_holder: null })]
-    expect((await patch({ note: "x" })).status).toBe(200)
+    const f = await patch(vendorUiBody(db()))
+    expect(f.status, JSON.stringify(f.body)).toBe(200)
     expect(db()).toMatchObject({ payee_bank_account_number: null, payee_account_holder: null })
     Object.assign(fake.db.vendors![0]!, { bank_account: "0000111" })
     fake.db.disbursements = [vendorRow()]
-    expect((await patch({ note: "x" })).status).toBe(200)
+    const f2 = await patch(vendorUiBody(db()))
+    expect(f2.status, JSON.stringify(f2.body)).toBe(200)
     expect(db()).toMatchObject({ payee_bank_account_number: "0000111", payee_account_holder: "測試甲工程行" })
   })
-  it("g／g' 廠商 → 其他填新帳號（有／無戶名）→ 分欄存新值，不帶原廠商戶名", async () => {
-    fake.db.disbursements = [vendorRow()]
-    expect((await patch({ payeeKind: "other", vendorId: null, payeeName: "戊個人", payeeBankAccountNumber: "1234 5678 9012", payeeAccountHolder: "戊某某", allocations: [] })).status).toBe(200)
-    expect(db()).toMatchObject({ payee_bank_account_number: "123456789012", payee_account_holder: "戊某某", payee_bank_account: "123456789012 戊某某" })
-    fake.db.disbursements = [vendorRow()]
-    expect((await patch({ payeeKind: "other", vendorId: null, payeeName: "戊個人", payeeBankAccountNumber: "123456789012", payeeAccountHolder: null, allocations: [] })).status).toBe(200)
-    expect(db()).toMatchObject({ payee_bank_account_number: "123456789012", payee_account_holder: null, payee_bank_account: "123456789012" })
-  })
-  it("h 0106 前廠商單（只有快照）只改備註 → 不寫分欄、快照不變", async () => {
+  it("h 0106 前廠商單（只有快照）只改備註（UI payload）→ 200；帳號欄與名冊相同 → 整組照名冊帶入（分欄由名冊寫入）", async () => {
     fake.db.disbursements = [vendorRow({ payee_bank_account_number: null, payee_account_holder: null })]
-    expect((await patch({ note: "x" })).status).toBe(200)
-    expect(db()).toMatchObject({ payee_bank_account: "0000111 測試甲工程行", payee_bank_account_number: null, payee_account_holder: null })
+    const res = await patch(vendorUiBody(db()))
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account: "0000111 測試甲工程行", payee_bank_account_number: "0000111", payee_account_holder: "測試甲工程行" })
   })
-  it("i 名冊改帳號後，廠商草稿只改備註 → 可存；送審時 409 payee_bank_changed", async () => {
+  it("i 名冊改帳號後，廠商草稿只改備註（UI payload 帶舊帳號）→ 400 payee_bank_mismatch；按「重新帶入名冊帳戶」後可存", async () => {
     fake.db.disbursements = [vendorRow()]
     fake.db.vendors![0]!.bank_account = "9999-8888"
-    expect((await patch({ note: "x" })).status).toBe(200)
+    const stale = await patch(vendorUiBody(db()))
+    expect(stale.status).toBe(400)
+    expect(stale.body.error).toBe("payee_bank_mismatch")
     expect(db()).toMatchObject({ payee_bank_account_number: "0000111" })
+    // 重新帶入名冊帳戶（reloadBankFromRoster：名冊原始值）
+    const reloaded = await patch(vendorUiBody(db(), { payeeBankName: "測試銀行", payeeBankCode: "999", payeeBankAccount: "9999-8888" }))
+    expect(reloaded.status, JSON.stringify(reloaded.body)).toBe(200)
+    expect(db()).toMatchObject({ payee_bank_account_number: "99998888", payee_account_holder: "測試甲工程行" })
+  })
+  it("i' 舊帳號草稿直接送審 → 409 payee_bank_changed", async () => {
+    fake.db.disbursements = [vendorRow()]
+    fake.db.vendors![0]!.bank_account = "9999-8888"
     fake.db.disbursement_allocations = [alloc()]
     await expect(submitDisbursement(TENANT_ID, actor, DISB)).rejects.toMatchObject({ code: "payee_bank_changed" })
   })

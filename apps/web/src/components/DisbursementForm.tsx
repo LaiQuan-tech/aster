@@ -189,7 +189,8 @@ export function initFromDisbursement(d?: DisbursementFormInitial): {
     payeeKind: d?.payeeKind ?? "vendor",
     vendorId: d?.vendorId ?? "",
     payeeName: d?.payeeName ?? "",
-    payeeBankName: d?.payeeBankName ?? "",
+    // 終驗：舊快照開頭的非數字前綴（「郵局 0001234-5678901 …」的「郵局」）在單上沒有銀行名時當銀行名提示，不當帳號。
+    payeeBankName: d?.payeeBankName || (!d?.payeeAccountSplit ? (splitAccountSnapshot(d?.payeeBankAccount).prefix ?? "") : "") || "",
     // 驗收第五輪：帳號與戶名分欄（廠商單與其他單都是）——依後端 payeeAccountSplit（分欄是否實存）決定：
     // 實存 → 直接用分欄；否則（舊單、名冊帳號含非數字的廠商單）解析舊快照「帳號 戶名」。
     payeeBankAccount: d?.payeeAccountSplit ? (d.payeeBankAccountNumber ?? "") : splitAccountSnapshot(d?.payeeBankAccount).account,

@@ -90,20 +90,30 @@ export function maskAccount(value: unknown): string {
  * 登錄廠商一律以名冊為準），只提示。
  */
 function accountChanges(b: Record<string, unknown>, isVendor: boolean, verb = ""): string[] {
+  const sent = b.payeeBankAccount !== undefined || b.payeeBankAccountNumber !== undefined || b.payeeAccountHolder !== undefined
+  // 終驗：登錄廠商單的帳戶一律照名冊，AI 送什麼都不採用 → 只顯示「以名冊為準」，不印 AI 送的帳號或戶名。
+  if (isVendor) return sent ? ["收款帳號以名冊為準"] : []
   const out: string[] = []
-  const note = isVendor ? "（登錄廠商以名冊為準）" : ""
   if (b.payeeBankAccountNumber !== undefined) {
     const a = b.payeeBankAccountNumber
-    out.push(typeof a === "string" && a.trim() ? `${verb}收款帳號 ${maskAccount(a)}${note}` : `${verb ? "AI 要清空" : "清空"}收款帳號${note}`)
+    out.push(typeof a === "string" && a.trim() ? `${verb}收款帳號 ${maskAccount(a)}` : `${verb ? "AI 要清空" : "清空"}收款帳號`)
   }
   if (b.payeeAccountHolder !== undefined) {
     const h = b.payeeAccountHolder
-    out.push(typeof h === "string" && h.trim() ? `${verb}帳戶戶名${aiText(h)}${note}` : `${verb ? "AI 要清空" : "清空"}帳戶戶名${note}`)
+    out.push(typeof h === "string" && h.trim() ? `${verb}帳戶戶名${holderText(h)}` : `${verb ? "AI 要清空" : "清空"}帳戶戶名`)
   }
   if (b.payeeBankAccount !== undefined && b.payeeBankAccountNumber === undefined && b.payeeAccountHolder === undefined) {
-    out.push(isVendor ? "收款帳號以名冊為準" : "AI 送了單一字串收款帳號（不採用，「其他」收款須分欄填寫帳號與戶名）")
+    out.push("AI 送了單一字串收款帳號（不採用，「其他」收款須分欄填寫帳號與戶名）")
   }
   return out
+}
+
+/** 確認頁的戶名（終驗）：只去控制字元／格式字元，保留原字（括號、引號照原樣）；超過 40 字截斷並標「…（共 N 字）」。 */
+export function holderText(value: unknown): string {
+  const t = String(value ?? "").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ").replace(/\s+/g, " ").trim()
+  const chars = Array.from(t)
+  const shown = chars.length > 40 ? `${chars.slice(0, 40).join("")}…（共 ${chars.length} 字）` : t
+  return `「${shown || "?"}」`
 }
 
 /** 銀行代碼／銀行名稱的變更描述（MCP 確認頁，2026-11-16 第四輪）。 */

@@ -10,7 +10,7 @@ import { disbursementsRouter } from "../routes/disbursements.js"
 import { payDisbursement, voidDisbursement } from "../services/disbursements.js"
 import { decideDisbursement, resetDisbursementApprovalProbe, submitDisbursement } from "../services/disbursement-approval.js"
 import { payDisbursementsBatch } from "../services/disbursement-batch-pay.js"
-import { describeTarget, maskAccount } from "../services/mcp/pending-target.js"
+import { describeTarget, holderText, maskAccount } from "../services/mcp/pending-target.js"
 import { dangerOf } from "../services/mcp/danger.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
@@ -1149,5 +1149,21 @@ describe("驗收第五輪：MCP 確認頁摘要只認 API 接受的駝峰鍵、�
   it("登錄廠商單標「以名冊為準」", async () => {
     const r = await describeTarget(get as never, "POST", "/disbursements", { payeeKind: "vendor", payeeName: "x", amount: 1, payeeBankAccount: "0000111" })
     expect((r as { summary: string }).summary).toContain("以名冊為準")
+  })
+})
+
+describe("終驗：MCP 確認頁——廠商單只標以名冊為準、戶名保留原字", () => {
+  const get = async () => ({ status: 200, json: { disbursement: { disbursementNo: "D-115-001", amount: 1, payeeName: "測試甲工程行", status: "draft", payeeKind: "vendor" } } })
+  it("廠商單帶分欄 → 只顯示「收款帳號以名冊為準」，不印 AI 送的遮罩帳號或戶名", async () => {
+    const r = await describeTarget(get as never, "PATCH", `/disbursements/${DISB}`, { payeeBankAccountNumber: "11112222", payeeAccountHolder: "別人" })
+    const s = (r as { summary: string }).summary
+    expect(s).toContain("收款帳號以名冊為準")
+    expect(s).not.toContain("****")
+    expect(s).not.toContain("別人")
+  })
+  it("holderText：去控制字元、保留括號引號，超過 40 字加「…（共 N 字）」", () => {
+    expect(holderText("王（小明）\n「股」")).toBe("「王（小明） 「股」」")
+    const long = "測".repeat(45)
+    expect(holderText(long)).toBe(`「${"測".repeat(40)}…（共 45 字）」`)
   })
 })
