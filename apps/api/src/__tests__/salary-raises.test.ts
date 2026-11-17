@@ -803,3 +803,44 @@ describe("第三輪驗收（2026-11-17）", () => {
     expect(Math.round((sub - other) * 100) / 100).toBe(Math.round((m.gross - m.totalDeductions + (m.fixedAllowancesTaxFree ?? 0)) * 100) / 100)
   })
 })
+
+describe("議定時薪判斷與 DB numeric round 一致（2026-11-17 終驗）", () => {
+  /** Postgres round(base/240, k)（十進位 half-up）的整數參考實作：回傳 ×10^k 的整數。 */
+  const pgRoundScaled = (base: number, divisor: number, k: number) => Math.floor((2 * base * 10 ** k + divisor) / (2 * divisor))
+  const fmt = (scaled: number, k: number) => (k === 0 ? String(scaled) : `${Math.floor(scaled / 10 ** k)}.${String(scaled % 10 ** k).padStart(k, "0")}`)
+
+  it("本薪 30723–34338 ÷ 240：浮點四捨五入在 .xxx5 處會判反（驗收列出 26 個）；改十進位 half-up 後每個本薪的 DB round 值都視為換算值", () => {
+    const tricky: number[] = []
+    for (let base = 30723; base <= 34338; base += 1) {
+      const db3 = fmt(pgRoundScaled(base, 240, 3), 3)
+      if (Math.abs(Math.round((base / 240) * 1000) / 1000 - Number(db3)) > 1e-9) tricky.push(base)
+      // 每個本薪、每個位數（不只會判反的那些）都要與 DB 一致
+      for (let k = 0; k <= 4; k += 1) {
+        const v = fmt(pgRoundScaled(base, 240, k), k)
+        expect(negotiatedHourly("monthly", Number(v), base, 240), `${base}: ${v}`).toBe(false)
+        expect(negotiatedHourly("monthly", v, base, 240), `${base}: "${v}"`).toBe(false)
+      }
+    }
+    expect(tricky.length).toBeGreaterThanOrEqual(25)
+    expect(tricky[0]).toBe(30723)
+    expect(negotiatedHourly("monthly", 128.013, 30723, 240)).toBe(false)
+    expect(negotiatedHourly("monthly", 128.012, 30723, 240)).toBe(true)
+  })
+
+  it("本薪 20000–60000、除數 240／174：0–4 位每一個 DB round 值都是換算值，±0.0001 都不是（與整數參考實作完全一致）", () => {
+    for (const divisor of [240, 174]) {
+      for (let base = 20000; base <= 60000; base += 7) {
+        for (let k = 0; k <= 4; k += 1) {
+          const v = Number(fmt(pgRoundScaled(base, divisor, k), k))
+          expect(negotiatedHourly("monthly", v, base, divisor)).toBe(false)
+        }
+        const v4 = pgRoundScaled(base, divisor, 4)
+        for (const off of [-1, 1]) {
+          const near = Number(fmt(v4 + off, 4))
+          const derived = [0, 1, 2, 3, 4].some((k) => Math.abs(Number(fmt(pgRoundScaled(base, divisor, k), k)) - near) < 1e-9)
+          expect(negotiatedHourly("monthly", near, base, divisor), `${base}/${divisor} ${near}`).toBe(!derived)
+        }
+      }
+    }
+  })
+})

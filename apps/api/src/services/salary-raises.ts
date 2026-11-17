@@ -219,13 +219,31 @@ export function negotiatedHourly(method: string | null | undefined, hourly: unkn
   if (h === null || h <= 0) return false
   if (base === null || base <= 0 || !(divisor > 0)) return true
   // 換算值＝本薪 ÷ 除數 四捨五入到 0–4 位小數任一相等（第三輪驗收 F2；與 DB 函式 salary_hourly_is_derived 同規則）。
-  const exact = base / divisor
-  if (Math.abs(exact - h) < 1e-9) return false
+  // 四捨五入用十進位 half-up（BigInt 整數運算），與 Postgres numeric round(x, k) 一致——浮點 Math.round 在 .xxx5 剛好進位處會判反
+  //（例：30723 ÷ 240 = 128.0125，DB round(…,3)=128.013，浮點得 128.012）。
+  if (Math.abs(base / divisor - h) < 1e-9) return false
+  const B = toScaledDecimal(base)
+  const D = toScaledDecimal(divisor)
+  const H = toScaledDecimal(h)
+  if (!B || !D || !H || D.n === 0n) return true
   for (let k = 0; k <= 4; k += 1) {
-    const f = 10 ** k
-    if (Math.abs(Math.round(exact * f) / f - h) < 1e-9) return false
+    // round(base/divisor, k) × 10^k ＝ half-up( B.n·10^D.s·10^k ／ (D.n·10^B.s) )
+    const numer = B.n * 10n ** BigInt(D.s + k)
+    const den = D.n * 10n ** BigInt(B.s)
+    const rounded = (2n * numer + den) / (2n * den)
+    // rounded / 10^k ＝ H.n / 10^H.s ？
+    if (rounded * 10n ** BigInt(H.s) === H.n * 10n ** BigInt(k)) return false
   }
   return true
+}
+
+/** 正數 → { n, s }，值＝n ÷ 10^s（由十進位字串精確轉換；非有限值或負數回 null）。 */
+function toScaledDecimal(v: number): { n: bigint; s: number } | null {
+  if (!Number.isFinite(v) || v < 0) return null
+  let str = String(v)
+  if (/e/i.test(str)) str = v.toFixed(12).replace(/0+$/, "").replace(/\.$/, "")
+  const [int, frac = ""] = str.split(".")
+  return { n: BigInt(`${int}${frac}` || "0"), s: frac.length }
 }
 
 /** 某員工某月計薪實際用的薪資列（salary_structures ＋ 該月適用的調薪中；與 loadPayrollInputs 同一條路）。沒有薪資列回 null。 */
