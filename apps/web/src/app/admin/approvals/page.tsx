@@ -687,7 +687,6 @@ function ApprovalsView() {
                   <th className="py-2 pr-4">工號 / 姓名</th>
                   <th className="py-2 pr-4">表單類型</th>
                   <th className="py-2 pr-4">內容</th>
-                  <th className="py-2 pr-4">目前簽核人</th>
                   <th className="py-2 pr-4">狀態</th>
                   <th className="py-2 pr-4">附件</th>
                   <th className="py-2">操作</th>
@@ -752,7 +751,6 @@ function ApprovalsView() {
                           />
                         )}
                       </td>
-                      <td className="py-3 pr-4 text-gray-600">{lookup.approverLabel(row)}</td>
                       <td className="py-3 pr-4">
                         <Pill tone={BUCKET_TONE[bucket]}>{BUCKET_LABEL[bucket]}</Pill>
                       </td>
