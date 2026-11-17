@@ -425,6 +425,8 @@ export async function detectAnomalies(
   const absences = tz ? await loadApprovedAbsences(tenantId, defaultEmpIds, from, to, tz) : []
   const isMissingDay = (d: AnomalyDayRow): boolean => {
     if ((d.worked_minutes ?? 0) !== 0) return false
+    // 特殊假日（颱風假等，2026-11-17）：不用來，不算缺卡（舊排班列與個人預設班別都一樣）。
+    if (dayFlagsOf(d.anomaly).specialDay) return false
     if (resolver.scheduleOf(d.employee_id, d.work_date) !== undefined) return true
     const dayType: DayType = asDayTypeOrWorkday(d.day_type)
     const resolved = resolver.forDay(d.employee_id, d.work_date, dayType)

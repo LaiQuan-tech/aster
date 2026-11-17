@@ -369,14 +369,6 @@ export function withSpecialDayLabel(label: string | null | undefined, summary: s
   return summary ? `${label}；${summary}` : label
 }
 
-/** 結算旗標 → 「颱風假（無薪）」；當天原有假單時補「當日假單 8h 未計，請退回假單時數」。純函式。 */
-function specialDayNote(anomaly: unknown): string | null {
-  const label = specialDayLabelOf(anomaly)
-  if (!label) return null
-  const overlap = dayFlagsOf(anomaly).specialDay?.leaveOverlapMinutes ?? 0
-  return overlap > 0 ? `${label}（當日假單 ${trimHours(overlap / 60)}h 未計，請退回假單時數）` : label
-}
-
 function specialLabelFromResolver(hit: { name: string; paid: boolean } | null | undefined): string | null {
   return hit ? specialDayLabel(hit) : null
 }
@@ -1353,7 +1345,7 @@ function buildDayRows(
       leave_minutes_computed: ad?.leave_minutes ?? 0,
       // 特殊假日（2026-11-17）：「颱風假（無薪）」接在請假摘要前（月表與出勤統計表「內容」欄都讀這欄）。
       leave_summary: withSpecialDayLabel(
-        specialDayNote(ad?.anomaly) ?? specialLabelFromResolver(facts.dayTypes.specialFor(employeeId, d)),
+        specialDayLabelOf(ad?.anomaly) ?? specialLabelFromResolver(facts.dayTypes.specialFor(employeeId, d)),
         formatLeaveSummary(ad?.leave_breakdown ?? null, facts.leaveNameByCode),
       ),
       wfh: facts.wfhByKey.has(key),

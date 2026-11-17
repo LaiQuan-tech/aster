@@ -96,6 +96,7 @@ function errorText(err: unknown): string {
   if (code === "departments_required") return "請至少選一個部門";
   if (code === "employees_required") return "請至少選一位員工";
   if (code === "special_leave_days_not_migrated") return "資料表尚未建立，請聯絡系統管理員";
+  if (code === "recalc_in_progress") return "特殊假日重算進行中，請稍後再試";
   return apiErrorMessage(err, "儲存失敗");
 }
 
@@ -210,9 +211,20 @@ export default function SpecialLeaveDaysPage() {
           <div className="min-w-0">
             <h2 className="text-sm font-medium text-gray-500">特殊假日</h2>
             <p className="mt-1 text-xs leading-5 text-gray-400">
-              颱風假、停班等特定日期。適用的員工當天不算曠職、遲到早退，也不影響全勤；有薪＝照常給薪，無薪＝依時薪扣當天約定工時（同事假）。
+              颱風假、停班等特定日期。適用的員工當天不算曠職、遲到早退，也不影響全勤；有薪＝照常給薪，無薪＝依時薪扣當天沒做到的應到工時（同事假）。
               當天有到班照一般工時計並標「出勤」，加給請以薪資加減項處理。已核准的月表與已結算月份不追溯。
             </p>
+            <details className="mt-1 text-xs leading-5 text-gray-500">
+              <summary className="cursor-pointer select-none text-gray-500">ⓘ 計算方式與限制</summary>
+              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                <li>應到工時＝員工當天班表淨工時（個人／預設班別），沒有班表才用每日正常工時。</li>
+                <li>無薪扣款＝應到工時 − 實際工時 − 已核准請假 − 已核准出差／公出蓋到的時段；兼職不排班不扣。</li>
+                <li>當天已核准的假照原假別處理（照常計請假時數、照原假別扣薪、餘額照扣）；員工請假時會看到提示。</li>
+                <li>月薪制扣無薪工時；日薪制不另扣（本俸只算有出勤的天數），有薪特殊假日計入出勤天數。</li>
+                <li>時薪制：有薪特殊假日不自動補薪，請以薪資加減項處理。</li>
+                <li>部門範圍以「目前」所屬部門判斷：員工事後調部門，重算時會依新部門。</li>
+              </ul>
+            </details>
           </div>
           <div className="flex items-end gap-2">
             <label className="text-sm text-gray-600">
@@ -421,7 +433,7 @@ export default function SpecialLeaveDaysPage() {
             </Field>
 
             <p className="text-xs leading-5 text-gray-400">
-              當天已請假的員工：該日改依特殊假日計算、不扣假別薪，月表會提示請 HR 退回假單時數。落在例假日、休息日或國定假日的人不受影響。
+              當天已請假的員工：假單照原假別處理，無薪只扣請假以外沒做到的工時。落在例假日、休息日或國定假日的人不受影響。
             </p>
 
             {formError && <ErrorText>{formError}</ErrorText>}

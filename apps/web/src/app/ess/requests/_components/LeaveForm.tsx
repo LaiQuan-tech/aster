@@ -36,6 +36,7 @@ import { buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms
 import { MENSTRUAL_MONTHLY_CAP_MESSAGE, isCompLeaveType, isMenstrualLeaveType, quotaRemainingHours } from "@/lib/leave-balance-cap";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
+import { specialDayHint, useMySpecialDays } from "./use-my-special-days";
 
 type DateMode = "single" | "range";
 
@@ -104,6 +105,10 @@ export function LeaveForm({
   const calLast = dayDates.length > 0 && dayDates[dayDates.length - 1] > startDate ? dayDates[dayDates.length - 1] : startDate;
   const dayTypeByDate = useLeaveCalendar(calStart, addDays(calLast, 31));
   const shiftOn = (_date: string): ShiftLike => defaultShift;
+  // 特殊假日（颱風假等）提示：申請日期碰到自己適用的特殊假日 → 提醒（不擋）。
+  const hintDates = useMemo(() => (mode === "range" ? dayDates : [startDate]), [mode, dayDates.join(","), startDate]); // eslint-disable-line react-hooks/exhaustive-deps
+  const specialLabels = useMySpecialDays(hintDates);
+  const specialHint = specialDayHint(hintDates, specialLabels);
 
   // 單日：時間選項（30 分一格、以那天的班別為準）、預設值與時數都由純函式算（見 resolveLeavePick）：
   // 選的值不在選項裡就退回預設——開始＝上班時間、時數 1 小時。
@@ -271,6 +276,11 @@ export function LeaveForm({
 
       <div className="space-y-3">
         <Segmented<DateMode> aria-label="單日或多日" options={MODE_OPTIONS} value={mode} onChange={changeMode} />
+        {specialHint && (
+          <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+            {specialHint}
+          </p>
+        )}
         {mode === "single" ? (
           <Field label="日期" required htmlFor={ids.start}>
             <Input id={ids.start} type="date" value={startDate} onChange={(e) => changeStart(e.target.value)} required />

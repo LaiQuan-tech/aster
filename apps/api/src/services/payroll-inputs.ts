@@ -150,7 +150,7 @@ export function toAttendanceDay(
   const flags = oneRestOneOffFlags(row.anomaly)
   const breakdown =
     row.leave_breakdown && typeof row.leave_breakdown === "object" ? row.leave_breakdown : {}
-  const leaves = Object.entries(breakdown)
+  const leaves: NonNullable<AttendanceDay["leaves"]> = Object.entries(breakdown)
     .map(([code, minutes]) => ({
       code,
       minutes: Number(minutes) || 0,
@@ -158,11 +158,14 @@ export function toAttendanceDay(
     }))
     .filter((l) => l.minutes > 0)
   // 特殊假日（2026-11-17）無薪：沒做到的約定工時照時薪 × 1 扣（同事假），薪資單明細「請假扣款(颱風假（無薪）)」。
-  // 不影響全勤（全勤只看遲到；結算已把特殊假日的遲到早退歸零）。時薪制引擎本來就不扣請假（只付實際工時）。
+  // monthlyOnly：只扣月薪制——日薪制本俸已只算有工時的天數、時薪制只付實際工時，再扣即重複。
+  // 不影響全勤（全勤只看遲到；結算已把特殊假日的遲到早退歸零）。
+  // 有薪且當天沒出勤 → paidDayOff：日薪制計入本俸天數（月薪制本來就不扣；時薪制不自動補，HR 以加減項處理）。
   const special = dayFlagsOf(row.anomaly).specialDay
   if (special && !special.paid && (special.unpaidMinutes ?? 0) > 0) {
-    leaves.push({ code: specialUnpaidLeaveCode(special.name), minutes: special.unpaidMinutes ?? 0, deductRate: 1 })
+    leaves.push({ code: specialUnpaidLeaveCode(special.name), minutes: special.unpaidMinutes ?? 0, deductRate: 1, monthlyOnly: true })
   }
+  const paidDayOff = !!special && special.paid && (row.worked_minutes ?? 0) <= 0
   return {
     date: row.work_date,
     workedMinutes: row.worked_minutes,
@@ -174,6 +177,7 @@ export function toAttendanceDay(
     leaves: leaves.length > 0 ? leaves : undefined,
     outingMinutes: row.outing_minutes ?? 0,
     ...flags,
+    ...(paidDayOff ? { paidDayOff: true } : {}),
   }
 }
 

@@ -439,7 +439,8 @@ export function computePayslip(
 
   // --- 本俸 -------------------------------------------------------------
   // 出勤天數 = 當天有實際工時的天數 (by_attendance_days 制用)。
-  const attendanceDays = days.filter((d) => d.workedMinutes > 0).length;
+  // 有薪公司休假日 (paidDayOff,如有薪颱風假) 當天沒出勤也算一天 (2026-11-17)。
+  const attendanceDays = days.filter((d) => d.workedMinutes > 0 || d.paidDayOff === true).length;
   // 時薪制本俸 = Σ 當月「正常工時分鐘」÷ 60 × 時薪。正常工時 = workedMinutes −
   // overtimeMinutes:加班段 (平日超時、例假/固定假整天) 只在下面加班費那條以倍率
   // 付一次,不可再以 1 倍算進本俸 (否則 10h 平日 = 10h×1 + 2h×1.34,雙重給付)。
@@ -595,6 +596,8 @@ export function computePayslip(
   let leaveRaw = 0;
   for (const day of isHourly ? [] : days) {
     for (const leave of day.leaves ?? []) {
+      // monthlyOnly (無薪特殊假日):日薪制本俸已少算那一天,不再扣 (2026-11-17)。
+      if (leave.monthlyOnly && method !== "monthly") continue;
       const amount = (leave.minutes / 60) * hourlyWage * leave.deductRate;
       if (amount === 0) continue;
       leaveRaw += amount;

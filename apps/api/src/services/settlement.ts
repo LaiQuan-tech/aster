@@ -31,6 +31,7 @@ import { loadRuleConfigFor } from "./payroll-inputs.js"
 import { assertDateRangeOpen } from "./period-lock.js"
 import { loadShiftResolver } from "./employee-shifts.js"
 import { specialDayLabel } from "./special-leave-days.js"
+import { coveredMinutesOn, loadApprovedAbsences } from "./absence-cover.js"
 import { dinnerPunchByDate, effectiveDinnerTaken, pairPunchesTz, type PairedDay } from "./punch-pairing.js"
 
 /**
@@ -117,6 +118,11 @@ export interface SettleInput {
   from: string
   to: string
   employeeId?: string
+  /**
+   * 特殊假日殘留清理（clearStaleSpecialDays）：區間內有特殊假日時一律跑；沒有時只在 true（剛刪除／移出特殊假日）才跑，
+   * 平常的每日結算不多一次整月查詢。
+   */
+  specialCleanup?: boolean
 }
 
 export interface SettleResult {
@@ -646,7 +652,7 @@ export function leaveDeductRate(lt: LeaveTypeRow | undefined): number {
 
 const P0_ATTENDANCE_COLUMNS = ["leave_minutes", "leave_breakdown", "outing_minutes", "early_leave_minutes"] as const
 
-export async function settleAttendance({ tenantId, from, to, employeeId }: SettleInput): Promise<SettleResult> {
+export async function settleAttendance({ tenantId, from, to, employeeId, specialCleanup }: SettleInput): Promise<SettleResult> {
   if (!dateRe.test(from) || !dateRe.test(to)) {
     throw new Error("settleAttendance: from/to must be YYYY-MM-DD")
   }
@@ -655,9 +661,12 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   // 月表產生／重算／送出都走這支，所以守門放在這裡一處，不會漏掉任何一條路。
   await assertDateRangeOpen(tenantId, from, to)
 
-  const { rows } = await computeAttendanceRows({ tenantId, from, to, employeeId })
+  const { rows, specialInRange } = await computeAttendanceRows({ tenantId, from, to, employeeId })
   // 特殊假日刪除／改範圍後，原本只因特殊假日而寫的列（沒打卡、沒假）不會再出現在 rows → 清掉殘留旗標（含無薪扣薪）。
-  await clearStaleSpecialDays(tenantId, from, to, employeeId, new Set(rows.map((r) => `${r.employee_id}|${r.work_date}`)))
+  // 只在區間內仍有特殊假日、或呼叫端明示（剛刪除）時跑。
+  if (specialInRange || specialCleanup) {
+    await clearStaleSpecialDays(tenantId, from, to, employeeId, new Set(rows.map((r) => `${r.employee_id}|${r.work_date}`)))
+  }
   if (rows.length === 0) return { settled: 0 }
 
   const { error: upsertErr } = await supabaseAdmin
@@ -759,6 +768,8 @@ export interface ComputedAttendance {
   rows: Array<Record<string, unknown>>
   /** 區間內已核准在家工作單覆蓋的 `${empId}|${date}`。 */
   wfhKeys: Set<string>
+  /** 區間內有沒有任何適用的特殊假日（工作日）。 */
+  specialInRange: boolean
   dayContext(employeeId: string, date: DateKey): AttendanceDayContext
 }
 
@@ -975,11 +986,20 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
   }
   // 特殊假日（2026-11-17，services/special-leave-days.ts）：命中的工作日一律寫一列（沒打卡也要有列，無薪才扣得到、
   // 月表／總覽才顯示得出「颱風假（無薪）」）。單一員工結算時只收那位。
-  for (const k of dayTypes.specialKeys()) {
+  // 兼職不排班（本來就沒有應上班時間）不補列——沒打卡就沒有扣薪對象（有打卡照一般列寫）。
+  const specialKeys = dayTypes.specialKeys()
+  for (const k of specialKeys) {
     if (k.date < from || k.date > to) continue
     if (employeeId && k.employeeId !== employeeId) continue
+    if (unscheduledPtFor(k.employeeId, k.date)) continue
     keys.add(`${k.employeeId}|${k.date}`)
   }
+  // 無薪特殊假日要扣掉「已核准出差／公出蓋到的時段」（那段算公務、不扣薪）：只在有特殊假日時才查。
+  const specialTripEmpIds = [...new Set(specialKeys.map((k) => k.employeeId))]
+  const tripRequests =
+    specialTripEmpIds.length > 0
+      ? (await loadApprovedAbsences(tenantId, specialTripEmpIds, from, to, tz)).filter((r) => r.kind === "business_trip")
+      : []
 
   // 個人開關「不計夜間加給」（employees.features.noNightPremium）不在這裡處理：night_minutes 照實寫，
   // 只在薪資引擎入口 applyNightPolicy 歸 0——開關日後關掉時，不必重新結算夜間加給就會回來。
@@ -1004,10 +1024,10 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
     const hasExpectedTimes = !!scheduledShift || !!shift.flex
 
     const dayRegularMinutes = regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes)
-    // 特殊假日（颱風假等）：當天的已核准請假不計（不扣假別薪、不算請假分鐘），改記 leaveOverlapMinutes 提示 HR 退假單時數。
+    // 特殊假日（颱風假等）：遲到早退歸零、無薪扣款見下方 flags.specialDay。
     const special = dayTypes.specialFor(empId, workDate)
-    const rawLeave = leaveByKey.get(key)
-    const leave = special ? undefined : rawLeave
+    // 已核准的假照原假別處理（2026-11-17 驗收 B1）：照常計請假分鐘、照原假別扣／不扣薪、餘額照扣。
+    const leave = leaveByKey.get(key)
     // 特休日出勤（2026-10-17）：當天有已核准的特休（code 'annual'）整天假、又有打卡出勤 → 引擎依國定假日計薪
     // （DayContext.ptoWork）。特休假單本身不在這裡撤銷：anomaly.flags.ptoWork 留痕，由月表／HR 處理。
     const punchedPairs = !!day && day.pairs.length > 0
@@ -1068,9 +1088,17 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
     if (compTimeMinutes > 0) flags.compTimeMinutes = compTimeMinutes
     // 特殊假日（2026-11-17）：計薪旗標。無薪＝當日約定工時中沒做到的分鐘（payroll-inputs 依時薪 × 1 扣，同事假）；
     // 有薪＝不扣。worked＝當天有出勤（「特殊假日出勤」，加給由 HR 以加減項處理）。不影響全勤（全勤只看遲到）。
+    // 應到工時＝當天班表淨工時（排班／個人預設班別），沒有班表才用每日正常工時（與月表「應到」同口徑）；
+    // 無薪分鐘＝max(0, 應到 − 實際工時 − 請假分鐘 − 出差／公出蓋到的分鐘)。兼職不排班不扣（沒有應到）。
     if (special) {
-      const unpaidMinutes = special.paid ? 0 : Math.max(0, dayRegularMinutes - workedMinutes)
-      const leaveOverlapMinutes = rawLeave?.total ?? 0
+      const unscheduledPt = unscheduledPtFor(empId, workDate)
+      const shiftNet = scheduledShift ? shiftWindowUtc(workDate, scheduledShift, tz).workMinutes : 0
+      const expected = unscheduledPt ? 0 : shiftNet > 0 ? shiftNet : regularMinutes
+      const tripMinutes =
+        special.paid || expected === 0 ? 0 : coveredMinutesOn(tripRequests, empId, workDate, scheduledShift, tz, expected)
+      const unpaidMinutes = special.paid
+        ? 0
+        : Math.max(0, expected - workedMinutes - (leave?.total ?? 0) - tripMinutes)
       flags.specialDay = {
         id: special.id,
         name: special.name,
@@ -1078,7 +1106,6 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
         label: specialDayLabel(special),
         ...(unpaidMinutes > 0 ? { unpaidMinutes } : {}),
         ...(punchedAny ? { worked: true } : {}),
-        ...(leaveOverlapMinutes > 0 ? { leaveOverlapMinutes } : {}),
       }
     }
     if (Object.keys(flags).length > 0) anomaly.flags = flags
@@ -1123,7 +1150,7 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
     }
   }
 
-  return { tz, rules, rows, wfhKeys: wfhByKey, dayContext }
+  return { tz, rules, rows, wfhKeys: wfhByKey, dayContext, specialInRange: specialKeys.length > 0 }
 }
 
 /** Exposed for the settlement unit tests (pure, no IO). */

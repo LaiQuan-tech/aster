@@ -110,6 +110,11 @@ export interface LeaveEntry {
   code: string;
   minutes: number;
   deductRate: number;
+  /**
+   * 只對月薪制扣 (2026-11-17 無薪特殊假日):日薪制 (by_attendance_days) 本俸已只算有工時的天數、
+   * 時薪制只付實際工時,再扣即重複扣。省略 = 照舊 (月薪制、日薪制都扣)。
+   */
+  monthlyOnly?: boolean;
 }
 
 /**
@@ -152,6 +157,11 @@ export interface AttendanceDay {
   dayType: DayType;
   /** 特休日被叫回上班 (DayContext.ptoWork 原樣帶出);payroll 據此改用國定假日規則。 */
   ptoWork?: boolean;
+  /**
+   * 有薪的公司休假日 (2026-11-17 有薪特殊假日,例:颱風假有薪) 且當天沒出勤:日薪制 (by_attendance_days)
+   * 視為有出勤的一天、計入本俸天數。月薪制本來就不扣;時薪制不自動補 (HR 以加減項處理)。
+   */
+  paidDayOff?: boolean;
   /**
    * 例假出勤需補假的天數 (regular_leave 且當日加班分鐘 > 0 → 1;其餘省略)。
    * 只是標記,引擎不自動產生補假;payroll 會加總到 PayslipBreakdown.compDaysOwed。

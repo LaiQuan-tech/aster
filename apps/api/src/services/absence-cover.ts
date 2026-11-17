@@ -123,6 +123,59 @@ export function coveredByRequests(
   return windowCovered(w.window, w.lunch, intervals)
 }
 
+/**
+ * 純函式（2026-11-17 特殊假日無薪扣款用）：這位員工這天，已核准單（呼叫端先篩種類）蓋到的「應到時段」分鐘數，
+ * 上限 `capMinutes`。有班別＝班別時段扣明確午休；沒有班別＝當地整天（00:00–24:00）。segments 只有時數 → 取時數。
+ */
+export function coveredMinutesOn(
+  requests: readonly AbsenceRequestRow[],
+  employeeId: string,
+  date: DateKey,
+  shift: ShiftDef | null,
+  tz: string,
+  capMinutes: number,
+): number {
+  const own = requests.filter((r) => r.employee_id === employeeId)
+  if (own.length === 0 || capMinutes <= 0) return 0
+  const w = shift
+    ? shiftWindowOn(date, shift, tz)
+    : {
+        window: { start: zonedTimeToUtc(date, 0, 0, tz).getTime(), end: zonedTimeToUtc(date, 0, 24 * 60, tz).getTime() },
+        lunch: null,
+        netMinutes: capMinutes,
+      }
+  if (!w) return 0
+  const pseudoShift: ShiftDef = shift ?? { start: "00:00", end: "23:59", breakMinutes: 0 }
+  const intervals: MsInterval[] = []
+  let hoursMinutes = 0
+  for (const req of own) {
+    if (Array.isArray(req.segments) && req.segments.length > 0) {
+      for (const seg of req.segments) {
+        if (seg?.date === date && (typeof seg.startTime !== "string" || typeof seg.endTime !== "string") && typeof seg.hours === "number") {
+          hoursMinutes += Math.max(0, Math.round(seg.hours * 60))
+        }
+      }
+    }
+    intervals.push(...requestIntervalsOn(req, date, pseudoShift, tz, w.netMinutes).intervals)
+  }
+  // 應到時段（扣午休）與單據時段聯集的交集分鐘。
+  const needs: MsInterval[] = w.lunch
+    ? [
+        { start: w.window.start, end: Math.min(w.window.end, Math.max(w.window.start, w.lunch.start)) },
+        { start: Math.max(w.window.start, Math.min(w.window.end, w.lunch.end)), end: w.window.end },
+      ].filter((n) => n.end > n.start)
+    : [w.window]
+  const merged: MsInterval[] = []
+  for (const iv of [...intervals].filter((i) => i.end > i.start).sort((a, b) => a.start - b.start)) {
+    const last = merged[merged.length - 1]
+    if (last && iv.start <= last.end) last.end = Math.max(last.end, iv.end)
+    else merged.push({ ...iv })
+  }
+  let ms = 0
+  for (const need of needs) for (const iv of merged) ms += Math.max(0, Math.min(need.end, iv.end) - Math.max(need.start, iv.start))
+  return Math.min(capMinutes, Math.round(ms / 60_000) + hoursMinutes)
+}
+
 /** 已核准、未註銷、與 [from, to]（本地日，含隔天跨日班）重疊的請假／在家／出差單。 */
 export async function loadApprovedAbsences(
   tenantId: string,

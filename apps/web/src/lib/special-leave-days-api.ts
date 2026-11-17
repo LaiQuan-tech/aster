@@ -41,7 +41,12 @@ export interface SpecialRecalc {
   period: string;
   status: "done" | "closed" | "failed";
   rebuilt?: number;
-  skipped?: number;
+  /** 已送出（含主管已審）未套用的月表數。 */
+  submitted?: number;
+  /** 已核准／鎖定未套用的月表數。 */
+  approved?: number;
+  /** 該月未定案的薪資單數。 */
+  draftPayslips?: number;
   error?: string;
 }
 
@@ -107,12 +112,19 @@ export function recalcSummary(recalc: readonly SpecialRecalc[] | null | undefine
       parts.push(`${ym} 自動重算失敗，請到出勤統計表按「重算」`);
       warn = true;
     } else {
-      const skipped = r.skipped ?? 0;
-      parts.push(
-        `${ym} 已重算草稿月表 ${r.rebuilt ?? 0} 張` +
-          (skipped > 0 ? `；${skipped} 張已送出／核准未變更，需退回後重算` : ""),
-      );
-      if (skipped > 0) warn = true;
+      const submitted = r.submitted ?? 0;
+      const approved = r.approved ?? 0;
+      const slips = r.draftPayslips ?? 0;
+      let text = `${ym} 已重算草稿月表 ${r.rebuilt ?? 0} 張`;
+      if (submitted > 0 || approved > 0) {
+        text += `；已送出 ${submitted} 張、已核准 ${approved} 張月表未套用，需退回後重算`;
+        warn = true;
+      }
+      if (slips > 0) {
+        text += `；該月已有未定案薪資單（${slips} 張），請重跑薪資`;
+        warn = true;
+      }
+      parts.push(text);
     }
   }
   return { text: `已儲存。${parts.join("。")}`, warn };

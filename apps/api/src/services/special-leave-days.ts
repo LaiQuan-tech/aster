@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { addDaysKey, type DateKey } from "../lib/tz.js"
 
@@ -15,9 +16,13 @@ import { addDaysKey, type DateKey } from "../lib/tz.js"
  *   • 有薪：視同出勤，不扣薪、不影響全勤。
  *   • 無薪：當日未出勤的約定工時（日正常工時或班表淨工時 − 實際工時）照時薪 × 1 扣（同事假扣薪），
  *     **不影響全勤**（全勤只看遲到；颱風假依法不得影響全勤）。
- *   • 當天已核准的請假：不計請假分鐘、不扣假別薪（改由特殊假日規則處理），旗標 leaveOverlapMinutes 提示 HR
- *     撤銷／退回假單時數（假別餘額在核准時已扣，系統不自動退）。
+ *   • 當天已核准的請假：照原假別處理（照常計請假分鐘、照原假別扣／不扣薪、餘額照扣）；無薪分鐘＝
+ *     max(0, 應到工時 − 實際工時 − 請假分鐘 − 出差／公出蓋到的分鐘)。應到工時＝當天班表淨工時（個人／預設班別），
+ *     沒班表才用每日正常工時。兼職不排班不扣。ESS 請假申請日期碰到特殊假日會提示（不擋）。
+ *   • 計薪方式：月薪制扣無薪分鐘；日薪制不另扣（本俸本來就只算有工時的天數），有薪特殊假日計入本俸天數；
+ *     時薪制有薪特殊假日不自動補（HR 以加減項處理）。
  *   • 特殊假日落在該員工的例假／休息日／國定假日 → 不適用（本來就休）。
+ *   • 部門範圍以「目前」的部門判斷（員工調部門後重算會依新部門，已知限制）。
  *
  * 同一人同一天有多筆特殊假日重疊：有薪優先（對員工有利），再來範圍越窄越優先（員工＞部門＞全公司），最後取最近更新。
  * 已核准／鎖定的月表（快照）與已結算月份不追溯；草稿／退回的月表重算才反映（routes/special-leave-days.ts 新增／修改／
@@ -189,10 +194,12 @@ export async function loadSpecialEmployees(
 ): Promise<Map<string, SpecialEmployeeInfo>> {
   const out = new Map<string, SpecialEmployeeInfo>()
   if (employeeIds && employeeIds.length === 0) return out
-  let q = supabaseAdmin.from("employees").select("id, dept_id, hire_date, terminated_at, status").eq("tenant_id", tenantId)
-  if (employeeIds) q = q.in("id", [...employeeIds])
-  const { data, error } = await q
-  if (error) throw new Error(`loadSpecialEmployees: ${error.message}`)
+  // 大租戶可能超過 PostgREST max-rows（1000）→ 分頁撈完（以主鍵 id 排序）。
+  const data = await selectAllPages<Record<string, unknown>>((rFrom, rTo) => {
+    let q = supabaseAdmin.from("employees").select("id, dept_id, hire_date, terminated_at, status").eq("tenant_id", tenantId)
+    if (employeeIds) q = q.in("id", [...employeeIds])
+    return q.order("id", { ascending: true }).range(rFrom, rTo)
+  }, "loadSpecialEmployees")
   for (const r of (data ?? []) as Array<{ id: string; dept_id?: string | null; hire_date?: string | null; terminated_at?: string | null; status?: string | null }>) {
     const status = r.status ?? "active"
     out.set(r.id, {

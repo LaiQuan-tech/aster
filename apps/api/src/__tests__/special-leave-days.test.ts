@@ -8,7 +8,7 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 import { computePayslip } from "@hr/rules"
 import { specialLeaveDaysRouter } from "../routes/special-leave-days.js"
 import { isPeriodClosedError } from "../services/period-lock.js"
-import { scanMissingPunches } from "../services/detection.js"
+import { detectAnomalies, scanMissingPunches } from "../services/detection.js"
 import { lateMinutesForArrival, settleAttendance } from "../services/settlement.js"
 import { loadMonthFacts, rebuildSheet, type SheetRow } from "../services/attendance-sheets.js"
 import { toAttendanceDay } from "../services/payroll-inputs.js"
@@ -205,7 +205,7 @@ describe("結算：無薪／有薪的出勤效果", () => {
     fake.db.special_leave_days = [special()]
     await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, employeeId: A })
     const day = toAttendanceDay(rowOf(A) as never, new Map())
-    expect(day.leaves).toEqual([{ code: "颱風假（無薪）", minutes: 480, deductRate: 1 }])
+    expect(day.leaves).toEqual([{ code: "颱風假（無薪）", minutes: 480, deductRate: 1, monthlyOnly: true }])
     const rules = {
       ...DEFAULT_RULE_CONFIG,
       attendance_bonus: { base: 2000, tiers: [{ lateMinutesUpTo: 0, deduct: 0 }, { lateMinutesUpTo: null, deduct: 2000 }] },
@@ -230,18 +230,23 @@ describe("結算：無薪／有薪的出勤效果", () => {
     expect(rowOf(C)!.anomaly.flags.specialDay.name).toBe("颱風假")
   })
 
-  it("與請假重疊：當天事假不計（leave_minutes 0、不扣事假），旗標 leaveOverlapMinutes 提示 HR", async () => {
-    fake.db.special_leave_days = [special({ paid: true })]
+  it("與請假重疊（B1）：已核准的假照原假別處理（照計請假分鐘、照扣事假），無薪只扣請假以外的分鐘", async () => {
+    fake.db.special_leave_days = [special()]
     fake.db.leave_requests = [{
       id: "lr-1", tenant_id: TENANT_ID, employee_id: C, leave_type_id: LEAVE_PERSONAL, kind: "leave", status: "approved",
-      start_at: `${DAY}T09:00:00+08:00`, end_at: `${DAY}T18:00:00+08:00`, hours: 8, segments: null, deleted_at: null,
+      start_at: `${DAY}T09:00:00+08:00`, end_at: `${DAY}T13:00:00+08:00`, hours: 3, segments: null, deleted_at: null,
     }]
     await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, employeeId: C })
     const c = rowOf(C)!
-    expect(c.leave_minutes).toBe(0)
-    expect(c.leave_breakdown).toEqual({})
-    expect(c.anomaly.flags.specialDay.leaveOverlapMinutes).toBe(480)
-    expect(toAttendanceDay(c as never, new Map([["personal", 1]])).leaves).toBeUndefined()
+    expect(c.leave_minutes).toBe(180)
+    expect(c.leave_breakdown).toEqual({ personal: 180 })
+    expect(c.anomaly.flags.specialDay.unpaidMinutes).toBe(300)
+    expect(c.anomaly.flags.specialDay.leaveOverlapMinutes).toBeUndefined()
+    const day = toAttendanceDay(c as never, new Map([["personal", 1]]))
+    expect(day.leaves).toEqual([
+      { code: "personal", minutes: 180, deductRate: 1 },
+      { code: "颱風假（無薪）", minutes: 300, deductRate: 1, monthlyOnly: true },
+    ])
   })
 
   it("沒有特殊假日：行為不變（A 沒打卡不寫列）", async () => {
@@ -315,7 +320,7 @@ describe("API：/special-leave-days", () => {
     const res = await as("hr-user")(request(app).post("/special-leave-days").send(body))
     expect(res.status).toBe(201)
     expect(res.body.day).toMatchObject({ name: "颱風假", paid: false, label: "颱風假（無薪）", startDate: DAY, endDate: DAY, affectedCount: 5 })
-    expect(res.body.recalc).toEqual([{ period: "2026-10", status: "done", rebuilt: 1, skipped: 1 }])
+    expect(res.body.recalc).toEqual([{ period: "2026-10", status: "done", rebuilt: 1, submitted: 0, approved: 1, draftPayslips: 0 }])
     expect(fake.db.special_leave_days).toHaveLength(1)
     expect(fake.db.special_leave_days![0].created_by_emp_id).toBe(HR)
     expect(fake.db.audit_logs!.some((l) => l.table_name === "special_leave_days" && l.action === "INSERT")).toBe(true)
@@ -395,5 +400,139 @@ describe("API：/special-leave-days", () => {
     expect(mineA.body.days.map((d: { date: string }) => d.date)).toEqual(["2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16"])
     const mineB = await as("b-user")(request(app).get(`/special-leave-days/mine?from=2026-10-01&to=2026-10-31`))
     expect(mineB.body).toMatchObject({ days: [] })
+  })
+})
+
+describe("驗收第二輪（B2／S1／S2／S3／S4／N1／N2）", () => {
+  const ANNUAL = "ffffffff-0000-4000-8000-0000000000bb"
+  const HALF = "ffffffff-0000-4000-8000-000000000009"
+  const PT = "eeeeeeee-0000-4000-8000-0000000000f1"
+  const work = { date: "2026-10-12", workedMinutes: 480, lateMinutes: 0, overtimeMinutes: 0, nightMinutes: 0, dayType: "workday" as const }
+
+  it("S1 日薪制：無薪不另扣（本俸只算 1 天）；有薪計入本俸天數（2 天）；時薪制有薪不自動補", async () => {
+    fake.db.special_leave_days = [special()]
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, employeeId: A })
+    const daily = { method: "by_attendance_days", dailyWage: 1600, hourlyWage: 200 } as never
+    const s1 = computePayslip([work, toAttendanceDay(rowOf(A) as never, new Map())], daily, DEFAULT_RULE_CONFIG)
+    expect(s1.base).toBe(1600)
+    expect(s1.leaveDeduction).toBe(0)
+    // 月薪制同一天照扣 480 分
+    const monthly = computePayslip([work, toAttendanceDay(rowOf(A) as never, new Map())], { method: "monthly", baseSalary: 36000, hourlyWage: 150 } as never, DEFAULT_RULE_CONFIG)
+    expect(monthly.leaveDeduction).toBe(1200)
+
+    fake.db.special_leave_days = [special({ paid: true })]
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, employeeId: A })
+    const paidDay = toAttendanceDay(rowOf(A) as never, new Map())
+    expect(paidDay.paidDayOff).toBe(true)
+    const s2 = computePayslip([work, paidDay], daily, DEFAULT_RULE_CONFIG)
+    expect(s2.base).toBe(3200)
+    expect(s2.leaveDeduction).toBe(0)
+    const hourly = computePayslip([work, paidDay], { method: "hourly", hourlyWage: 200 } as never, DEFAULT_RULE_CONFIG)
+    expect(hourly.base).toBe(1600) // 只付實際工時；有薪特殊假日由 HR 以加減項補
+  })
+
+  it("B1 整天特休＋無薪特殊假日：特休照計 480、照特休不扣，無薪 0", async () => {
+    fake.db.leave_types!.push({ id: ANNUAL, tenant_id: TENANT_ID, code: "annual", name: "特休", paid: true, deduct_rate: 0 })
+    fake.db.special_leave_days = [special()]
+    fake.db.leave_requests = [{
+      id: "lr-2", tenant_id: TENANT_ID, employee_id: A, leave_type_id: ANNUAL, kind: "leave", status: "approved",
+      start_at: `${DAY}T09:00:00+08:00`, end_at: `${DAY}T18:00:00+08:00`, hours: 8, segments: null, deleted_at: null,
+    }]
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, employeeId: A })
+    const r = rowOf(A)!
+    expect(r.leave_minutes).toBe(480)
+    expect(r.anomaly.flags.specialDay.unpaidMinutes).toBeUndefined()
+    const slip = computePayslip([toAttendanceDay(r as never, new Map([["annual", 0]]))], { method: "monthly", baseSalary: 36000, hourlyWage: 150 } as never, DEFAULT_RULE_CONFIG)
+    expect(slip.leaveDeduction).toBe(0)
+  })
+
+  it("B2 短班 09:00–13:00 做滿班表 → 不扣；沒來 → 只扣 240 分（班表淨工時）", async () => {
+    fake.db.shifts!.push({ id: HALF, tenant_id: TENANT_ID, name: "半天", start_time: "09:00", end_time: "13:00", break_minutes: 0, break_start: null })
+    fake.db.employees = [emp(A, { default_shift_id: HALF }), emp(B, { default_shift_id: HALF })]
+    fake.db.special_leave_days = [special()]
+    punch(A, "in", `${DAY}T08:58:00+08:00`)
+    punch(A, "out", `${DAY}T13:02:00+08:00`)
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY })
+    expect(rowOf(A)!.anomaly.flags.specialDay.unpaidMinutes).toBeUndefined()
+    expect(rowOf(B)!.anomaly.flags.specialDay.unpaidMinutes).toBe(240)
+  })
+
+  it("S2 兼職不排班：不補列、不扣；已核准出差蓋到的時段不扣", async () => {
+    fake.db.employees!.push(emp(PT, { employment_type: "parttime" }))
+    fake.db.special_leave_days = [special()]
+    fake.db.leave_requests = [{
+      id: "bt-1", tenant_id: TENANT_ID, employee_id: A, leave_type_id: null, kind: "business_trip", status: "approved",
+      start_at: `${DAY}T09:00:00+08:00`, end_at: `${DAY}T12:00:00+08:00`, hours: 3, segments: null, deleted_at: null,
+    }]
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY })
+    expect(rowOf(PT)).toBeUndefined()
+    expect(rowOf(A)!.anomaly.flags.specialDay.unpaidMinutes).toBe(300)
+  })
+
+  it("S3 兩天颱風假：預設班別員工不被判頻繁缺卡", async () => {
+    fake.db.employees = [emp(S, { default_shift_id: SHIFT })]
+    fake.db.special_leave_days = [special({ end_date: "2026-10-14" })]
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: "2026-10-14" })
+    for (const d of ["2026-10-15", "2026-10-16"]) {
+      punch(S, "in", `${d}T09:00:00+08:00`)
+      punch(S, "out", `${d}T18:00:00+08:00`)
+    }
+    await settleAttendance({ tenantId: TENANT_ID, from: "2026-10-15", to: "2026-10-16" })
+    const res = await detectAnomalies(TENANT_ID, { from: DAY, to: "2026-10-16" })
+    expect(res.anomalies.filter((a) => a.type === "frequent_missing")).toEqual([])
+  })
+
+  it("N1 當日總覽：特殊假日上班中不顯示遲到暫估", () => {
+    const res = classifyDay({
+      date: DAY, today: DAY, nowMs: new Date(`${DAY}T11:00:00+08:00`).getTime(), dayType: "workday", hasExpectedTimes: true,
+      expectedStartMs: new Date(`${DAY}T09:00:00+08:00`).getTime(), expectedEndMs: new Date(`${DAY}T18:00:00+08:00`).getTime(),
+      expectedWorkMinutes: 480, openInAt: `${DAY}T10:40:00+08:00`, firstIn: `${DAY}T10:40:00+08:00`, lastOut: null,
+      unpairedIn: 1, unpairedOut: 0,
+      row: { worked_minutes: 0, anomaly: { flags: { specialDay: { name: "颱風假", paid: false, label: "颱風假（無薪）" } } } },
+      provisionalLateMinutes: 100, wfhApproved: false, wfhPunch: false, trip: null, leaveNames: [], manualPunch: false,
+    })
+    expect(res.status).toBe("working")
+    expect(res.lateMinutes).toBe(0)
+    expect(res.tags.some((t) => t.code === "late")).toBe(false)
+  })
+
+  it("S4 重算結果：已送出／已核准月表數與未定案薪資單", async () => {
+    fake.db.attendance_sheets = [
+      { id: "dddddddd-0000-4000-8000-0000000000s1", tenant_id: TENANT_ID, employee_id: A, period: "2026-10", status: "submitted", month_anomalies: [], snapshot: null, version: 1 },
+      { id: "dddddddd-0000-4000-8000-0000000000s2", tenant_id: TENANT_ID, employee_id: B, period: "2026-10", status: "manager_reviewed", month_anomalies: [], snapshot: null, version: 1 },
+      { id: "dddddddd-0000-4000-8000-0000000000s3", tenant_id: TENANT_ID, employee_id: C, period: "2026-10", status: "locked", month_anomalies: [], snapshot: null, version: 1 },
+    ]
+    fake.db.payslips = [
+      { id: "ps-1", tenant_id: TENANT_ID, employee_id: A, period: "2026-10", status: "draft" },
+      { id: "ps-2", tenant_id: TENANT_ID, employee_id: B, period: "2026-10", status: "finalized" },
+    ]
+    const res = await as("hr-user")(request(app).post("/special-leave-days").send({ startDate: DAY, name: "颱風假", paid: false, scope: "all" }))
+    expect(res.status).toBe(201)
+    expect(res.body.recalc).toEqual([{ period: "2026-10", status: "done", rebuilt: 0, submitted: 2, approved: 1, draftPayslips: 1 }])
+  })
+
+  it("N2 互斥鎖：同租戶已有進行中的重算 → 409 recalc_in_progress、不寫入；超過 10 分鐘的殘留鎖可接手、做完釋放", async () => {
+    fake.uniques.special_leave_recalc_locks = [["tenant_id"]]
+    fake.db.special_leave_recalc_locks = [{ tenant_id: TENANT_ID, token: "11111111-1111-4111-8111-000000000001", started_at: new Date("2026-10-20T09:55:00+08:00").toISOString() }]
+    const body = { startDate: DAY, name: "颱風假", paid: false, scope: "all" }
+    const busy = await as("hr-user")(request(app).post("/special-leave-days").send(body))
+    expect(busy.status).toBe(409)
+    expect(busy.body.error).toBe("recalc_in_progress")
+    expect(fake.db.special_leave_days).toHaveLength(0)
+
+    fake.db.special_leave_recalc_locks = [{ tenant_id: TENANT_ID, token: "11111111-1111-4111-8111-000000000001", started_at: new Date("2026-10-20T09:40:00+08:00").toISOString() }]
+    const ok = await as("hr-user")(request(app).post("/special-leave-days").send(body))
+    expect(ok.status).toBe(201)
+    expect(fake.db.special_leave_recalc_locks).toHaveLength(0)
+  })
+
+  it("N2 沒有特殊假日的一般結算不跑殘留清理（不多查一次 attendance_days 的 anomaly）", async () => {
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY }) // 暖身（schema-compat 探測有快取）
+    const before = fake.reads.length
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY })
+    const adReads = fake.reads.slice(before).filter((t) => t === "attendance_days").length
+    const mid = fake.reads.length
+    await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, specialCleanup: true })
+    expect(fake.reads.slice(mid).filter((t) => t === "attendance_days").length).toBeGreaterThan(adReads)
   })
 })

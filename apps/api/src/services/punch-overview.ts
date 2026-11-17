@@ -346,7 +346,8 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
     const openUntil = input.expectedEndMs != null ? input.expectedEndMs + OPEN_GRACE_AFTER_SHIFT_MS : inMs + OPEN_WITHOUT_SHIFT_MS
     if (input.nowMs <= openUntil) {
       status = "working"
-      if (late === 0 && !noExpected && input.provisionalLateMinutes > 0) {
+      // 特殊假日（颱風假等）沒有應上班時間：不顯示遲到暫估。
+      if (late === 0 && !noExpected && !flags.specialDay && input.provisionalLateMinutes > 0) {
         late = input.provisionalLateMinutes
         provisional = true
       }
@@ -647,7 +648,9 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
       const lastOut = f?.lastOut ?? null
       // 今天、上班中：用打卡當下遲到檢查的同一算法暫估（上班卡當作當天第一段；扣請假時段）。
       let provisionalLate = 0
-      if (firstIn && !lastOut && ctx.hasExpectedTimes && date >= addDaysKey(today, -1)) {
+      // 特殊假日（颱風假等）不暫估遲到（與打卡當下 lateMinutesForArrival 一致）。
+      const specialToday = !!dayFlagsOf((row as { anomaly?: unknown } | null)?.anomaly).specialDay
+      if (firstIn && !lastOut && ctx.hasExpectedTimes && !specialToday && date >= addDaysKey(today, -1)) {
         const arrival = toNaiveLocal(firstIn, tz)
         provisionalLate = computeAttendanceDay([{ inAt: arrival, outAt: arrival }], ctx.shift as ShiftDef, result.rules, {
           date,

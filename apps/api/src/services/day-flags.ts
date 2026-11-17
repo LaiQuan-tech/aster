@@ -25,8 +25,6 @@ export interface SpecialDayFlag {
   unpaidMinutes?: number
   /** 當天有出勤（特殊假日出勤）。 */
   worked?: true
-  /** 當天原有已核准請假的分鐘（已不計請假，提示 HR 退假單時數）。 */
-  leaveOverlapMinutes?: number
 }
 
 export interface DayFlags {
@@ -70,7 +68,6 @@ export function dayFlagsOf(anomaly: unknown): DayFlags {
     }
     if (typeof sd.unpaidMinutes === "number" && sd.unpaidMinutes > 0) flag.unpaidMinutes = sd.unpaidMinutes
     if (sd.worked === true) flag.worked = true
-    if (typeof sd.leaveOverlapMinutes === "number" && sd.leaveOverlapMinutes > 0) flag.leaveOverlapMinutes = sd.leaveOverlapMinutes
     out.specialDay = flag
   }
   if (typeof src.dinnerTaken === "boolean") {
