@@ -155,3 +155,31 @@ export function searchEmployees<T extends { name?: string | null; emp_no?: strin
     return terms.every((t) => hay.includes(t));
   });
 }
+
+/**
+ * 批次給假（請假餘額頁「全員批次給假」，2026-11-17 業主決定）：只套用在職員工。
+ * 以套用的期間 [from, to]（留白＝該年度 1/1～12/31）判斷：今天在職者照套；
+ * 已離職者只有在離職日 ≥ from（該期間仍在職）時才套；沒有離職日的停用帳號一律略過。
+ * 回傳要套用的名單與略過的名單（結果訊息顯示略過人數）。
+ */
+export function batchGrantTargets<T extends EmployeeStatusFields>(
+  employees: readonly T[],
+  from: string,
+  to: string,
+  today: string = todayTaipei(),
+): { targets: T[]; skipped: T[] } {
+  const f = day(from);
+  const t = day(to);
+  const targets: T[] = [];
+  const skipped: T[] = [];
+  for (const e of employees) {
+    let ok = isEmployeeActive(e, today);
+    if (!ok) {
+      const term = day(e.terminated_at);
+      const hire = day(e.hire_date);
+      ok = !!term && !!f && term >= f && (!t || !hire || hire <= t);
+    }
+    (ok ? targets : skipped).push(e);
+  }
+  return { targets, skipped };
+}

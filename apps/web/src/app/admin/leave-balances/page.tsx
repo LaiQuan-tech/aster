@@ -37,7 +37,7 @@ import {
 import { sheet } from "@/lib/sheet-styles";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
-import { employedInPeriod, employeeStatusNote, pickableEmployees } from "@/lib/employee-status";
+import { batchGrantTargets, employedInPeriod, employeeStatusNote, pickableEmployees } from "@/lib/employee-status";
 const yearNow = new Date().getFullYear();
 // 2026-10-27：預設改為「剩餘總覽」（一人一列、欄＝假別）；舊的一桶一列表格保留為「餘額明細」，避免功能消失。
 const tabs = [
@@ -194,7 +194,11 @@ function LeaveBalancesContent() {
       return;
     }
     try {
-      const targetEmployeeIds = batchAll ? employees.map((employee) => employee.id) : [editEmployeeId];
+      // 全員批次給假只套用在職員工（以套用期間判斷；留白＝該年度），離職者略過並顯示人數。
+      const batch = batchAll
+        ? batchGrantTargets(employees, periodStart || `${year}-01-01`, periodEnd || `${year}-12-31`)
+        : null;
+      const targetEmployeeIds = batch ? batch.targets.map((employee) => employee.id) : [editEmployeeId];
       for (const targetEmployeeId of targetEmployeeIds) {
         await putLeaveBalance({
           employeeId: targetEmployeeId,
@@ -207,7 +211,11 @@ function LeaveBalancesContent() {
           periodEnd: periodEnd || undefined,
         });
       }
-      setMessage(batchAll ? `已批次給假 ${targetEmployeeIds.length} 人` : "假別時數已儲存");
+      setMessage(
+        batch
+          ? `已批次給假 ${targetEmployeeIds.length} 人${batch.skipped.length > 0 ? `（略過已離職 ${batch.skipped.length} 人）` : ""}`
+          : "假別時數已儲存",
+      );
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存失敗");

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  batchGrantTargets,
   countTerminated,
   employedInPeriod,
   employeeStatusNote,
@@ -139,5 +140,28 @@ describe("employeeOptionsOf 自動標「已離職」", () => {
 describe("todayTaipei", () => {
   it("用台北時區", () => {
     expect(todayTaipei(new Date("2026-11-16T17:00:00Z"))).toBe("2026-11-17");
+  });
+});
+
+describe("batchGrantTargets（全員批次給假只套在職）", () => {
+  const all = [
+    active,
+    futureLeave,
+    leftLastMonth,
+    disabledNoDate,
+    emp("OLD", { status: "inactive", terminated_at: "2025-03-31", hire_date: "2020-01-01" }),
+  ];
+  it("今年度：在職＋預告離職套用；已離職、無離職日停用帳號略過", () => {
+    const r = batchGrantTargets(all, "2027-01-01", "2027-12-31", TODAY);
+    expect(r.targets.map((e) => e.id)).toEqual(["A", "F"]);
+    expect(r.skipped.map((e) => e.id)).toEqual(["L", "D", "OLD"]);
+  });
+  it("套用期間內仍在職的離職者照套（例：補今年度，10/31 離職）", () => {
+    const r = batchGrantTargets(all, "2026-01-01", "2026-12-31", TODAY);
+    expect(r.targets.map((e) => e.id)).toEqual(["A", "F", "L"]);
+    expect(r.skipped.map((e) => e.id)).toEqual(["D", "OLD"]);
+  });
+  it("期間在到職日之前 → 略過", () => {
+    expect(batchGrantTargets([leftLastMonth], "2024-01-01", "2024-12-31", TODAY).skipped).toHaveLength(1);
   });
 });
