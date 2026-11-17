@@ -56,11 +56,23 @@ describe("請假列顯示假別", () => {
   it("各假別一覽：本單假別醒目、有額度顯示剩餘與簽核中、無額度只顯示已請", () => {
     const html = renderToStaticMarkup(<LeaveTypeBalanceList list={list} hoursPerDay={8} />);
     expect(html).toContain("申請人各假別（今年）");
-    expect(html).toContain("已請 16 小時／剩 40 小時（約 5 天）・簽核中 4 小時");
-    expect(html).toContain("已請 8 小時／剩 232 小時（約 29 天）");
-    expect(html).toContain("已請 12 小時（無額度）");
+    // 已請也換算天數（同剩餘）
+    expect(html).toContain("已請 16 小時（約 2 天）／剩 40 小時（約 5 天）・簽核中 4 小時");
+    expect(html).toContain("已請 8 小時（約 1 天）／剩 232 小時（約 29 天）");
+    expect(html).toContain("已請 12 小時（約 1 天 4 時）（無額度）");
     expect(html).toMatch(/<li aria-current="true"[^>]*font-semibold[^>]*>.*病假/);
     expect(html.match(/aria-current/g)).toHaveLength(1);
+  });
+
+  it("補休列：已用是補休帳歷年累計 → 標「累計已用」，不寫成今年已請", () => {
+    const html = renderToStaticMarkup(
+      <LeaveTypeBalanceList
+        list={[{ leaveTypeId: "c", name: "補休", current: false, capped: true, source: "comp", remainingHours: 8, pendingHours: 0, usedHours: 20 }]}
+        hoursPerDay={8}
+      />,
+    );
+    expect(html).toContain("累計已用 20 小時（約 2 天 4 時）／剩 8 小時（約 1 天）");
+    expect(html).not.toContain("已請 20");
   });
 
   it("沒有資料不顯示", () => {

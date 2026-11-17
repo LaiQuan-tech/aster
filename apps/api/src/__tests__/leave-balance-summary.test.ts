@@ -130,8 +130,9 @@ describe("loadLeaveBalanceSummaries", () => {
       req("y6", { start_at: "2027-08-01T01:00:00.000Z", end_at: "2027-08-01T09:00:00.000Z" }),
     ])
     const per = (reads: string[], table: string) => reads.filter((t) => t === table).length
-    // leave_requests 兩次：簽核中假單＋生理假併入病假（menstrual_sick_merge，2026-11-17）；都不隨列數增加。
-    const expected: Record<string, number> = { leave_balances: 1, leave_requests: 2, leave_types: 1, comp_time_ledger: 1 }
+    // leave_requests 一次（簽核中假單）：沒有生理假的單就不查生理假併入／已核准生理假（2026-11-17 隱私修正；
+    // 有生理假的單固定再多兩次，見 menstrual-leave.test.ts）。都不隨列數增加。
+    const expected: Record<string, number> = { leave_balances: 1, leave_requests: 1, leave_types: 1, comp_time_ledger: 1 }
     for (const table of Object.keys(expected)) {
       expect(per(one, table), table).toBe(expected[table])
       expect(per(many, table), table).toBe(expected[table])
@@ -222,9 +223,9 @@ describe("loadLeaveBalanceSummaries", () => {
       fake.reads.length = 0
       const out = await attachLeaveBalances(TENANT_ID, rows)
       const perTable = (t: string) => fake.reads.filter((x) => x === t).length
-      // leave_requests 兩次：簽核中假單＋生理假併入病假（2026-11-17）。
+      // 沒有生理假的單：leave_requests 只查一次（簽核中假單）。
       for (const t of ["leave_balances", "leave_types", "comp_time_ledger"]) expect(perTable(t), t).toBe(1)
-      expect(perTable("leave_requests"), "leave_requests").toBe(2)
+      expect(perTable("leave_requests"), "leave_requests").toBe(1)
       const annualB = out[2].leaveBalancesByType!.find((e) => e.name === "特休")!
       expect(annualB.remainingHours).toBe(998)
       expect(out[2].leaveBalancesByType!.some((e) => e.name === "病假")).toBe(false)

@@ -21,6 +21,7 @@ import {
   type Employee,
 } from "@/lib/admin-api";
 import { getMeCached } from "@/lib/ess-state";
+import { statutoryKindMissingWarning } from "@/lib/leave-balance-cap";
 import {
   bossSettingNote,
   canChangeBossSetting,
@@ -462,6 +463,15 @@ export default function LeaveTypesPage() {
                       {lt.statutoryKind && STATUTORY_KIND_LABEL[lt.statutoryKind] && (
                         <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs text-violet-700">
                           {STATUTORY_KIND_LABEL[lt.statutoryKind]}
+                        </span>
+                      )}
+                      {statutoryKindMissingWarning(lt) && (
+                        <span
+                          className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800"
+                          role="note"
+                          title="按「編輯」把法定假別設成病假或生理假"
+                        >
+                          {statutoryKindMissingWarning(lt)}
                         </span>
                       )}
                       <span

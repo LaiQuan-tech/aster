@@ -76,6 +76,9 @@ describe("tabForRoute（路由 → ESS 分頁對照表，純函式）", () => {
 
   it("其餘分頁：假別餘額／月表／薪資單／報銷／分潤／專案／考核／職缺／AI／公司／通知／班表", () => {
     expect(tabForRoute("GET", "/leave-balances")).toBe("balances")
+    // 生理假用量：主要分頁 balances，但有「請假申請」也算（請假表單要用）。
+    expect(tabsForRoute("GET", "/leave-balances/menstrual-usage")).toEqual(["balances", "requests"])
+    expect(tabsForRoute("GET", "/leave-balances/abc")).toEqual(["balances"])
     expect(tabForRoute("GET", "/my/attendance-sheet")).toBe("sheet")
     expect(tabForRoute("GET", "/payslips")).toBe("payslips")
     expect(tabForRoute("GET", "/payslips/abc")).toBe("payslips")

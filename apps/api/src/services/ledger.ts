@@ -157,12 +157,18 @@ export async function resolveBalanceBucket(
   return row ? { ...toBucket(row), periodStart: null, periodEnd: null, year } : null
 }
 
+/** debitLeaveBalance 樂觀鎖重試上限（與 menstrual-leave.adjustBucketUsed 相同）。 */
+const DEBIT_CAS_ATTEMPTS = 5
+
 /**
  * Debit a leave balance: add `hours` to leave_balances.used for the bucket the
  * request's start day falls in (see resolveBalanceBucket), creating a 曆年 row at
- * used=hours / entitled=0 when the employee has no bucket at all. Done
- * read-then-write (no DB trigger) — acceptable because approval is single-writer
- * per request.
+ * used=hours / entitled=0 when the employee has no bucket at all.
+ *
+ * 更新用樂觀鎖（2026-11-17 驗收）：`update … set used = 讀到的值 + hours where id = 桶 and used = 讀到的值`，
+ * 沒更新到（同一桶被別人改過，例如生理假併入病假 adjustBucketUsed、另一張單同時核准）→ 重讀 used 再試，
+ * 最多 5 次仍搶不到 → 丟錯（同既有 update 失敗的處理）。以前是讀後直接寫，兩個寫入者同時改同一桶會互蓋。
+ * 桶在重讀時已不見 → 丟錯（不靜默少扣）。
  */
 async function debitLeaveBalance(
   supabase: SupabaseClient,
@@ -176,12 +182,23 @@ async function debitLeaveBalance(
 
   const bucket = await resolveBalanceBucket(supabase, tenantId, req.employee_id, leaveTypeId, startDate)
   if (bucket) {
-    const { error: upErr } = await supabase
-      .from("leave_balances")
-      .update({ used: bucket.used + hours, updated_at: new Date().toISOString() })
-      .eq("id", bucket.id)
-    if (upErr) throw new Error(`ledger debitLeaveBalance (update): ${upErr.message}`)
-    return
+    let cur: { used: number; usedRaw: string | number | null } = { used: bucket.used, usedRaw: bucket.usedRaw }
+    for (let attempt = 0; attempt < DEBIT_CAS_ATTEMPTS; attempt += 1) {
+      let q = supabase
+        .from("leave_balances")
+        .update({ used: Math.round((cur.used + hours) * 100) / 100, updated_at: new Date().toISOString() })
+        .eq("id", bucket.id)
+      q = cur.usedRaw === null ? q.is("used", null) : q.eq("used", cur.usedRaw)
+      const { data, error: upErr } = await q.select("id")
+      if (upErr) throw new Error(`ledger debitLeaveBalance (update): ${upErr.message}`)
+      if ((data ?? []).length > 0) return
+      const { data: row, error: readErr } = await supabase.from("leave_balances").select("id, used").eq("id", bucket.id).maybeSingle()
+      if (readErr) throw new Error(`ledger debitLeaveBalance (reread): ${readErr.message}`)
+      if (!row) throw new Error("ledger debitLeaveBalance: bucket vanished")
+      const raw = ((row as { used?: string | number | null }).used ?? null) as string | number | null
+      cur = { used: numOr0(raw), usedRaw: raw }
+    }
+    throw new Error("ledger debitLeaveBalance: too many concurrent updates")
   }
 
   // 一個桶都沒有 → 建曆年桶（舊行為）。期間欄已套就順手補上，這一列之後才搬得動

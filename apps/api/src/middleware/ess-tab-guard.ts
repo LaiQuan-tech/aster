@@ -73,6 +73,9 @@ const ROUTE_TABS: readonly RouteTabRule[] = [
   // 上傳／刪除仍只屬「請假申請」。
   { path: "/requests/:id/attachments", tab: "requests", alsoTabs: ["approvals"], pattern: /^\/requests\/[^/]+\/attachments$/, methods: ["GET"] },
   { path: "/requests", tab: "requests" },
+  // 生理假用量（本人當月／當年，只回自己）：請假表單選生理假時要顯示並據以停用送出 → 只開「請假申請」沒開「假別額度」
+  // 的員工（例如實習生預設清單）也要打得到，否則 403 被前端吞掉、看不到用量也不會停用送出（2026-11-17 驗收）。
+  { path: "/leave-balances/menstrual-usage", tab: "balances", alsoTabs: ["requests"], exact: true, methods: ["GET"] },
   { path: "/leave-balances", tab: "balances" },
   { path: "/my/attendance-sheet", tab: "sheet" },
   { path: "/payslips", tab: "payslips" },

@@ -127,6 +127,23 @@ export function isMenstrualLeaveType(
   return /生理假/.test(type.name ?? "") || /^menstrual/i.test((type.code ?? "").trim());
 }
 
+export const STATUTORY_KIND_MISSING_WARNING = "未設定法定假別，生理假規則不會套用";
+
+/**
+ * 後台假別頁提醒（2026-11-17 驗收）：名稱含「病」或「生理」、但法定假別（statutoryKind）沒設定的假別 → 提醒文字；
+ * 公傷病假、住院（病假）本來就不該標成法定病假 → 不提醒。舊 API 沒回 statutoryKind（undefined）→ 不提醒（無從判斷）。
+ */
+export function statutoryKindMissingWarning(
+  type: { name?: string | null; statutoryKind?: string | null } | null | undefined,
+): string | null {
+  if (!type || type.statutoryKind === undefined) return null;
+  if (type.statutoryKind) return null;
+  const name = (type.name ?? "").trim();
+  if (!/病|生理/.test(name)) return null;
+  if (/公傷|住院/.test(name)) return null;
+  return STATUTORY_KIND_MISSING_WARNING;
+}
+
 /**
  * 生理假錯誤（400 送單／409 核准，或批次核准的一項）→ 人話；不是生理假錯誤 → null。
  *   menstrual_monthly_cap：「生理假每月以 1 日為限（2026-11 已請 4 小時，本單 8 小時）」

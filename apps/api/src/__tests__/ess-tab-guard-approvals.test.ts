@@ -184,3 +184,32 @@ describe("其他身分", () => {
     expect(res.body.reached).toBe(true)
   })
 })
+
+describe("生理假用量 GET /leave-balances/menstrual-usage：有「請假申請」就能用（不必開「假別額度」）", () => {
+  it("實習生（預設清單：有 requests、沒有 balances）→ 通；/leave-balances 本身仍 403 tab=balances", async () => {
+    const usage = await call(T.intern, ["GET", "/leave-balances/menstrual-usage?date=2026-11-17"])
+    expect(usage.status).toBe(200)
+    expect(usage.body.reached).toBe(true)
+    const list = await call(T.intern, ["GET", "/leave-balances"])
+    expect(list.status).toBe(403)
+    expect(list.body).toEqual({ error: "ess_tab_disabled", tab: "balances" })
+  })
+
+  it("有 requests 沒 balances 的身分類別（regular 設定）→ 通；大小寫／結尾斜線變化同樣通", async () => {
+    for (const path of ["/leave-balances/menstrual-usage", "/Leave-Balances/Menstrual-Usage/"]) {
+      const res = await call(T.noApprovals, ["GET", path])
+      expect(res.status, path).toBe(200)
+    }
+  })
+
+  it("requests 與 balances 都沒開 → 403（回報主要分頁 balances）；例外只限 GET、只限這條路徑", async () => {
+    const res = await call(T.neither, ["GET", "/leave-balances/menstrual-usage"])
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: "ess_tab_disabled", tab: "balances" })
+    const post = await call(T.intern, ["POST", "/leave-balances/menstrual-usage"])
+    expect(post.status).toBe(403)
+    expect(post.body.tab).toBe("balances")
+    const sub = await call(T.intern, ["GET", "/leave-balances/menstrual-usage/x"])
+    expect(sub.status).toBe(403)
+  })
+})

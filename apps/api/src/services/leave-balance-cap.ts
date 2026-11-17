@@ -87,7 +87,11 @@ export function evaluateLeaveCap(input: {
 }
 
 /** 某日期（YYYY-MM-DD）是否落在這個桶的範圍（期間桶看期間；曆年退回看年份）。 */
-function bucketCovers(bucket: BalanceBucket, dateKey: string): boolean {
+export function bucketCoversDate(bucket: Pick<BalanceBucket, "periodStart" | "periodEnd" | "year">, dateKey: string): boolean {
+  return bucketCovers(bucket, dateKey)
+}
+
+function bucketCovers(bucket: Pick<BalanceBucket, "periodStart" | "periodEnd" | "year">, dateKey: string): boolean {
   if (bucket.periodStart && bucket.periodEnd) return bucket.periodStart <= dateKey && dateKey <= bucket.periodEnd
   return bucket.year != null && Number(dateKey.slice(0, 4)) === bucket.year
 }
@@ -218,7 +222,14 @@ export async function checkLeaveBalanceForCreate(
     const [remainingHours, pendingHours] = await Promise.all([compTimeAvailable(t.tenantId, t.employeeId), pendingCompHours(t)])
     return evaluateLeaveCap({ leaveTypeId: t.leaveTypeId, remainingHours, requestedHours, pendingHours })
   }
-  const pendingHours = await pendingHoursInBucket(t, source.bucket, tz)
+  // 病假（生理假併入的那個假別）：簽核中另含其他簽核中生理假單預估會併入的時數（2026-11-17 驗收）。
+  // 動態 import：menstrual-leave.ts 也 import 本檔，避免循環載入順序問題。
+  const { pendingMenstrualMergeInSickBucket } = await import("./menstrual-leave.js")
+  const [pendingLeave, pendingMerge] = await Promise.all([
+    pendingHoursInBucket(t, source.bucket, tz),
+    pendingMenstrualMergeInSickBucket(t, source.bucket),
+  ])
+  const pendingHours = round2(pendingLeave + pendingMerge)
   return evaluateLeaveCap({ leaveTypeId: t.leaveTypeId, remainingHours: bucketRemaining(source.bucket), requestedHours, pendingHours })
 }
 

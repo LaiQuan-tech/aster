@@ -16,6 +16,17 @@
  * ── 權限 ────────────────────────────────────────────────────────────
  * 呼叫端只對「已經看得到的列」附加（簽核人或 HR），不另開餘額 API，也不經過 ESS 分頁守門（balances）。
  * 讀不到（DB 錯誤）→ 不附 leaveBalance、記 warn，不讓主清單失敗（顯示用的附加欄位）。
+ *
+ * ── 生理假隱私（2026-11-17 驗收）────────────────────────────────────────
+ * 只有**本單就是生理假**時，各假別一覽才列生理假、病假列才帶「含生理假併入」與預估併入；其他假別的單
+ * （含病假單）一律不回生理假那一列、病假列不帶 menstrualMergedHours／menstrualPendingMergeHours
+ * （病假已請／剩餘數字本身仍含已核准的併入，可接受）。HR 的 GET /requests 走同一支，規則相同；
+ * 員工本人的 ESS 假別額度頁（GET /leave-balances）不受影響。後端直接不回，不靠前端隱藏。
+ *
+ * ── 生理假預估併入 ────────────────────────────────────────────────────
+ * 本單為生理假時：以同年已核准生理假為已用，其他簽核中生理假依日期先後、本單排最後吃 3 日門檻，
+ * 超過的部分依「那一天」所屬的病假桶算進病假列的簽核中（menstrualPendingMergeHours 是其中屬生理假預估的部分）；
+ * 本單自己的預估併入量另回在本單摘要的 estimatedSickMergeHours（畫面顯示「核准後約有 X 小時併入病假」）。
  */
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
@@ -26,7 +37,14 @@ import { loadDailyRegularHours } from "./daily-regular-hours.js"
 import { resolveHours, type BalanceBucket } from "./ledger.js"
 import { bucketHasQuota, bucketRemaining, isCompLeaveType } from "./leave-balance-cap.js"
 import { sortLeaveTypes } from "./leave-overview.js"
-import { menstrualMergedByBucket } from "./menstrual-leave.js"
+import {
+  hoursByDate,
+  leaveTypesHaveStatutoryKind,
+  menstrualMergedByBucket,
+  mergedHoursByDate,
+  statutoryKindOf,
+  sumByPrefix,
+} from "./menstrual-leave.js"
 
 export interface LeaveBalanceSummary {
   /** 有額度上限（balance 桶有額度，或補休帳）。 */
@@ -40,8 +58,12 @@ export interface LeaveBalanceSummary {
   usedHours: number
   /** 1 天＝幾小時（payroll.dailyRegularHours，與 GET /leave-balances 的 dailyRegularHours 同源）。 */
   hoursPerDay: number
-  /** 病假桶：生理假超過全年 3 日併入的時數（已含在 usedHours／剩餘裡）；沒有＝缺席。 */
+  /** 病假桶：生理假超過全年 3 日併入的時數（已含在 usedHours／剩餘裡）；沒有＝缺席。只在本單為生理假時回。 */
   menstrualMergedHours?: number
+  /** 病假：pendingHours 裡屬「簽核中生理假（含本單）核准後預估併入」的時數；只在本單為生理假時回。 */
+  menstrualPendingMergeHours?: number
+  /** 本單（生理假）核准後預估併入病假的時數；不是生理假或不會併入＝缺席。 */
+  estimatedSickMergeHours?: number
 }
 
 /**
@@ -65,6 +87,7 @@ export interface SummarizableRow {
   start_at: string
   end_at: string
   hours?: string | number | null
+  segments?: unknown
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -140,10 +163,11 @@ export async function loadLeaveBalanceDetails(
 
   const employeeIds = Array.from(new Set(targets.map((r) => r.employee_id)))
 
-  const [tz, hoursPerDay, havePeriod] = await Promise.all([
+  const [tz, hoursPerDay, havePeriod, haveStatutory] = await Promise.all([
     getTenantTimezone(tenantId),
     loadDailyRegularHours(tenantId),
     leaveBalancesHavePeriod(),
+    leaveTypesHaveStatutoryKind(),
   ])
 
   const [balRes, pendRes, typeRes] = await Promise.all([
@@ -154,14 +178,14 @@ export async function loadLeaveBalanceDetails(
       .in("employee_id", employeeIds),
     supabaseAdmin
       .from("leave_requests")
-      .select("id, employee_id, leave_type_id, hours, start_at, end_at")
+      .select("id, employee_id, leave_type_id, hours, start_at, end_at, segments")
       .eq("tenant_id", tenantId)
       .eq("kind", "leave")
       .eq("status", "pending")
       .is("deleted_at", null)
       .in("employee_id", employeeIds),
     // 全部假別（申請人各假別一覽要用）；仍是一次查詢。
-    supabaseAdmin.from("leave_types").select("id, code, name").eq("tenant_id", tenantId),
+    supabaseAdmin.from("leave_types").select(haveStatutory ? "id, code, name, statutory_kind, created_at" : "id, code, name, created_at").eq("tenant_id", tenantId),
   ])
   if (balRes.error) throw new Error(`leave balance summary (balances): ${balRes.error.message}`)
   if (pendRes.error) throw new Error(`leave balance summary (pending): ${pendRes.error.message}`)
@@ -175,15 +199,25 @@ export async function loadLeaveBalanceDetails(
     arr.push(b)
     bucketsByKey.set(k, arr)
   }
-  const pendingByKey = new Map<string, Array<{ id: string; hours: string | number | null; start_at: string; end_at: string }>>()
-  for (const p of (pendRes.data ?? []) as Array<{ id: string; employee_id: string; leave_type_id: string; hours: string | number | null; start_at: string; end_at: string }>) {
+  type PendingRow = { id: string; employee_id: string; leave_type_id: string; hours: string | number | null; start_at: string; end_at: string; segments?: unknown }
+  const pendingByKey = new Map<string, PendingRow[]>()
+  for (const p of (pendRes.data ?? []) as PendingRow[]) {
     const k = key(p.employee_id, p.leave_type_id)
     const arr = pendingByKey.get(k) ?? []
     arr.push(p)
     pendingByKey.set(k, arr)
   }
-  const typeRows = (typeRes.data ?? []) as Array<{ id: string; code?: string | null; name?: string | null }>
+  const typeRows = (typeRes.data ?? []) as unknown as Array<{ id: string; code?: string | null; name?: string | null; statutory_kind?: string | null; created_at?: string | null }>
   const compTypeIds = new Set(typeRows.filter((t) => isCompLeaveType(t)).map((t) => t.id))
+  // 生理假／要併入的病假（同 menstrual-leave.loadStatutoryTypes：最早建立的 sick 假別）。
+  const menstrualIds = new Set<string>()
+  let sickTypeId: string | null = null
+  for (const t of [...typeRows].sort((a, b) => ((a.created_at ?? "") < (b.created_at ?? "") ? -1 : (a.created_at ?? "") > (b.created_at ?? "") ? 1 : 0))) {
+    const kind = statutoryKindOf(t, haveStatutory)
+    if (kind === "menstrual") menstrualIds.add(t.id)
+    else if (kind === "sick" && !sickTypeId) sickTypeId = t.id
+  }
+  const menstrualTargets = targets.filter((r) => menstrualIds.has(r.leave_type_id))
 
   // 補休帳：租戶有補休假別才查（一次，涵蓋所有申請人）。
   const compByEmp = new Map<string, { available: number; used: number }>()
@@ -202,12 +236,51 @@ export async function loadLeaveBalanceDetails(
     }
   }
 
-  // 生理假併入病假（依桶 id）：讀不到不影響摘要（顯示用加註）。
+  // 生理假併入病假（依桶 id）＋已核准生理假逐日時數（預估併入的底）：只有本單是生理假的列才用得到，
+  // 沒有這種列就完全不查（其他假別的簽核卡片不回任何生理假資訊）。讀不到不影響摘要（顯示用加註）。
   let mergedByBucket = new Map<string, number>()
-  try {
-    mergedByBucket = await menstrualMergedByBucket(tenantId, employeeIds)
-  } catch (err) {
-    logger.warn({ err, tenantId }, "leave balance summary: menstrual merged read failed")
+  const approvedMensByEmp = new Map<string, Map<string, number>>()
+  if (menstrualTargets.length > 0) {
+    const mensEmpIds = Array.from(new Set(menstrualTargets.map((r) => r.employee_id)))
+    try {
+      mergedByBucket = await menstrualMergedByBucket(tenantId, mensEmpIds)
+    } catch (err) {
+      logger.warn({ err, tenantId }, "leave balance summary: menstrual merged read failed")
+    }
+    const { data, error } = await supabaseAdmin
+      .from("leave_requests")
+      .select("id, employee_id, hours, start_at, end_at, segments")
+      .eq("tenant_id", tenantId)
+      .eq("kind", "leave")
+      .eq("status", "approved")
+      .is("deleted_at", null)
+      .in("employee_id", mensEmpIds)
+      .in("leave_type_id", Array.from(menstrualIds))
+    if (error) throw new Error(`leave balance summary (approved menstrual): ${error.message}`)
+    for (const r of (data ?? []) as Array<{ employee_id: string; hours: string | number | null; start_at: string; end_at: string; segments?: unknown }>) {
+      const m = approvedMensByEmp.get(r.employee_id) ?? new Map<string, number>()
+      for (const [d, h] of hoursByDate(r, tz)) m.set(d, round2((m.get(d) ?? 0) + h))
+      approvedMensByEmp.set(r.employee_id, m)
+    }
+  }
+  const dayHours = hoursPerDay > 0 ? hoursPerDay : 8
+  /** 本單（生理假）＋其他簽核中生理假預估併入病假的逐日時數；mine＝本單自己那份。 */
+  const estimateFor = (r: SummarizableRow & { leave_type_id: string }) => {
+    const approved = approvedMensByEmp.get(r.employee_id) ?? new Map<string, number>()
+    const others = new Map<string, number>()
+    for (const id of menstrualIds) {
+      for (const p of pendingByKey.get(key(r.employee_id, id)) ?? []) {
+        if (p.id === r.id) continue
+        for (const [d, h] of hoursByDate(p, tz)) others.set(d, round2((others.get(d) ?? 0) + h))
+      }
+    }
+    const othersMerge = mergedHoursByDate(sumByPrefix(approved, 4), others, dayHours)
+    const used = sumByPrefix(approved, 4)
+    for (const [y, h] of sumByPrefix(others, 4)) used.set(y, round2((used.get(y) ?? 0) + h))
+    const mine = mergedHoursByDate(used, hoursByDate({ hours: r.hours ?? null, start_at: r.start_at, end_at: r.end_at, segments: r.segments }, tz), dayHours)
+    const all = new Map(othersMerge)
+    for (const [d, h] of mine) all.set(d, round2((all.get(d) ?? 0) + h))
+    return { all, mine }
   }
   const withMerged = (s: LeaveBalanceSummary, bucket: BalanceBucket | null): LeaveBalanceSummary => {
     const merged = bucket ? mergedByBucket.get(bucket.id) ?? 0 : 0
@@ -250,13 +323,43 @@ export async function loadLeaveBalanceDetails(
     return list
   }
 
+  /** 不是生理假的單：拿掉生理假併入註記（隱私）。 */
+  const stripMenstrual = (s: LeaveBalanceSummary): LeaveBalanceSummary => {
+    if (s.menstrualMergedHours == null) return s
+    const { menstrualMergedHours: _m, ...rest } = s
+    return rest
+  }
+
   for (const r of targets) {
     const dateKey = localDateKey(r.start_at, tz)
-    const own = summarizeOne(r.employee_id, r.leave_type_id, dateKey, r.id)
+    const isMenstrual = menstrualIds.has(r.leave_type_id)
+    let own = summarizeOne(r.employee_id, r.leave_type_id, dateKey, r.id)
+    let sickBucket: BalanceBucket | null = null
+    let sickPendingMerge = 0
+    if (isMenstrual) {
+      const est = estimateFor(r)
+      const mineTotal = round2(Array.from(est.mine.values()).reduce((a, b) => a + b, 0))
+      if (sickTypeId && mineTotal > 0) own = { ...own, estimatedSickMergeHours: mineTotal }
+      if (sickTypeId) {
+        sickBucket = pickBucket(bucketsByKey.get(key(r.employee_id, sickTypeId)) ?? [], dateKey, havePeriod)
+        for (const [d, h] of est.all) {
+          if (sickBucket ? bucketCovers(sickBucket, d) : d.slice(0, 4) === dateKey.slice(0, 4)) sickPendingMerge += h
+        }
+        sickPendingMerge = round2(sickPendingMerge)
+      }
+    } else {
+      own = stripMenstrual(own)
+    }
     const byType: LeaveTypeBalanceEntry[] = []
     for (const e of allFor(r.employee_id, dateKey)) {
       const current = e.leaveTypeId === r.leave_type_id
-      const s = current ? own : e.s
+      // 隱私：本單不是生理假 → 生理假那一列不回。
+      if (!isMenstrual && menstrualIds.has(e.leaveTypeId)) continue
+      let s = current ? own : e.s
+      if (!isMenstrual) s = stripMenstrual(s)
+      else if (e.leaveTypeId === sickTypeId && sickPendingMerge > 0) {
+        s = { ...s, pendingHours: round2(s.pendingHours + sickPendingMerge), menstrualPendingMergeHours: sickPendingMerge }
+      }
       // 沒額度、沒請過、沒有簽核中的假別不列（避免一長串 0）；本單假別一定列。
       if (!current && !s.capped && s.usedHours === 0 && s.pendingHours === 0) continue
       const { hoursPerDay: _hpd, ...rest } = s

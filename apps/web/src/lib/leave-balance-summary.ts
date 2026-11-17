@@ -15,8 +15,25 @@ export interface LeaveBalanceSummary {
   pendingHours: number;
   usedHours: number;
   hoursPerDay: number;
-  /** 病假：生理假超過全年 3 日併入的時數（已含在已請／剩餘裡）；沒有＝缺席。 */
+  /** 病假：生理假超過全年 3 日併入的時數（已含在已請／剩餘裡）；沒有＝缺席。API 只在本單為生理假時回。 */
   menstrualMergedHours?: number;
+  /** 病假：簽核中裡屬「簽核中生理假（含本單）核准後預估併入」的時數；API 只在本單為生理假時回。 */
+  menstrualPendingMergeHours?: number;
+  /** 本單（生理假）核准後預估併入病假的時數。 */
+  estimatedSickMergeHours?: number;
+}
+
+/** 「核准後約有 8 小時併入病假」；不會併入 → 空字串。 */
+export function estimatedSickMergeNote(hours: number | null | undefined): string {
+  const h = round2(num(hours));
+  return h > 0 ? `核准後約有 ${h} 小時併入病假` : "";
+}
+
+/** 簽核中文字「・簽核中 12 小時（含生理假預估併入 8 小時）」；沒有簽核中 → 空字串。 */
+function pendingNote(pending: number, menstrualPending: number | null | undefined, sep: string): string {
+  if (pending <= 0) return "";
+  const m = round2(num(menstrualPending));
+  return `${sep}簽核中 ${pending} 小時${m > 0 ? `（含生理假預估併入 ${m} 小時）` : ""}`;
 }
 
 /** 「（含生理假併入 4 小時）」；沒有併入 → 空字串。 */
@@ -51,9 +68,11 @@ export function leaveBalanceSummaryView(
   if (!lb) return null;
   const hpd = lb.hoursPerDay;
   const name = (leaveTypeName ?? "").trim();
+  const estimate = estimatedSickMergeNote(lb.estimatedSickMergeHours);
+  const withEstimate = (t: string) => (estimate ? `${t} · ${estimate}` : t);
   if (!lb.capped || lb.remainingHours == null) {
     const used = round2(num(lb.usedHours));
-    return { text: `今年已請${name ? name : ""} ${used} 小時（約 ${formatLeaveDuration(used, hpd)}）${menstrualMergedNote(lb.menstrualMergedHours)}`, warning: null };
+    return { text: withEstimate(`今年已請${name ? name : ""} ${used} 小時（約 ${formatLeaveDuration(used, hpd)}）${menstrualMergedNote(lb.menstrualMergedHours)}`), warning: null };
   }
   const remaining = round2(num(lb.remainingHours));
   const pending = round2(num(lb.pendingHours));
@@ -63,7 +82,7 @@ export function leaveBalanceSummaryView(
       ? `${label} ${formatLeaveRemaining(remaining, hpd)}`
       : `${label} ${remaining} 小時（約 ${formatLeaveRemaining(remaining, hpd)}）`;
   const merged = menstrualMergedNote(lb.menstrualMergedHours);
-  const text = pending > 0 ? `${head}${merged} · 簽核中 ${pending} 小時` : `${head}${merged}`;
+  const text = withEstimate(`${head}${merged}${pendingNote(pending, lb.menstrualPendingMergeHours, " · ")}`);
   const self = round2(num(requestHours));
   const after = round2(remaining - self);
   let warning: string | null = null;
@@ -86,15 +105,22 @@ export interface LeaveTypeBalanceEntry {
   remainingHours: number | null;
   pendingHours: number;
   usedHours: number;
-  /** 病假：生理假超過全年 3 日併入的時數。 */
+  /** 病假：生理假超過全年 3 日併入的時數（API 只在本單為生理假時回）。 */
   menstrualMergedHours?: number;
+  /** 病假：簽核中裡屬生理假預估併入的時數（API 只在本單為生理假時回）。 */
+  menstrualPendingMergeHours?: number;
+  /** 本單（生理假）核准後預估併入病假的時數。 */
+  estimatedSickMergeHours?: number;
 }
 
 export interface LeaveTypeBalanceItem {
   leaveTypeId: string;
   name: string;
   current: boolean;
-  /** 「已請 16 小時／剩 40 小時（約 5 天）・簽核中 4 小時」；無額度「已請 12 小時（無額度）」。 */
+  /**
+   * 「已請 16 小時（約 2 天）／剩 40 小時（約 5 天）・簽核中 4 小時」；無額度「已請 12 小時（約 1 天 4 時）（無額度）」。
+   * 補休的已用是補休帳歷年累計（不是今年）→「累計已用」。
+   */
   text: string;
   /** 剩餘為負（超用）。 */
   overused: boolean;
@@ -110,10 +136,13 @@ export function leaveTypeBalanceItems(
   return list.map((e) => {
     const used = round2(num(e.usedHours));
     const pending = round2(num(e.pendingHours));
-    const pendingText = pending > 0 ? `・簽核中 ${pending} 小時` : "";
+    const pendingText = pendingNote(pending, e.menstrualPendingMergeHours, "・");
     const merged = menstrualMergedNote(e.menstrualMergedHours);
+    const usedText = `${e.source === "comp" ? "累計已用" : "已請"} ${used} 小時（約 ${formatLeaveDuration(used, hpd)}）`;
+    const estimate = e.current ? estimatedSickMergeNote(e.estimatedSickMergeHours) : "";
+    const estimateText = estimate ? `・${estimate}` : "";
     if (!e.capped || e.remainingHours == null) {
-      return { leaveTypeId: e.leaveTypeId, name: e.name, current: e.current, text: `已請 ${used} 小時（無額度）${merged}${pendingText}`, overused: false };
+      return { leaveTypeId: e.leaveTypeId, name: e.name, current: e.current, text: `${usedText}（無額度）${merged}${pendingText}${estimateText}`, overused: false };
     }
     const remaining = round2(num(e.remainingHours));
     const remainText =
@@ -122,7 +151,7 @@ export function leaveTypeBalanceItems(
       leaveTypeId: e.leaveTypeId,
       name: e.name,
       current: e.current,
-      text: `已請 ${used} 小時／${remainText}${merged}${pendingText}`,
+      text: `${usedText}／${remainText}${merged}${pendingText}${estimateText}`,
       overused: remaining < 0,
     };
   });

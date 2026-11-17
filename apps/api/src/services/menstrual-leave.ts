@@ -8,7 +8,8 @@
  *   • 全年（租戶時區的曆年）3 日內不併入病假；超過 3 日的部分**併入普通傷病假**計算：
  *       – 送單／每關核准：超過的部分若病假有「有額度」的桶（entitled＋deferred > 0），用病假剩餘檢查，
  *         不夠 → `menstrual_exceeds_sick_balance`；病假不限額就不擋。
- *       – 最終核准：超過的部分另外記到同年病假桶的 used（resolveBalanceBucket 選桶；沒有桶就照
+ *       – 送單時病假的「簽核中」另含其他簽核中生理假單預估會併入的時數（estimatePendingMerge；送病假單也算）。
+ *       – 最終核准：超過的部分另外記到病假桶的 used（依「實際被併入那天」用 resolveBalanceBucket 選桶；沒有桶就照
  *         ledger.debitLeaveBalance 的既有規則建 entitled=0 的曆年記帳桶），並把「記了哪個桶幾小時」
  *         寫在 leave_requests.menstrual_sick_merge。撤銷／退回時照這份沖回（reverseMenstrualSickMerge）。
  *   • 薪資：生理假的 deduct_rate=0.5（減半發給），payroll 不用改。
@@ -35,7 +36,7 @@ import { columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/sc
 import { leaveBalancesHavePeriod } from "./annual-leave.js"
 import { loadDailyRegularHours } from "./daily-regular-hours.js"
 import { resolveBalanceBucket, resolveHours, type BalanceBucket } from "./ledger.js"
-import { bucketHasQuota, bucketRemaining, pendingHoursInBucket } from "./leave-balance-cap.js"
+import { bucketCoversDate, bucketHasQuota, bucketRemaining, pendingHoursInBucket } from "./leave-balance-cap.js"
 
 export const MENSTRUAL_MONTHLY_CAP = "menstrual_monthly_cap"
 export const MENSTRUAL_EXCEEDS_SICK_BALANCE = "menstrual_exceeds_sick_balance"
@@ -131,9 +132,37 @@ export function sumByPrefix(byDate: Map<string, number>, len: 4 | 7): Map<string
   return out
 }
 
-/** 某年那一段的第一天（選病假桶用）。 */
-function firstDateOfYear(byDate: Map<string, number>, year: string): string {
-  return Array.from(byDate.keys()).filter((d) => d.startsWith(year)).sort()[0] ?? `${year}-01-01`
+/**
+ * 本單（或一批簽核中單）逐日時數中，哪幾天的哪些時數會「併入病假」：
+ * 依年分組、日期由早到晚吃掉該年剩下的 3 日門檻，吃不下的部分記在那一天。
+ * yearUsedBefore＝各年（'YYYY'）在這批之前已算進去的生理假時數。
+ * 併入的時數用「實際被併入那天」選病假桶（週年制期間在年中跨界時，才會記到正確的期間桶）。
+ */
+export function mergedHoursByDate(
+  yearUsedBefore: Map<string, number>,
+  byDate: Map<string, number>,
+  dayHours: number,
+): Map<string, number> {
+  const out = new Map<string, number>()
+  const threshold = MENSTRUAL_YEAR_THRESHOLD_DAYS * dayHours
+  const used = new Map<string, number>()
+  for (const d of Array.from(byDate.keys()).sort()) {
+    const year = d.slice(0, 4)
+    const before = used.has(year) ? used.get(year)! : Math.max(0, yearUsedBefore.get(year) ?? 0)
+    const h = Math.max(0, byDate.get(d) ?? 0)
+    const room = Math.max(0, threshold - before)
+    const merged = round2(h - Math.min(h, room))
+    used.set(year, before + h)
+    if (merged > EPS) out.set(d, merged)
+  }
+  return out
+}
+
+/** 落在某桶範圍內的逐日時數合計。 */
+function sumCovered(byDate: Map<string, number>, bucket: BalanceBucket): number {
+  let total = 0
+  for (const [d, h] of byDate) if (bucketCoversDate(bucket, d)) total += h
+  return round2(total)
 }
 
 export interface MenstrualMonthlyCapViolation {
@@ -316,28 +345,99 @@ async function evaluate(
     opts.yearStatuses.length === 2
       ? existing
       : await menstrualHoursByDate(t.tenantId, t.employeeId, ctx.types.menstrualIds, ctx.tz, { statuses: opts.yearStatuses, excludeRequestId: t.requestId }, supabase)
-  const yearUsed = sumByPrefix(yearExisting, 4)
-  for (const [year, hours] of Array.from(sumByPrefix(mine, 4)).sort(([a], [b]) => (a < b ? -1 : 1))) {
-    const { mergedIntoSick } = splitMenstrualHours(yearUsed.get(year) ?? 0, hours, ctx.dayHours)
-    if (mergedIntoSick <= EPS) continue
-    const bucket = await resolveBalanceBucket(supabase, t.tenantId, t.employeeId, sickTypeId, firstDateOfYear(mine, year))
-    if (!bucketHasQuota(bucket)) continue
+  const mergedDates = mergedHoursByDate(sumByPrefix(yearExisting, 4), mine, ctx.dayHours)
+  // 送單：病假「簽核中」另含其他簽核中生理假單預估會併入的時數（以已核准為底、依日期先後吃門檻）。
+  const otherPendingMerge = opts.includeSickPending
+    ? await estimatePendingMerge(t.tenantId, t.employeeId, ctx, t.requestId, supabase)
+    : new Map<string, number>()
+  for (const group of await groupByBucket(supabase, t, sickTypeId, mergedDates)) {
+    const bucket = group.bucket
+    if (!bucket || !bucketHasQuota(bucket)) continue
     const pending = opts.includeSickPending
-      ? await pendingHoursInBucket({ tenantId: t.tenantId, employeeId: t.employeeId, leaveTypeId: sickTypeId }, bucket!, ctx.tz)
+      ? round2(
+          (await pendingHoursInBucket({ tenantId: t.tenantId, employeeId: t.employeeId, leaveTypeId: sickTypeId }, bucket, ctx.tz)) +
+            sumCovered(otherPendingMerge, bucket),
+        )
       : 0
-    const available = round2(bucketRemaining(bucket!) - pending)
-    if (mergedIntoSick > available + EPS) {
+    const available = round2(bucketRemaining(bucket) - pending)
+    if (group.hours > available + EPS) {
       return {
         error: MENSTRUAL_EXCEEDS_SICK_BALANCE,
         message: MENSTRUAL_EXCEEDS_SICK_BALANCE_MESSAGE,
-        year,
+        year: group.firstDate.slice(0, 4),
         sickLeaveTypeId: sickTypeId,
-        mergedHours: mergedIntoSick,
+        mergedHours: group.hours,
         availableHours: Math.max(0, available),
       }
     }
   }
   return null
+}
+
+interface BucketGroup {
+  /** 沒有桶 → null（最終核准時建記帳桶）。 */
+  bucket: BalanceBucket | null
+  hours: number
+  /** 這組最早的日期（建記帳桶、錯誤回報年份用）。 */
+  firstDate: string
+}
+
+/**
+ * 併入病假的逐日時數 → 依「那一天」所屬的病假桶分組（同 ledger.resolveBalanceBucket 選桶）。
+ * 沒有桶的日期依年份分組（最終核准時一年建一個曆年記帳桶）。
+ */
+async function groupByBucket(
+  supabase: SupabaseClient,
+  t: { tenantId: string; employeeId: string },
+  sickTypeId: string,
+  mergedDates: Map<string, number>,
+): Promise<BucketGroup[]> {
+  const groups = new Map<string, BucketGroup>()
+  for (const d of Array.from(mergedDates.keys()).sort()) {
+    const h = mergedDates.get(d) ?? 0
+    if (h <= EPS) continue
+    const bucket = await resolveBalanceBucket(supabase, t.tenantId, t.employeeId, sickTypeId, d)
+    const k = bucket ? `b:${bucket.id}` : `y:${d.slice(0, 4)}`
+    const g = groups.get(k)
+    if (g) g.hours = round2(g.hours + h)
+    else groups.set(k, { bucket, hours: round2(h), firstDate: d })
+  }
+  return Array.from(groups.values())
+}
+
+/**
+ * 其他「簽核中」生理假單核准後預估會併入病假的逐日時數（排除 excludeRequestId）：
+ * 以同年已核准的生理假為已用，簽核中的依日期先後吃 3 日門檻，超過的部分記在那一天。
+ */
+async function estimatePendingMerge(
+  tenantId: string,
+  employeeId: string,
+  ctx: Ctx,
+  excludeRequestId: string | undefined,
+  supabase: SupabaseClient,
+): Promise<Map<string, number>> {
+  const [approved, pending] = await Promise.all([
+    menstrualHoursByDate(tenantId, employeeId, ctx.types.menstrualIds, ctx.tz, { statuses: ["approved"], excludeRequestId }, supabase),
+    menstrualHoursByDate(tenantId, employeeId, ctx.types.menstrualIds, ctx.tz, { statuses: ["pending"], excludeRequestId }, supabase),
+  ])
+  if (pending.size === 0) return new Map()
+  return mergedHoursByDate(sumByPrefix(approved, 4), pending, ctx.dayHours)
+}
+
+/**
+ * 送單擋病假額度用（leave-balance-cap.checkLeaveBalanceForCreate）：這個假別是病假（生理假要併入的那個）時，
+ * 回同桶「其他簽核中生理假單預估會併入」的時數（算進簽核中）；其他假別／租戶沒有生理假 → 0。
+ */
+export async function pendingMenstrualMergeInSickBucket(
+  t: { tenantId: string; employeeId: string; leaveTypeId: string },
+  bucket: BalanceBucket,
+  supabase: SupabaseClient = supabaseAdmin,
+): Promise<number> {
+  const types = await loadStatutoryTypes(t.tenantId, supabase)
+  if (!types.sickTypeId || types.sickTypeId !== t.leaveTypeId || types.menstrualIds.size === 0) return 0
+  const [tz, dayHours] = await Promise.all([getTenantTimezone(t.tenantId), loadDailyRegularHours(t.tenantId)])
+  const est = await estimatePendingMerge(t.tenantId, t.employeeId, { tz, dayHours: dayHours > 0 ? dayHours : 8, types }, undefined, supabase)
+  return sumCovered(est, bucket)
 }
 
 /** 送單：不是生理假 → null。DB 讀不到 → 丟例外（呼叫端回 503）。 */
@@ -498,11 +598,11 @@ export async function applyMenstrualOnFinalApproval(
     }
   }
   try {
-    for (const [year, hours] of Array.from(sumByPrefix(mine, 4)).sort(([a], [b]) => (a < b ? -1 : 1))) {
-      const { mergedIntoSick } = splitMenstrualHours(yearUsed.get(year) ?? 0, hours, ctx.dayHours)
-      if (mergedIntoSick <= EPS) continue
-      const dateKey = firstDateOfYear(mine, year)
-      const bucket = await resolveBalanceBucket(supabase, t.tenantId, t.employeeId, sickTypeId, dateKey)
+    // 併入的時數依「實際被併入那天」選病假桶（週年制期間跨界時，跨界前後分別記到各自的期間桶）。
+    for (const group of await groupByBucket(supabase, t, sickTypeId, mergedHoursByDate(yearUsed, mine, ctx.dayHours))) {
+      const mergedIntoSick = group.hours
+      const bucket = group.bucket
+      const year = group.firstDate.slice(0, 4)
       if (bucket && bucketHasQuota(bucket)) {
         const short = await debitQuotaBucketChecked(supabase, bucket, mergedIntoSick)
         if (short !== null) {
@@ -524,7 +624,7 @@ export async function applyMenstrualOnFinalApproval(
         if (!(await adjustBucketUsed(supabase, bucket.id, mergedIntoSick))) throw new Error("menstrual sick debit: bucket vanished")
         entries.push({ bucketId: bucket.id, hours: mergedIntoSick })
       } else {
-        const id = await insertLedgerBucket(supabase, t, sickTypeId, dateKey, mergedIntoSick)
+        const id = await insertLedgerBucket(supabase, t, sickTypeId, group.firstDate, mergedIntoSick)
         entries.push({ bucketId: id, hours: mergedIntoSick })
       }
     }
@@ -552,6 +652,9 @@ export async function applyMenstrualOnFinalApproval(
 /**
  * 沖回本單併入病假的時數（撤銷／註銷／駁回已核准、或最終核准後其他檢查失敗退回待簽核時呼叫）。
  * 冪等：先以「menstrual_sick_merge 不是 null」為條件把它清成 null，清得到的那一次才沖回；重複呼叫回 0。
+ * 沖回失敗（某桶 DB 錯誤）→ 把**沒沖回成功的那幾筆寫回** menstrual_sick_merge 再丟例外：紀錄不遺失，
+ * 之後再核准會看到「已併入」不重複扣，之後再沖回也只沖剩下的那幾筆（2026-11-17 驗收：以前只記 log、紀錄已清，
+ * 再核准會重複併入）。桶已不存在（被刪）＝沒有可沖回的，不寫回。
  * 欄位未套 → 0。回沖回的時數。
  */
 export async function reverseMenstrualSickMerge(
@@ -582,12 +685,34 @@ export async function reverseMenstrualSickMerge(
   if (clrErr) throw new Error(`menstrual reverse clear: ${clrErr.message}`)
   if ((cleared ?? []).length === 0) return 0
   let total = 0
+  const failed: Array<{ bucketId: string; hours: number }> = []
+  let firstErr: unknown = null
   for (const e of entries) {
     try {
       if (await adjustBucketUsed(supabase, e.bucketId, -e.hours)) total += e.hours
     } catch (err) {
-      logger.error({ err, tenantId, requestId, bucketId: e.bucketId, hours: e.hours }, "menstrual reverse FAILED — 病假桶未沖回，需人工處理")
+      failed.push(e)
+      firstErr ??= err
     }
+  }
+  if (failed.length > 0) {
+    // 寫回沒沖成功的部分（只在仍是 null 時寫：清掉之後若別的請求已重新併入，以它為準）。
+    const { error: restoreErr } = await supabase
+      .from("leave_requests")
+      .update({ menstrual_sick_merge: failed })
+      .eq("tenant_id", tenantId)
+      .eq("id", requestId)
+      .is("menstrual_sick_merge", null)
+      .select("id")
+    if (restoreErr) {
+      logger.error(
+        { err: restoreErr, tenantId, requestId, failed },
+        "menstrual reverse FAILED and restore FAILED — 病假桶未沖回且紀錄寫回失敗，需人工處理",
+      )
+    } else {
+      logger.error({ err: firstErr, tenantId, requestId, failed }, "menstrual reverse partially FAILED — 未沖回的部分已寫回單上，可重試")
+    }
+    throw new Error(`menstrual reverse: ${failed.length} bucket(s) not reversed (${round2(total)}h reversed)`)
   }
   return round2(total)
 }
