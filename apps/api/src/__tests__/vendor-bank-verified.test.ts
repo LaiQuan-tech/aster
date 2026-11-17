@@ -745,3 +745,58 @@ describe("2026-11-17 業主決定：「其他」收款一律老闆／平台管�
     expect((await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17", forceReason: "急件" }))?.status).toBe("paid")
   })
 })
+
+describe("驗收（2026-11-17 TOCTOU）：付款／送簽讀完到寫入之間被 PATCH 改成「其他」＋手動帳號 → 409 conflict_retry", () => {
+  /** 讀 disbursement_allocations 時（服務已讀完單頭、還沒條件寫入）模擬一個 PATCH 把單子改成「其他」收款並更新 updated_at。 */
+  const flipOnAllocRead = () => {
+    const allocs = fake.db.disbursement_allocations
+    let flipped = false
+    Object.defineProperty(fake.db, "disbursement_allocations", {
+      configurable: true,
+      get() {
+        if (!flipped) {
+          flipped = true
+          Object.assign(fake.db.disbursements![0]!, {
+            payee_kind: "other", vendor_id: null, payee_name: "攻擊者帳戶", payee_bank_account: "0009999 攻擊者",
+            payee_bank_account_number: "0009999", payee_account_holder: "攻擊者", updated_at: "2026-11-17T09:00:00.000Z",
+          })
+        }
+        return allocs
+      },
+      set() {},
+    })
+  }
+  it("HR 強制付款登錄廠商草稿，期間被改成「其他」→ 409 conflict_retry、單子沒變成已匯款", async () => {
+    fake.db.disbursements = [header(VENDOR_A, { status: "draft", approved_at: null })]
+    fake.db.disbursement_allocations = [alloc()]
+    flipOnAllocRead()
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17", forceReason: "急件" })).rejects.toMatchObject({ httpStatus: 409, code: "conflict_retry" })
+    expect(fake.db.disbursements![0]!.status).toBe("draft")
+    expect(fake.db.project_subcontract_payments![0]!.paid_on).toBeNull()
+  })
+  it("已核准單付款，期間只改了 updated_at（別人存檔）→ 409 conflict_retry", async () => {
+    fake.db.disbursements = [header(VENDOR_A)]
+    const allocs = [alloc()]
+    let touched = false
+    Object.defineProperty(fake.db, "disbursement_allocations", {
+      configurable: true,
+      get() {
+        if (!touched) {
+          touched = true
+          fake.db.disbursements![0]!.updated_at = "2026-11-17T09:00:00.000Z"
+        }
+        return allocs
+      },
+      set() {},
+    })
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17" })).rejects.toMatchObject({ code: "conflict_retry" })
+    expect(fake.db.disbursements![0]!.status).toBe("approved")
+  })
+  it("送簽登錄廠商草稿，期間被改成「其他」→ 409（不讓沒經「其他」規則檢查的內容進簽核）", async () => {
+    fake.db.disbursements = [header(VENDOR_A, { status: "draft", approved_at: null })]
+    fake.db.disbursement_allocations = [alloc()]
+    flipOnAllocRead()
+    await expect(submitDisbursement(TENANT_ID, actor, DISB)).rejects.toMatchObject({ httpStatus: 409 })
+    expect(fake.db.disbursements![0]!.status).toBe("draft")
+  })
+})

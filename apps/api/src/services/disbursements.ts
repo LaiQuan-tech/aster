@@ -131,6 +131,28 @@ export async function disbursementCols(): Promise<string> {
   if (!(await disbursementsHaveApproval())) return DISBURSEMENT_COLS + split
   return ((await disbursementsHaveEditors()) ? DISBURSEMENT_COLS_APPROVAL_EDITORS : DISBURSEMENT_COLS_APPROVAL) + split
 }
+/**
+ * 條件寫入時釘住「讀到的收款對象」（驗收 2026-11-17 TOCTOU）：payee_kind、vendor_id、帳戶快照與分欄都要仍是讀到的值，
+ * 否則 0 列。讀完到寫入之間被 PATCH 把收款方改成「其他」＋手動帳號 → 付款／送簽／核准都寫不進去。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function pinPayee<Q extends { eq: (c: string, v: any) => Q; is: (c: string, v: null) => Q }>(
+  q: Q,
+  current: Pick<DisbursementRow, "payee_kind" | "vendor_id" | "payee_bank_account" | "payee_bank_account_number" | "payee_account_holder">,
+  splitAvailable: boolean,
+): Q {
+  // ⚠️ 必須是同步函式：查詢建構器是 thenable，async 函式回傳它會被 await 直接執行。
+  const eqOrNull = (qq: Q, col: string, v: string | null | undefined) => (v == null ? qq.is(col, null) : qq.eq(col, v))
+  let out = q.eq("payee_kind", current.payee_kind)
+  out = eqOrNull(out, "vendor_id", current.vendor_id)
+  out = eqOrNull(out, "payee_bank_account", current.payee_bank_account)
+  if (splitAvailable) {
+    out = eqOrNull(out, "payee_bank_account_number", current.payee_bank_account_number ?? null)
+    out = eqOrNull(out, "payee_account_holder", current.payee_account_holder ?? null)
+  }
+  return out
+}
+
 /** disbursements 的收款帳號／戶名分欄（migration 0106）是否已套用。 */
 export function disbursementsHaveSplitAccount(): Promise<boolean> {
   return columnsExist("disbursements", "payee_bank_account_number, payee_account_holder")
@@ -3540,18 +3562,24 @@ export async function payDisbursement(
   // 2026-10-27 驗收 B：先用條件更新（狀態仍是讀到的那個）搶下這張單，搶到了才寫期款。
   // 兩個請求同時付同一張單（例如批次放款逾時重按、兩個不同匯款日）或同時被作廢／撤回時，
   // 搶輸的那個更新不到任何列 → 409，期款完全不動；不會出現「期款已付卻掛在未付單上」。
-  const { data, error } = await supabaseAdmin
+  // 驗收（2026-11-17 TOCTOU）：另外釘住收款對象（payee_kind／vendor_id／帳戶）與 updated_at——讀完到寫入之間被草稿 PATCH
+  // 改成「其他」＋手動帳號 → 0 列 → 409 conflict_retry，不會變成未經老闆核准的「其他」已匯款單。
+  let payQ = supabaseAdmin
     .from("disbursements")
     .update({ status: "paid", paid_on: paidOn, paid_by_emp_id: actor.empId, updated_at: new Date().toISOString() })
     .eq("tenant_id", tenantId)
     .eq("id", id)
     .eq("status", current.status)
-    .select(await disbursementCols())
-    .maybeSingle()
+  payQ = current.updated_at ? payQ.eq("updated_at", current.updated_at) : payQ.is("updated_at", null)
+  payQ = pinPayee(payQ, current, await disbursementsHaveSplitAccount())
+  const { data, error } = await payQ.select(await disbursementCols()).maybeSingle()
   if (error) throw new Error(`payDisbursement: ${error.message}`)
   if (!data) {
     const latest = await loadDisbursement(tenantId, id)
     if (latest?.status === "void") throw new DisbursementError(409, "void")
+    if (latest && latest.status === current.status) {
+      throw new DisbursementError(409, "conflict_retry", { message: "這張放款單剛被其他人修改（收款對象或內容），沒有付款；請重新整理確認後再付" })
+    }
     if (latest && latest.status !== "paid") throw new DisbursementError(409, "status_changed", { status: latest.status })
     throw new DisbursementError(409, "already_paid")
   }

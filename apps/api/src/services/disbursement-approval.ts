@@ -48,6 +48,8 @@ import {
   assertZeroAllocVendorStillConfirmed,
   nonInstallmentConfirmedIds,
   payeeSimilarWarnings,
+  pinPayee,
+  disbursementsHaveSplitAccount,
   loadDisbursement,
   serializeMany,
   type Actor,
@@ -431,6 +433,7 @@ export async function submitDisbursement(
   const submittedAt = new Date().toISOString()
   // 第二輪安全驗收 L5：單頭只在「仍是草稿、且讀取後沒被改過（updated_at 相同）」時才轉成待簽核——
   // 送簽期間另一請求編輯草稿／並行送簽 → 0 列，刪掉剛插入的關卡並回 409（不讓沒被這條鏈審過的內容進簽核）。
+  const splitCols = await disbursementsHaveSplitAccount()
   let headerQuery = supabaseAdmin
     .from("disbursements")
     .update({
@@ -444,7 +447,9 @@ export async function submitDisbursement(
     .eq("tenant_id", tenantId)
     .eq("id", id)
     .eq("status", "draft")
-  if (current.updated_at) headerQuery = headerQuery.eq("updated_at", current.updated_at)
+  headerQuery = current.updated_at ? headerQuery.eq("updated_at", current.updated_at) : headerQuery.is("updated_at", null)
+  // 驗收（TOCTOU）：收款對象也釘住（送簽時的「其他」老闆關判斷依據讀到的 payee_kind）。
+  headerQuery = pinPayee(headerQuery, current, splitCols)
   const { data: upRows, error: upErr } = await headerQuery.select("id")
   if (upErr) throw new Error(`submitDisbursement (header): ${upErr.message}`)
   if ((upRows ?? []).length === 0) {
@@ -639,15 +644,19 @@ export async function decideDisbursement(params: {
   if ((stepHit ?? []).length === 0) throw new DisbursementError(409, "not_pending", { status: current.status })
 
   /** 單頭狀態轉移：只在仍是 pending_approval、仍停在本關時才寫；0 列＝搶輸（單子同時被撤回…）→ 還原關卡、409。 */
+  const splitColsDecide = await disbursementsHaveSplitAccount()
   const transitionHeader = async (patch: Record<string, unknown>, label: string): Promise<void> => {
-    const { data, error } = await supabaseAdmin
+    let headerQ = supabaseAdmin
       .from("disbursements")
       .update(patch)
       .eq("tenant_id", tenantId)
       .eq("id", id)
       .eq("status", "pending_approval")
       .eq("current_step", step.step_order)
-      .select("id")
+      .eq("approval_round", current.approval_round ?? 0)
+    // 驗收（TOCTOU）：收款對象釘住（「其他」收款的老闆關判斷依據讀到的 payee_kind）。
+    headerQ = pinPayee(headerQ, current, splitColsDecide)
+    const { data, error } = await headerQ.select("id")
     if (error) throw new Error(`decideDisbursement (${label}): ${error.message}`)
     if ((data ?? []).length > 0) return
     const { error: revertErr } = await supabaseAdmin
