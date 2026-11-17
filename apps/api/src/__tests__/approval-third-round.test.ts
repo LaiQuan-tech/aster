@@ -149,16 +149,24 @@ async function pettyAtBossStep() {
   return f
 }
 
+/**
+ * 2026-11-17 業主決定：「其他」收款一律老闆／平台管理員核准（不准 HR 代簽老闆關）。本檔驗的是一般放款鏈規則（L3 等），
+ * 改用登錄廠商單（名冊無帳戶、現金付款），「其他」收款的新規則另見 vendor-bank-verified.test.ts。
+ */
+const V3_ID = "aaaaaaaa-0000-4000-8000-000000000333"
+beforeEach(() => {
+  fake.db.vendors = [{ id: V3_ID, tenant_id: TENANT_ID, name: "測試收款方", short_name: null, bank_name: null, bank_code: null, bank_account: null, account_holder: null, deleted_at: null }]
+})
 const draft = (createdBy: string, over: Row = {}): Row => ({
   id: DISB,
   tenant_id: TENANT_ID,
   disbursement_no: "D-2027-009",
   status: "draft",
-  payee_kind: "other",
-  vendor_id: null,
+  payee_kind: "vendor",
+  vendor_id: V3_ID,
   payee_name: "測試收款方",
   payee_bank_name: null,
-  payee_bank_account: "000-111",
+  payee_bank_account: null,
   payee_bank_code: null,
   paying_company_id: COMPANY,
   paying_company_name: "測試設計顧問公司",

@@ -671,3 +671,77 @@ describe("2026-11-17 S2 擴大驗收：其他收款單紅框（刪除類條件�
     expect(ok.status, JSON.stringify(ok.body)).toBe(200)
   })
 })
+
+describe("2026-11-17 業主決定：「其他」收款一律老闆／平台管理員核准，HR 不能強制付款或直接建成已匯款", () => {
+  const otherRow = (over: Row = {}) =>
+    header("", { payee_kind: "other", vendor_id: null, payee_name: "測試某人", payee_bank_account: "0009999 測試某人", payee_bank_account_number: "0009999", payee_account_holder: "測試某人", ...over })
+  const PA = "bbbbbbbb-0000-4000-8000-0000000000aa"
+  const approvedStep = (signer: string): Row => ({
+    id: "99999999-0000-4000-8000-0000000000e1", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: signer,
+    candidate_emp_ids: [signer], step_kind: "fallback", decision: "approved", comment: null, acted_at: "2026-11-17T00:00:00Z", acted_by_emp_id: signer, created_at: "2026-11-01T00:00:00.000Z",
+  })
+  beforeEach(() => {
+    fake.db.employees!.push({ id: PA, tenant_id: TENANT_ID, user_id: "pa-user", role: "platform_admin", dept_id: null, name: "測試平台管理員", status: "active" })
+    // 「其他」收款分攤到非登錄副委託
+    fake.db.project_subcontracts![0]!.vendor_id = null
+    fake.db.project_subcontracts![0]!.vendor_name = "測試非登錄下包"
+  })
+
+  it("HR 對其他收款草稿強制付款（forceReason）→ 403 other_payee_requires_boss_approval；批次付款同", async () => {
+    fake.db.disbursements = [otherRow({ status: "draft", approved_at: null })]
+    fake.db.disbursement_allocations = [alloc()]
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17", forceReason: "急件" })).rejects.toMatchObject({ httpStatus: 403, code: "other_payee_requires_boss_approval" })
+    const batch = await payDisbursementsBatch(TENANT_ID, actor, { paidOn: "2026-11-17", items: [{ id: DISB }] })
+    expect(batch[0]).toMatchObject({ ok: false })
+    expect(fake.db.disbursements![0]!.status).toBe("draft")
+  })
+  it("直接建成已匯款的其他收款單 → 403，零寫入", async () => {
+    const res = await as("hr-user", request(app).post("/disbursements")).send({
+      payeeKind: "other", payeeName: "測試某人", payingCompanyId: COMPANY, method: "transfer", amount: 100, status: "paid", paidOn: "2026-11-17", forceReason: "急件",
+      allocations: [], payeeBankAccountNumber: "0009999", payeeAccountHolder: "測試某人",
+    })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("other_payee_requires_boss_approval")
+    expect(fake.db.disbursements).toHaveLength(0)
+  })
+  it("已核准：最後簽的是平台管理員 → 可付；最後簽的是 HR（例如舊的 L3 代簽）→ 403", async () => {
+    fake.db.disbursements = [otherRow()]
+    fake.db.disbursement_allocations = [alloc()]
+    fake.db.disbursement_approval_steps = [approvedStep(PA)]
+    expect((await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17" }))?.status).toBe("paid")
+    fake.db.disbursements = [otherRow()]
+    fake.db.project_subcontract_payments![0]!.paid_on = null
+    fake.db.project_subcontract_payments![0]!.disbursement_id = null
+    fake.db.disbursement_approval_steps = [approvedStep(HR2)]
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17" })).rejects.toMatchObject({ code: "other_payee_requires_boss_approval" })
+  })
+  it("老闆關：HR 不能代簽其他收款單（沒有老闆／平台管理員可簽時也不行）；平台管理員可", async () => {
+    const pendingBossStep = (): Row => ({ ...approvedStep(BOSS), decision: "pending", acted_at: null, acted_by_emp_id: null })
+    fake.db.disbursements = [otherRow({ status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT, submitted_by_emp_id: ACCT })]
+    fake.db.disbursement_allocations = [alloc()]
+    fake.db.disbursement_approval_steps = [pendingBossStep()]
+    // 拿掉老闆與平台管理員 → 舊規則會開放 HR L3 代簽；其他收款不行。
+    fake.db.employees = fake.db.employees!.map((e) => (e.id === BOSS || e.id === PA ? { ...e, status: "terminated" } : e))
+    await expect(decideDisbursement({ action: "approve", tenantId: TENANT_ID, id: DISB, actor: { empId: HR2, role: "hr_admin", active: true } })).rejects.toMatchObject({
+      httpStatus: 403, code: "other_payee_requires_boss_approval",
+    })
+    fake.db.employees = fake.db.employees!.map((e) => (e.id === PA ? { ...e, status: "active" } : e))
+    const ok = await decideDisbursement({ action: "approve", tenantId: TENANT_ID, id: DISB, actor: { empId: PA, role: "platform_admin", active: true } })
+    expect(ok?.status).toBe("approved")
+  })
+  it("建單人是唯一的老闆（沒有平台管理員）→ 送簽 409 other_payee_no_boss_approver；有另一位平台管理員 → 可送簽", async () => {
+    fake.db.employees = fake.db.employees!.filter((e) => e.id !== PA)
+    fake.db.disbursements = [otherRow({ status: "draft", approved_at: null, created_by_emp_id: BOSS })]
+    fake.db.disbursement_allocations = [alloc()]
+    await expect(submitDisbursement(TENANT_ID, { empId: BOSS, role: "employee" }, DISB)).rejects.toMatchObject({ code: "other_payee_no_boss_approver" })
+    fake.db.employees!.push({ id: PA, tenant_id: TENANT_ID, user_id: "pa-user", role: "platform_admin", dept_id: null, name: "測試平台管理員", status: "active" })
+    expect((await submitDisbursement(TENANT_ID, { empId: BOSS, role: "employee" }, DISB))?.disbursement?.status ?? fake.db.disbursements![0]!.status).toBe("pending_approval")
+  })
+  it("名冊廠商單不受影響：HR 依既有流程可強制付款", async () => {
+    fake.db.project_subcontracts![0]!.vendor_id = VENDOR_A
+    fake.db.project_subcontracts![0]!.vendor_name = "測試甲工程行"
+    fake.db.disbursements = [header(VENDOR_A, { status: "draft", approved_at: null })]
+    fake.db.disbursement_allocations = [alloc()]
+    expect((await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-17", forceReason: "急件" }))?.status).toBe("paid")
+  })
+})

@@ -632,6 +632,8 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   vendor_bank_missing: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶。",
   payee_is_registered_vendor: "收款對象與名冊廠商名稱相同，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
   payee_name_similar: "收款名稱與名冊廠商相近；若是同一家請改選登錄廠商，若確為不同公司請填寫說明。",
+  other_payee_requires_boss_approval: "「其他」收款（手動帳戶）的放款單須經老闆或平台管理員核准，不能直接付款或直接建成已匯款。",
+  other_payee_no_boss_approver: "「其他」收款需由老闆或平台管理員（建單人以外）核准，目前沒有可核准的人；請改由他人建單送簽，或聯絡平台管理員。",
   use_split_account_fields: "「其他」收款的帳戶請分開填寫「帳號」與「帳戶戶名」兩欄（不再接受帳號與戶名寫在同一格）。",
   split_account_required: "這張單的舊收款帳號格式無法自動拆開，請同時填寫「帳號」與「帳戶戶名」兩欄後再儲存。",
   invalid_payee_bank_account: "收款帳號只能有數字（可含空白或連字號）。",

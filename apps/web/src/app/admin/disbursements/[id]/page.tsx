@@ -366,7 +366,21 @@ export default function DisbursementDetailPage() {
               </PrimaryButton>
             )}
             {d.status === "approved" && <PrimaryButton onClick={() => setPayOpen((v) => !v)}>標記已匯款</PrimaryButton>}
-            {d.status === "draft" && isHr && (
+            {d.payeeKind === "other" && (d.status === "draft" || d.status === "pending_approval") && (
+              <span className="self-center text-xs text-amber-700">「其他」收款：簽核鏈最後一關為老闆或平台管理員（建單人以外），核准後才能付款</span>
+            )}
+            {/* 2026-11-17 業主決定：「其他」收款（手動帳戶）一律要老闆／平台管理員核准，不能直接付款。 */}
+            {d.status === "draft" && isHr && d.payeeKind === "other" && (
+              <button
+                type="button"
+                disabled
+                className="cursor-not-allowed rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-400"
+                title="「其他」收款（手動帳戶）須送簽，經老闆或平台管理員核准後才能付款"
+              >
+                直接付款（其他收款不適用）
+              </button>
+            )}
+            {d.status === "draft" && isHr && d.payeeKind !== "other" && (
               <button
                 type="button"
                 onClick={() => {

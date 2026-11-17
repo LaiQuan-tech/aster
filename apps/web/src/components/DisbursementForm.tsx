@@ -512,7 +512,8 @@ export default function DisbursementForm({
                     payeeStashRef.current = r.stash;
                     if (k === "vendor") vendorPickedRef.current = false;
                     setManualAccountDirty(r.dirty);
-                    setState(r.state);
+                    // 2026-11-17：「其他」收款不能直接建成已匯款 → 切到其他時狀態退回草稿。
+                    setState(k === "other" && r.state.status === "paid" ? { ...r.state, status: "draft" } : r.state);
                   }}
                 />
                 {PAYEE_KIND_LABELS[k]}
@@ -629,9 +630,12 @@ export default function DisbursementForm({
                 <input type="radio" name="status" checked={state.status === "draft"} onChange={() => set("status", "draft")} />
                 草稿
               </label>
-              <label className="flex items-center gap-1.5 text-sm text-gray-700">
-                <input type="radio" name="status" checked={state.status === "paid"} onChange={() => set("status", "paid")} />
-                已匯款
+              <label
+                className={`flex items-center gap-1.5 text-sm ${state.payeeKind === "other" ? "text-gray-400" : "text-gray-700"}`}
+                title={state.payeeKind === "other" ? "「其他」收款須送簽、經老闆或平台管理員核准後才能付款，不能直接建成已匯款" : undefined}
+              >
+                <input type="radio" name="status" checked={state.status === "paid"} disabled={state.payeeKind === "other"} onChange={() => set("status", "paid")} />
+                已匯款{state.payeeKind === "other" ? "（其他收款不適用）" : ""}
               </label>
             </div>
           </div>

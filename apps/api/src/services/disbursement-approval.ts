@@ -26,6 +26,8 @@ import {
   bossSignerChecker,
   bossSignerState,
   bossStepNotifyRecipients,
+  bossStepHasEligibleSigner,
+  isBossOrPlatformAdmin,
   isConfiguredBoss,
   isPlatformAdminRole,
   loadConfiguredBossEmpId,
@@ -386,6 +388,16 @@ export async function submitDisbursement(
   await assertOtherPayeeStillNotRegisteredVendor(tenantId, current)
   // M2（第七輪）：登錄廠商零分攤單送簽前重驗「廠商有未付期款 → 須已確認非期款支出」。
   await assertZeroAllocVendorStillConfirmed(tenantId, current, allocations)
+  // 業主決定（2026-11-17）：「其他」收款（手動帳戶）一律要在職的設定老闆或 platform_admin 核准（老闆關不准 HR 代簽）。
+  // 扣掉建單人／送簽人／草稿編輯人後沒有可簽的老闆或平台管理員 → 送簽就擋（不要建一條永遠卡在老闆關的鏈）。
+  if (current.payee_kind === "other") {
+    const eligible = await bossStepHasEligibleSigner(tenantId, { exclude: [...requestersOf(current), actor.empId] })
+    if (!eligible) {
+      throw new DisbursementError(409, "other_payee_no_boss_approver", {
+        message: "「其他」收款需由老闆或平台管理員（建單人以外）核准，目前沒有可核准的人；請改由他人建單送簽，或聯絡平台管理員",
+      })
+    }
+  }
   await assertPaymentsAccepted(
     tenantId,
     actor,
@@ -573,6 +585,16 @@ export async function decideDisbursement(params: {
   if (!isCandidate && !canOverride) throw new DisbursementError(403, "not_current_approver")
   // 同一輪同一人不能簽兩關（含代簽；追加 D）。
   if (signedBefore) throw new DisbursementError(403, "already_signed_step")
+  // 業主決定（2026-11-17）：「其他」收款單的老闆關（或最後一關）只限在職的設定老闆或 platform_admin 本人核准——
+  // HR 代簽（L3）與舊單「沒有老闆可簽就放行」都不適用。建單人／送簽人本人已由 own_request 擋下。
+  if (action === "approve" && current.payee_kind === "other") {
+    const isLast = !rows.some((r) => r.round === step.round && r.step_order > step.step_order)
+    if ((isBossStep(gate) || isLast) && !isBossOrPlatformAdmin(bossEmpId, stepActor)) {
+      throw new DisbursementError(403, "other_payee_requires_boss_approval", {
+        message: "「其他」收款（手動帳戶）的放款單最後須由老闆或平台管理員核准",
+      })
+    }
+  }
   // S2：舊單鏈裡沒有任何老闆關 → 最終核准必須是老闆／平台管理員（沒有任何可用老闆／平台管理員時照 L3 放行）。
   if (action === "approve" && legacyBossGateBlocks({ ctx: gateCtx, actor: stepActor, noEligibleBossSigner: !!bossState && !bossState.any })) {
     throw new DisbursementError(409, "boss_step_required", { message: "這張單的簽核鏈沒有老闆關，最後一關需由平台管理員（老闆）核准" })

@@ -1,4 +1,5 @@
 import { selectAllPages } from "../lib/select-all-pages.js"
+import { loadConfiguredBossEmpId } from "../lib/boss.js"
 import { buildRosterKeyIndex, exactNameKey, invalidNameMessage, rosterKeyMatches } from "../lib/payee-name.js"
 import { vendorHasUnpaidInstallments } from "./vendor-unpaid.js"
 import { supabaseAdmin } from "../lib/supabase.js"
@@ -2543,6 +2544,39 @@ export async function assertPaymentsAccepted(
  * M4：跳過簽核直接付款／直接建已匯款單＝HR 專屬例外，一定要留理由（稽核）。
  * 其餘角色 409 `approval_required`（前端提示「請先送簽」）。
  */
+/**
+ * 「其他」收款單付款前確認：本輪最後核准的關卡是由在職的設定老闆或 platform_admin 簽的（業主決定 2026-11-17）。
+ * 本輪沒有簽核紀錄（不經簽核的舊資料）或最後簽的人不是老闆／平台管理員 → 403 other_payee_requires_boss_approval。
+ */
+async function assertOtherPayeeApprovedByBoss(tenantId: string, current: DisbursementRow): Promise<void> {
+  const { data, error } = await supabaseAdmin
+    .from("disbursement_approval_steps")
+    .select("round, step_order, decision, approver_emp_id, acted_by_emp_id")
+    .eq("tenant_id", tenantId)
+    .eq("disbursement_id", current.id)
+  if (error) throw new Error(`assertOtherPayeeApprovedByBoss: ${error.message}`)
+  const round = current.approval_round ?? 0
+  const approved = ((data ?? []) as Array<{ round: number; step_order: number; decision: string; approver_emp_id: string | null; acted_by_emp_id: string | null }>)
+    .filter((r) => r.round === round && r.decision === "approved")
+    .sort((a, b) => b.step_order - a.step_order)
+  const signer = approved[0] ? (approved[0].acted_by_emp_id ?? approved[0].approver_emp_id) : null
+  let ok = false
+  if (signer) {
+    const [{ data: emp }, boss] = await Promise.all([
+      supabaseAdmin.from("employees").select("id, role, status").eq("tenant_id", tenantId).eq("id", signer).maybeSingle(),
+      loadConfiguredBossEmpId(tenantId),
+    ])
+    const e = emp as { id: string; role: string | null; status: string | null } | null
+    // 簽的當下是老闆或平台管理員即可（之後離職不追溯）；比對以角色或設定的老闆 id 判斷。
+    ok = !!e && (e.role === "platform_admin" || (!!boss && boss.toLowerCase() === e.id.toLowerCase()))
+  }
+  if (!ok) {
+    throw new DisbursementError(403, "other_payee_requires_boss_approval", {
+      message: "「其他」收款（手動帳戶）的放款單須由老闆或平台管理員核准後才能付款",
+    })
+  }
+}
+
 export function assertForcePayAllowed(actor: Actor, reason: string | null | undefined): string {
   if (!isHrRole(actor.role)) {
     throw new DisbursementError(409, "approval_required", { hint: "放款需經簽核核准後才能付款，請先送簽。" })
@@ -2981,6 +3015,12 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
     context: "POST /disbursements",
   })
   let forcedPayReason: string | null = null
+  if (input.status === "paid" && header.payee_kind === "other") {
+    // 業主決定（2026-11-17）：「其他」收款不能不經簽核直接建成已匯款（必經老闆／平台管理員核准）。
+    throw new DisbursementError(403, "other_payee_requires_boss_approval", {
+      message: "「其他」收款（手動帳戶）的放款單須先經老闆或平台管理員核准，不能直接建成已匯款",
+    })
+  }
   if (input.status === "paid") {
     // M4：不經簽核直接建「已匯款」＝HR 專屬例外，必須留理由。
     forcedPayReason = assertForcePayAllowed(actor, input.forceReason)
@@ -3467,6 +3507,15 @@ export async function payDisbursement(
   if (current.status === "paid") throw new DisbursementError(409, "already_paid")
   if (current.status === "pending_approval") {
     throw new DisbursementError(409, "approval_required", { hint: "簽核尚未完成；要直接付款請先撤回簽核。" })
+  }
+  // 業主決定（2026-11-17）：「其他」收款單不准強制付款（HR forceReason），只能付「已由老闆／平台管理員核准」的單（批次付款同）。
+  if (current.payee_kind === "other") {
+    if (current.status !== "approved") {
+      throw new DisbursementError(403, "other_payee_requires_boss_approval", {
+        message: "「其他」收款（手動帳戶）的放款單須先經老闆或平台管理員核准，不能直接付款",
+      })
+    }
+    await assertOtherPayeeApprovedByBoss(tenantId, current)
   }
   const forcedPayReason = current.status === "approved" ? null : assertForcePayAllowed(actor, input.forceReason)
   const paidOn = input.paidOn ?? current.paid_on

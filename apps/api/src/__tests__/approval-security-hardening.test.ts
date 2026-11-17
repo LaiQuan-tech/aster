@@ -427,6 +427,10 @@ describe("L2／C 獎金批次", () => {
 
 /* ────────────────────────────── 放款單 ────────────────────────────── */
 
+/** 2026-11-17：L3（HR 代簽老闆關）只適用登錄廠商單——名冊無帳戶、現金付款的測試廠商。 */
+const L3_VENDOR_ID = "aaaaaaaa-0000-4000-8000-0000000000l3".replace("l3", "13")
+const L3_VENDOR: Row = { id: L3_VENDOR_ID, tenant_id: TENANT_ID, name: "測試收款方", short_name: null, bank_name: null, bank_code: null, bank_account: null, account_holder: null, deleted_at: null }
+const VENDOR_PAYEE: Row = { payee_kind: "vendor", vendor_id: L3_VENDOR_ID, payee_bank_account: null, method: "cash" }
 const draft = (createdBy: string, over: Row = {}): Row => ({
   id: DISB,
   tenant_id: TENANT_ID,
@@ -584,7 +588,9 @@ describe("E 放款單送簽人是老闆：老闆關不略過", () => {
 
   it("沒有平台管理員 → 在職、非申請人的 HR 代簽老闆關（L3）；連 HR 都沒有 → 送簽 409", async () => {
     removeEmployee(PA_ID)
-    fake.db.disbursements = [draft(STAFF_ID)]
+    // 2026-11-17：「其他」收款不准 L3 代簽（見下方專測）；L3 規則改用登錄廠商單（名冊無帳戶、現金）驗。
+    fake.db.vendors = [L3_VENDOR]
+    fake.db.disbursements = [draft(STAFF_ID, VENDOR_PAYEE)]
     await submitDisbursement(TENANT_ID, { empId: BOSS_ID, role: "employee" }, DISB)
     await decide(MGR_ID, "manager")
     await decide(ACC_ID, "accountant")
@@ -603,7 +609,8 @@ describe("E 放款單送簽人是老闆：老闆關不略過", () => {
     fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: BOSS_ID } } }]
     fake.db.disbursement_approval_steps = []
     fake.db.disbursement_allocations = []
-    fake.db.disbursements = [draft(STAFF_ID)]
+    fake.db.vendors = [L3_VENDOR]
+    fake.db.disbursements = [draft(STAFF_ID, VENDOR_PAYEE)]
     const err = await submitDisbursement(TENANT_ID, { empId: BOSS_ID, role: "employee" }, DISB).catch((e: unknown) => e)
     expect(code(err)).toBe("no_approver_available")
     expect(header().status).toBe("draft")
@@ -750,7 +757,8 @@ describe("第二輪 M2 L3 退路不能人為製造", () => {
   it("放款單：改派過的 HR 不能 L3 代簽", async () => {
     const HR3_ID = "bbbbbbbb-0000-4000-8000-00000000000a"
     fake.db.employees.push(employee(HR3_ID, "user-hr3", "hr_admin", "HR 小樹"))
-    fake.db.disbursements = [draft(STAFF_ID)]
+    fake.db.vendors = [L3_VENDOR]
+    fake.db.disbursements = [draft(STAFF_ID, VENDOR_PAYEE)]
     await submitDisbursement(TENANT_ID, { empId: STAFF_ID, role: "employee" }, DISB)
     expect(await change(HR_ID, "hr_admin", HR2_ID)).toMatchObject({ stepOrder: 1 })
     await decide(HR2_ID, "hr_admin")

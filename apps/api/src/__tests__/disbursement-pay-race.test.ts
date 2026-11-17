@@ -24,6 +24,11 @@ function seed(status: string) {
     },
   ]
   fake.db.disbursement_allocations = []
+  // 2026-11-17 業主決定：「其他」收款單須由老闆／平台管理員核准才能付——這裡種一關由平台管理員核准的紀錄。
+  fake.db.employees = [{ id: "cccccccc-0000-4000-8000-0000000000a9", tenant_id: TENANT_ID, user_id: "pa", role: "platform_admin", status: "active" }]
+  fake.db.disbursement_approval_steps = [
+    { id: "99999999-0000-4000-8000-0000000000a1", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: "cccccccc-0000-4000-8000-0000000000a9", acted_by_emp_id: "cccccccc-0000-4000-8000-0000000000a9", decision: "approved" },
+  ]
 }
 
 beforeEach(() => {

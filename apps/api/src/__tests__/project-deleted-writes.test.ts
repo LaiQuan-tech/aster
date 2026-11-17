@@ -171,16 +171,19 @@ describe("第五輪：直接建成已匯款但期款同步失敗、改收據編�
     accepted_by_emp_id: HR, acceptance_note: null, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z",
     ...over,
   })
+  // 2026-11-17 業主決定：「其他」收款不能直接建成已匯款 → 這組「直接建成已匯款」測試改用登錄廠商（名冊無帳戶、現金）。
+  const PAID_VENDOR = "aaaaaaaa-0000-4000-8000-000000000777"
   beforeEach(() => {
+    fake.db.vendors = [{ id: PAID_VENDOR, tenant_id: TENANT_ID, name: "測試收款方", short_name: null, bank_name: null, bank_code: null, bank_account: null, account_holder: null, deleted_at: null }]
     fake.db.project_subcontracts = [{
       id: SUB, tenant_id: TENANT_ID, project_id: LIVE, deleted_at: null, kind: "subcontract", amount: "1000",
-      withholding_rate: "0", withholding_threshold: 20000, vendor_id: null, vendor_name: "測試下包",
+      withholding_rate: "0", withholding_threshold: 20000, vendor_id: PAID_VENDOR, vendor_name: "測試收款方",
     }]
     fake.db.project_subcontract_payments = [paymentRow(PAY1, 1), paymentRow(PAY2, 2)]
   })
 
   const paidInput = (): DisbursementInput => ({
-    payeeKind: "other", payeeName: "測試收款方", payingCompanyId: COMPANY, method: "transfer", amount: 1000,
+    payeeKind: "vendor", vendorId: PAID_VENDOR, payeeName: "測試收款方", payingCompanyId: COMPANY, method: "cash", amount: 1000,
     status: "paid", paidOn: "2026-11-12", forceReason: "測試直接匯款",
     allocations: [
       { projectId: LIVE, subcontractId: SUB, subcontractPaymentId: PAY1, amount: 500 },
@@ -333,7 +336,7 @@ describe("第五輪：直接建成已匯款但期款同步失敗、改收據編�
   it("createDisbursement（status=paid）期款同步撞錯 → 剛建的單自動作廢（不留已匯款半成品），錯誤照樣拋出、期款沒付", async () => {
     fake.injectError({ table: "project_subcontract_payments", action: "update", error: { code: "RD409", message: "row_deleted: 副委託已刪除，不能再寫入期款的付款／驗收／金額" } })
     const err = await createDisbursement(TENANT_ID, { empId: HR, role: "hr_admin" }, {
-      payeeKind: "other", payeeName: "測試收款方", payingCompanyId: COMPANY, method: "transfer", amount: 500,
+      payeeKind: "vendor", vendorId: PAID_VENDOR, payeeName: "測試收款方", payingCompanyId: COMPANY, method: "cash", amount: 500,
       status: "paid", paidOn: "2026-11-12", forceReason: "測試直接匯款",
       allocations: [{ projectId: LIVE, subcontractId: SUB, subcontractPaymentId: PAY1, amount: 500 }],
     }).catch((e: unknown) => e)

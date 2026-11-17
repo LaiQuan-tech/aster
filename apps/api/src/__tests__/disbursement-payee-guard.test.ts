@@ -90,6 +90,14 @@ const allocTo = (subId: string, payId: string) => [{ projectId: PROJECT, subcont
 const writesTo = (table: string) => fake.writes.filter((w) => w.table === table)
 const anyWrites = () => fake.writes.filter((w) => w.table !== "audit_logs")
 
+/** 2026-11-17 業主決定：「其他」收款單須由老闆／平台管理員核准才能付——種一關由平台管理員核准的紀錄。 */
+const PA_SIGNER = "bbbbbbbb-0000-4000-8000-0000000000a9"
+function bossApproved(): void {
+  fake.db.employees!.push({ id: PA_SIGNER, tenant_id: TENANT_ID, user_id: "pa-signer", role: "platform_admin", dept_id: null, name: "測試平台管理員", status: "active" })
+  fake.db.disbursement_approval_steps = [
+    { id: "99999999-0000-4000-8000-0000000000f1", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: PA_SIGNER, acted_by_emp_id: PA_SIGNER, decision: "approved", candidate_emp_ids: [PA_SIGNER], step_kind: "fallback" },
+  ]
+}
 function draftRow(over: Row = {}): Row {
   return {
     id: DISB, tenant_id: TENANT_ID, disbursement_no: "D-115-001", status: "draft", payee_kind: "vendor", vendor_id: VENDOR_A,
@@ -474,6 +482,7 @@ describe("R1b：開單後副委託換廠商 → 送簽／核准／付款／批�
     ]
     fake.db.disbursement_allocations = [allocRow(SUB_FREE, PAY_FREE)]
     fake.db.project_subcontracts = fake.db.project_subcontracts!.map((r) => (r.id === SUB_FREE ? { ...r, vendor_id: VENDOR_B } : r))
+    bossApproved()
     await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject({ code: "allocation_vendor_changed" })
   })
 
@@ -779,6 +788,7 @@ describe("N-1：送簽／核准／付款前重驗收款帳戶快照＝名冊現�
   it("收款「其他」的單不檢查名冊帳戶", async () => {
     fake.db.disbursements = [approved({ payee_kind: "other", vendor_id: null, payee_name: "測試任意收款人", payee_bank_account: "123", payee_bank_code: null, payee_bank_name: null })]
     fake.db.disbursement_allocations = [allocRow(SUB_FREE, PAY_FREE)]
+    bossApproved()
     const paid = await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })
     expect(paid?.status).toBe("paid")
   })
