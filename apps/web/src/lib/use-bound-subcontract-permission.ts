@@ -8,8 +8,9 @@ import { getMeCached } from "@/lib/ess-state";
  */
 export const BOUND_SUBCONTRACT_LOCKED_NOTE = "已綁定名冊廠商，解除／改綁／刪除需老闆或平台管理員";
 
-export function useCanManageBoundSubcontracts(): boolean {
-  const [can, setCan] = useState(false);
+/** 回 null＝還在載入（呼叫端顯示中性狀態、不畫鎖頭，避免老闆看到閃爍）；true／false＝已知。 */
+export function useCanManageBoundSubcontracts(): boolean | null {
+  const [can, setCan] = useState<boolean | null>(null);
   useEffect(() => {
     let alive = true;
     getMeCached()

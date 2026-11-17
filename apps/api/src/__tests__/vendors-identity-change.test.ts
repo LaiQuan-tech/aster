@@ -250,6 +250,11 @@ describe("第五輪（2026-11-17）：嚴格稽核、刪廠商擋、名稱不可
       { id: "d1", tenant_id: TENANT_ID, vendor_id: VENDOR, status: "paid" },
       { id: "d2", tenant_id: TENANT_ID, vendor_id: VENDOR, status: "void" },
     ]
+    // 2026-11-17 S2 擴大驗收：還有未刪除的副委託綁著這家廠商 → HR 403；設定的老闆才能刪。
+    const blocked = await hr(request(app).delete(`/vendors/${VENDOR}`))
+    expect(blocked.status).toBe(403)
+    expect(blocked.body.error).toBe("vendor_delete_requires_boss")
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: "bbbbbbbb-0000-4000-8000-000000000002" } } }]
     const res = await hr(request(app).delete(`/vendors/${VENDOR}`))
     expect(res.status).toBe(200)
     expect(fake.db.vendors[0]!.deleted_at).not.toBeNull()

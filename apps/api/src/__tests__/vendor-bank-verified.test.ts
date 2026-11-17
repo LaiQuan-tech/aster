@@ -611,20 +611,61 @@ describe("驗收第六輪：harness 情境 a–i（後端）", () => {
   })
 })
 
-describe("2026-11-17 S2 擴大：同專案曾刪除綁名冊廠商的副委託 → 其他收款單紅框", () => {
-  it("專案內有已刪除且綁廠商的副委託 → payeeRebindWarning（刪除）；沒有 → 不標", async () => {
+describe("2026-11-17 S2 擴大驗收：其他收款單紅框（刪除類條件，只計上線日之後、放款單建立之前的刪除）", () => {
+  const DEL_SUB = "dddddddd-0000-4000-8000-0000000000d9"
+  const after = "2026-11-19T02:00:00.000Z"
+  const created = "2026-11-20T02:00:00.000Z"
+  const setup = () => {
     fake.db.disbursement_approval_steps = [{
       id: "99999999-0000-4000-8000-000000000001", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: HR,
       candidate_emp_ids: [HR], step_kind: "manager", decision: "pending", comment: null, acted_at: null, acted_by_emp_id: null, created_at: "2026-11-01T00:00:00.000Z",
     }]
-    fake.db.project_subcontracts!.push({ id: "dddddddd-0000-4000-8000-0000000000d9", tenant_id: TENANT_ID, project_id: PROJECT, deleted_at: "2026-11-10T00:00:00.000Z", kind: "subcontract", amount: "100", vendor_id: VENDOR_A, vendor_name: "測試甲工程行", created_at: "2026-01-01T00:00:00.000Z" })
     fake.db.project_subcontracts![0]!.vendor_id = null
-    fake.db.disbursements = [header("", { payee_kind: "other", vendor_id: null, payee_name: "測試某人", payee_bank_account: "0009999 測試某人", status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT })]
+    fake.db.project_subcontracts![0]!.vendor_name = "測試某下包"
+    fake.db.disbursements = [header("", { payee_kind: "other", vendor_id: null, payee_name: "測試某人", payee_bank_account: "0009999 測試某人", status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT, created_at: created })]
     fake.db.disbursement_allocations = [alloc()]
-    const res = await as("hr-user", request(app).get("/disbursements/pending-approvals"))
-    expect(res.body.disbursements[0].payeeRebindWarning?.message).toContain("曾刪除過綁定名冊廠商的副委託")
-    fake.db.project_subcontracts = fake.db.project_subcontracts!.filter((s) => s.id !== "dddddddd-0000-4000-8000-0000000000d9")
-    const res2 = await as("hr-user", request(app).get("/disbursements/pending-approvals"))
-    expect(res2.body.disbursements[0].payeeRebindWarning).toBeUndefined()
+  }
+  const warning = async () => (await as("hr-user", request(app).get("/disbursements/pending-approvals"))).body.disbursements[0].payeeRebindWarning
+  const deletedSub = (over: Row = {}): Row => ({ id: DEL_SUB, tenant_id: TENANT_ID, project_id: PROJECT, deleted_at: after, kind: "subcontract", amount: "100", vendor_id: VENDOR_A, vendor_name: "測試甲工程行", created_at: "2026-01-01T00:00:00.000Z", ...over })
+
+  it("(c) 同專案已刪除、刪除時有綁廠商的副委託 → 紅框；上線日前刪除或放款單建立後才刪 → 不標", async () => {
+    setup()
+    fake.db.project_subcontracts!.push(deletedSub())
+    expect((await warning())?.message).toContain("曾刪除過綁定名冊廠商的副委託")
+    fake.db.project_subcontracts![1]!.deleted_at = "2026-11-10T00:00:00.000Z"
+    expect(await warning()).toBeUndefined()
+    fake.db.project_subcontracts![1]!.deleted_at = "2026-11-21T00:00:00.000Z"
+    expect(await warning()).toBeUndefined()
+  })
+  it("(c) 已刪除副委託刪除時沒綁、但稽核顯示曾綁過（rebindReason）→ 紅框", async () => {
+    setup()
+    fake.db.project_subcontracts!.push(deletedSub({ vendor_id: null }))
+    expect(await warning()).toBeUndefined()
+    fake.db.audit_logs = [{ id: "a9", tenant_id: TENANT_ID, table_name: "project_subcontracts", record_id: DEL_SUB, action: "UPDATE", old_row: { vendor_id: VENDOR_A }, new_row: { vendor_id: null, unbind: true, rebindReason: "測試" } }]
+    expect((await warning())?.message).toContain("曾刪除過綁定名冊廠商的副委託")
+  })
+  it("(a) 同專案副委託綁著已刪除的名冊廠商 → 紅框；廠商在上線日前刪除 → 不標", async () => {
+    setup()
+    fake.db.project_subcontracts!.push({ ...deletedSub({ id: "dddddddd-0000-4000-8000-0000000000d8", deleted_at: null }) })
+    fake.db.vendors![0]!.deleted_at = after
+    expect((await warning())?.message).toContain("已刪除的名冊廠商")
+    fake.db.vendors![0]!.deleted_at = "2026-11-10T00:00:00.000Z"
+    expect(await warning()).toBeUndefined()
+  })
+  it("(b) 分攤的副委託名稱與已刪除廠商名稱 exact 相同（只差空白／全形）→ 紅框", async () => {
+    setup()
+    fake.db.project_subcontracts![0]!.vendor_name = "測試 甲工程行"
+    fake.db.vendors![0]!.deleted_at = after
+    expect((await warning())?.message).toContain("已刪除的名冊廠商")
+  })
+  it("HR 期款改 0 後刪名冊廠商 → 403 vendor_delete_requires_boss；老闆可刪", async () => {
+    fake.db.project_subcontract_payments![0]!.amount = "0"
+    const res = await as("hr-user", request(app).delete(`/vendors/${VENDOR_A}`))
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("vendor_delete_requires_boss")
+    expect(fake.db.vendors![0]!.deleted_at).toBeNull()
+    fake.db.employees!.find((e) => e.id === BOSS)!.role = "hr_admin" // DELETE /vendors 本身需要 HR 權限；這位同時是設定的老闆
+    const ok = await as("boss-user", request(app).delete(`/vendors/${VENDOR_A}`))
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
   })
 })

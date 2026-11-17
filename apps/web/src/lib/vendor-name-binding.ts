@@ -58,6 +58,8 @@ export const VENDOR_IN_USE_TEXT = "此廠商仍有未付期款或未匯款的放
 /** 廠商刪除失敗的錯誤訊息（含 apiFetch 的 `[409]` 前綴）→ 中文，其餘原樣。 */
 export function humanizeVendorDeleteError(message: string): string {
   if (message.includes("vendor_in_use")) return VENDOR_IN_USE_TEXT;
+  // 2026-11-17 S2 擴大：仍有副委託綁著這家廠商 → 刪除限老闆或平台管理員。
+  if (message.includes("vendor_delete_requires_boss")) return "仍有副委託綁著這家廠商，刪除名冊廠商只限老闆或平台管理員操作";
   return message;
 }
 

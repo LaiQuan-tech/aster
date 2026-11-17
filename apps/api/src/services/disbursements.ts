@@ -843,51 +843,110 @@ export async function serializeMany(tenantId: string, rows: DisbursementRow[]): 
  * 驗收 S2：「其他」（手動帳戶）收款單分攤到的副委託曾經解除或改綁名冊廠商（project_subcontracts 稽核帶 rebindReason）→ 紅框：
  * 這是「解除綁定後改用其他收款繞過名冊帳戶確認」的樣態，請核准人確認收款對象。查詢失敗不擋顯示（記 log）。
  */
+/** S2 擴大紅框（刪除類條件）只計入這天之後的刪除（本功能上線日；更早的刪除不回溯，避免既有專案永久紅框）。 */
+export const S2_DELETE_WARN_SINCE = "2026-11-18T00:00:00+08:00"
+
 async function attachRebindWarning(tenantId: string, items: SerializedDisbursement[]): Promise<void> {
   const targets = items.filter((d) => d.payeeKind === "other" && d.allocations.length > 0)
   if (targets.length === 0) return
-  const subIds = [...new Set(targets.flatMap((d) => d.allocations.map((a) => a.subcontractId).filter((v): v is string => !!v)))]
+  const allocSubIds = [...new Set(targets.flatMap((d) => d.allocations.map((a) => a.subcontractId).filter((v): v is string => !!v)))]
   const projectIds = [...new Set(targets.flatMap((d) => d.allocations.map((a) => a.projectId).filter((v): v is string => !!v)))]
+  const since = Date.parse(S2_DELETE_WARN_SINCE)
   try {
+    // 同專案的副委託（含已刪除；分頁避免 PostgREST 1000 列截斷）。
+    type SubLite = { id: string; project_id: string; vendor_id: string | null; vendor_name: string | null; deleted_at: string | null }
+    const projectSubs: SubLite[] = []
+    for (let i = 0; i < projectIds.length; i += 100) {
+      const chunk = projectIds.slice(i, i + 100)
+      projectSubs.push(
+        ...(await selectAllPages<SubLite>(
+          (from, to) =>
+            supabaseAdmin
+              .from("project_subcontracts")
+              .select("id, project_id, vendor_id, vendor_name, deleted_at")
+              .eq("tenant_id", tenantId)
+              .in("project_id", chunk)
+              .order("id")
+              .range(from, to),
+          "attachRebindWarning (subcontracts)",
+        )),
+      )
+    }
+    // 稽核顯示曾改綁／解綁（rebindReason）的副委託：分攤到的＋同專案已刪除的。
+    const deletedSubIds = projectSubs.filter((x) => !!x.deleted_at).map((x) => x.id)
+    const auditIds = [...new Set([...allocSubIds, ...deletedSubIds])]
     const rebound = new Set<string>()
-    for (let i = 0; i < subIds.length; i += 100) {
-      const { data, error } = await supabaseAdmin
-        .from("audit_logs")
-        .select("record_id, new_row")
-        .eq("tenant_id", tenantId)
-        .eq("table_name", "project_subcontracts")
-        .in("record_id", subIds.slice(i, i + 100))
-        .not("new_row->>rebindReason", "is", null) // 驗收第三輪效能：只撈有改綁原因的稽核列
-      if (error) throw new Error(error.message)
-      for (const r of (data ?? []) as Array<{ record_id: string | null; new_row: Record<string, unknown> | null }>) {
+    for (let i = 0; i < auditIds.length; i += 100) {
+      const chunk = auditIds.slice(i, i + 100)
+      const rows = await selectAllPages<{ record_id: string | null; new_row: Record<string, unknown> | null }>(
+        (from, to) =>
+          supabaseAdmin
+            .from("audit_logs")
+            .select("record_id, new_row")
+            .eq("tenant_id", tenantId)
+            .eq("table_name", "project_subcontracts")
+            .in("record_id", chunk)
+            .not("new_row->>rebindReason", "is", null) // 只撈有改綁原因的稽核列
+            .order("record_id")
+            .range(from, to),
+        "attachRebindWarning (audit)",
+      )
+      for (const r of rows) {
         const reason = r.new_row?.rebindReason
         if (r.record_id && typeof reason === "string" && reason.trim()) rebound.add(r.record_id.toLowerCase())
       }
     }
-    // S2 擴大（2026-11-17）：同專案曾刪除過綁定名冊廠商的副委託（刪掉再建非登錄的，就能改用手動帳戶收款）→ 也紅框。
-    const projectsWithDeletedBound = new Set<string>()
-    for (let i = 0; i < projectIds.length; i += 100) {
-      const { data, error } = await supabaseAdmin
-        .from("project_subcontracts")
-        .select("project_id")
-        .eq("tenant_id", tenantId)
-        .in("project_id", projectIds.slice(i, i + 100))
-        .not("deleted_at", "is", null)
-        .not("vendor_id", "is", null)
-      if (error) throw new Error(error.message)
-      for (const r of (data ?? []) as Array<{ project_id: string | null }>) if (r.project_id) projectsWithDeletedBound.add(r.project_id.toLowerCase())
-    }
+    // 上線日之後刪除的名冊廠商（分頁）。
+    const deletedVendors = (
+      await selectAllPages<{ id: string; name: string | null; deleted_at: string | null }>(
+        (from, to) =>
+          supabaseAdmin
+            .from("vendors")
+            .select("id, name, deleted_at")
+            .eq("tenant_id", tenantId)
+            .not("deleted_at", "is", null)
+            .gte("deleted_at", S2_DELETE_WARN_SINCE)
+            .order("id")
+            .range(from, to),
+        "attachRebindWarning (deleted vendors)",
+      )
+    ).filter((v) => !!v.deleted_at && Date.parse(v.deleted_at) >= since)
+    const deletedVendorAt = new Map(deletedVendors.map((v) => [v.id.toLowerCase(), Date.parse(v.deleted_at!)]))
+    const deletedVendorNames = deletedVendors
+      .map((v) => ({ key: exactNameKey(v.name ?? ""), at: Date.parse(v.deleted_at!) }))
+      .filter((v) => !!v.key)
+    const subById = new Map(projectSubs.map((x) => [x.id.toLowerCase(), x]))
+
     for (const d of targets) {
+      const createdAt = Date.parse(d.createdAt)
+      const inWindow = (t: number) => t >= since && (Number.isNaN(createdAt) || t < createdAt)
+      const projects = new Set(d.allocations.map((a) => a.projectId?.toLowerCase()).filter((v): v is string => !!v))
       const hit = d.allocations.map((a) => a.subcontractId).filter((v): v is string => !!v && rebound.has(v.toLowerCase()))
-      const deletedIn = d.allocations.map((a) => a.projectId).filter((v): v is string => !!v && projectsWithDeletedBound.has(v.toLowerCase()))
       if (hit.length > 0) {
         d.payeeRebindWarning = {
           message: "分攤的副委託曾解除或改綁名冊廠商，這張單改用手動輸入的帳戶收款，請確認收款對象與帳號",
           subcontractIds: [...new Set(hit)],
         }
-      } else if (deletedIn.length > 0) {
+        continue
+      }
+      const sameProject = projectSubs.filter((x) => projects.has(x.project_id.toLowerCase()))
+      // (a) 同專案（未刪除的）副委託綁著已刪除的名冊廠商
+      const a = sameProject.some((x) => !x.deleted_at && !!x.vendor_id && inWindow(deletedVendorAt.get(x.vendor_id.toLowerCase()) ?? NaN))
+      // (b) 分攤的副委託名稱與已刪除廠商名稱 exact 相同
+      const b = d.allocations.some((al) => {
+        const sub = al.subcontractId ? subById.get(al.subcontractId.toLowerCase()) : undefined
+        const key = exactNameKey(sub?.vendor_name ?? al.vendorName ?? "")
+        return !!key && deletedVendorNames.some((v) => v.key === key && inWindow(v.at))
+      })
+      // (c) 同專案已刪除的副委託，刪除時有綁名冊廠商、或稽核顯示曾綁過
+      const c = sameProject.some(
+        (x) => !!x.deleted_at && inWindow(Date.parse(x.deleted_at)) && (!!x.vendor_id || rebound.has(x.id.toLowerCase())),
+      )
+      if (a || b || c) {
         d.payeeRebindWarning = {
-          message: "這個專案曾刪除過綁定名冊廠商的副委託，這張單改用手動輸入的帳戶收款，請確認收款對象與帳號",
+          message: c
+            ? "這個專案曾刪除過綁定名冊廠商的副委託，這張單改用手動輸入的帳戶收款，請確認收款對象與帳號"
+            : "這個專案的副委託涉及已刪除的名冊廠商，這張單改用手動輸入的帳戶收款，請確認收款對象與帳號",
           subcontractIds: [],
         }
       }

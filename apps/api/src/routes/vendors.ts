@@ -1,4 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
+import { isBossOrPlatformAdmin, loadConfiguredBossEmpId } from "../lib/boss.js"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
@@ -764,6 +765,27 @@ vendorsRouter.delete("/vendors/:id", requireAuth, requireTenant, requireHrAdmin,
     if ((await vendorHasUnpaidInstallments(tenantId, id, label)) || (await vendorHasOpenDisbursements(tenantId, id, label))) {
       res.status(409).json({ error: "vendor_in_use", message: "此廠商仍有未付期款或未匯款的放款單，不能刪除" })
       return
+    }
+    // 2026-11-17 S2 擴大驗收：還有任何未刪除的副委託綁著這家廠商（不論金額、有無未付）→ 刪名冊廠商只限在職的設定老闆或
+    // platform_admin（否則 HR 可「期款改 0 → 刪廠商」讓副委託失去綁定，再改用「其他」手動帳戶收款）。
+    const { data: bound, error: boundErr } = await supabaseAdmin
+      .from("project_subcontracts")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("vendor_id", id)
+      .is("deleted_at", null)
+      .limit(1)
+    if (boundErr) {
+      next(new Error(`${label} (bound subcontracts): ${boundErr.message}`))
+      return
+    }
+    if ((bound ?? []).length > 0) {
+      const userId = req.auth?.userId
+      const self = userId ? await resolveSelf(tenantId, userId) : null
+      if (!isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), self)) {
+        res.status(403).json({ error: "vendor_delete_requires_boss", message: "仍有副委託綁著這家廠商，刪除名冊廠商只限老闆或平台管理員操作" })
+        return
+      }
     }
     const { data, error } = await supabaseAdmin
       .from("vendors")

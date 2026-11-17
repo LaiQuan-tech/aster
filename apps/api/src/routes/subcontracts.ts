@@ -606,6 +606,8 @@ subcontractsRouter.put(
       }
 
       // 未出現的 → 軟刪；有已付／已驗收期款、或已有請款放款分攤的不可移除（與刪除專案的擋刪條件一致，2026-11-12 驗收）。
+      // S2 擴大：呼叫者是不是在職的設定老闆／platform_admin（解綁／改綁／刪除已綁定列的權限；寫入時的併發重確認也用）。
+      const actorIsBoss = isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), scope.self)
       const keepIds = new Set(payload.map((p) => p.id).filter((v): v is string => !!v))
       const removing = existing.filter((s) => !keepIds.has(s.id))
       if (removing.length > 0) {
@@ -616,7 +618,7 @@ subcontractsRouter.put(
         // 業主決定（2026-11-17 S2 擴大）：目前綁定名冊廠商的副委託，刪除（含批次省略列）一律限在職的設定老闆或 platform_admin
         // ——不論有無未付期款、金額是否為 0（刪掉再建一筆非登錄的，就能改用「其他」手動帳戶收款）。
         const boundRemoving = removing.find((r) => !!r.vendor_id)
-        if (boundRemoving && !isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), scope.self)) {
+        if (boundRemoving && !actorIsBoss) {
           res.status(403).json({
             error: "subcontract_delete_requires_boss",
             subcontractId: boundRemoving.id,
@@ -678,6 +680,19 @@ subcontractsRouter.put(
         return p.vendorId === null || p.vendorId.toLowerCase() !== prevVendorId
       })
       if (rebinds.length > 0) {
+        // 驗收：老闆檢查放在 rebind_reason_required 之前（非老闆不必先填原因才被擋）。
+        // 業主決定（2026-11-17 S2 擴大）：目前綁定名冊廠商的副委託，解除綁定或改綁另一家（改變期款的收款對象）一律限在職的設定老闆
+        // 或 platform_admin——不論有無未付期款、金額是否為 0（「先標已付／改 0 再解綁」的繞過一併堵住）。第一次綁定不受限。
+        if (!actorIsBoss) {
+          const blocked = rebinds[0]!
+          res.status(403).json({
+            error: "rebind_requires_boss",
+            id: blocked.id,
+            index: payload.indexOf(blocked),
+            message: "這筆副委託已綁定名冊廠商，解除或改綁（改變收款對象）只限老闆或平台管理員操作",
+          })
+          return
+        }
         const oldNames = await vendorNamesOf(tenantId, [...new Set(rebinds.map((p) => existingById.get(p.id!)!.vendor_id!.toLowerCase()))])
         const missing = rebinds.find((p) => !(p.rebindReason ?? "").trim())
         if (missing) {
@@ -695,18 +710,6 @@ subcontractsRouter.put(
             message: unbind
               ? `副委託「${prev.vendor_name ?? ""}」解除與名冊廠商「${oldVendorName}」的綁定（改為非登錄廠商）請填寫原因`
               : `副委託「${prev.vendor_name ?? ""}」從「${oldVendorName}」改綁「${newVendorName}」請填寫改綁原因`,
-          })
-          return
-        }
-        // 業主決定（2026-11-17 S2 擴大）：目前綁定名冊廠商的副委託，解除綁定或改綁另一家（改變期款的收款對象）一律限在職的設定老闆
-        // 或 platform_admin——不論有無未付期款、金額是否為 0（「先標已付／改 0 再解綁」的繞過一併堵住）。第一次綁定不受限。
-        if (!isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), scope.self)) {
-          const blocked = rebinds[0]!
-          res.status(403).json({
-            error: "rebind_requires_boss",
-            id: blocked.id,
-            index: payload.indexOf(blocked),
-            message: "這筆副委託已綁定名冊廠商，解除或改綁（改變收款對象）只限老闆或平台管理員操作",
           })
           return
         }
@@ -783,6 +786,17 @@ subcontractsRouter.put(
         // #3：副委託結構變動（期款金額重算等）後，順手重算未發放的獎金批次（best-effort；已付的副委託本來就刪不掉，成本多半不變）。
         await recomputeBonusRunsBestEffort(tenantId, [projectId], "PUT /projects/:id/subcontracts")
       }
+      /** 併發重確認：這筆副委託現在是不是「未刪除且已綁定名冊廠商」。 */
+      const rowNowBound = async (id: string): Promise<boolean> => {
+        const { data } = await supabaseAdmin
+          .from("project_subcontracts")
+          .select("id, vendor_id")
+          .eq("tenant_id", tenantId)
+          .eq("id", id)
+          .is("deleted_at", null)
+          .maybeSingle()
+        return !!(data as { vendor_id?: string | null } | null)?.vendor_id
+      }
       const finishPartial = async () => {
         if (writeCount() === 0) return
         await finishWrites().catch((err: unknown) =>
@@ -792,16 +806,25 @@ subcontractsRouter.put(
 
       try {
         for (const s of removing) {
-          const { data: gone, error } = await supabaseAdmin
+          let delQ = supabaseAdmin
             .from("project_subcontracts")
             .update({ deleted_at: nowIso, deleted_by: scope.self.id, delete_reason: parsed.data.deleteReason, updated_at: nowIso })
             .eq("tenant_id", tenantId)
             .eq("id", s.id)
+          // 驗收：非老闆刪除時寫入條件再確認「仍未綁定名冊廠商」（讀完到寫入之間被別人綁上 → 0 列 → 409 conflict_retry）。
+          if (!actorIsBoss) delQ = delQ.is("vendor_id", null)
+          const { data: gone, error } = await delQ
             // 已被別人（或專案刪除）先刪掉的不重刪：不覆蓋原本的刪除人／原因（2026-11-12 驗收）。
             .is("deleted_at", null)
             .select("id")
           if (error) throw new Error(`PUT /projects/${projectId}/subcontracts (delete): ${error.message}`)
           if (gone && gone.length > 0) deleted.push(s.id)
+          else if (!actorIsBoss && (await rowNowBound(s.id))) {
+            const n = writeCount()
+            await finishPartial()
+            res.status(409).json({ error: "conflict_retry", id: s.id, savedCount: n, message: "這筆副委託剛被綁定名冊廠商，沒有刪除；請重新整理後再試" })
+            return
+          }
         }
 
         for (let i = 0; i < payload.length; i++) {
@@ -845,15 +868,26 @@ subcontractsRouter.put(
             ...(extrasAvailable ? subcontractExtraFields({ ...p, kind: effectiveKind }) : {}),
           }
           if (p.id) {
-            const { data: updated, error } = await supabaseAdmin
+            // 驗收：非老闆改「讀到時未綁定」的列的廠商欄（含送 vendorId: null）→ 寫入條件再確認仍未綁定；
+            // 讀完到寫入之間被別人綁上 → 0 列 → 409 conflict_retry（不把剛綁上的廠商洗掉）。
+            const recheckUnbound = !actorIsBoss && p.vendorId !== undefined && !prev?.vendor_id
+            let updQ = supabaseAdmin
               .from("project_subcontracts")
               .update(fields)
               .eq("tenant_id", tenantId)
               .eq("id", p.id)
+            if (recheckUnbound) updQ = updQ.is("vendor_id", null)
+            const { data: updated, error } = await updQ
               // 讀到之後這筆副委託（或整個專案）被刪除：不把發票／代扣寫進已刪除的列（2026-11-12 驗收）→ 404。
               .is("deleted_at", null)
               .select("id")
             if (error) throw new Error(`PUT /projects/${projectId}/subcontracts (update): ${error.message}`)
+            if ((!updated || updated.length === 0) && recheckUnbound && (await rowNowBound(p.id))) {
+              const n = writeCount()
+              await finishPartial()
+              res.status(409).json({ error: "conflict_retry", id: p.id, savedCount: n, message: "這筆副委託剛被綁定名冊廠商，沒有儲存這一列；請重新整理後再試" })
+              return
+            }
             if (!updated || updated.length === 0) {
               const n = writeCount()
               await finishPartial()

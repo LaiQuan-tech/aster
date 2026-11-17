@@ -393,7 +393,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
       const vendorOfRaw = (s: { vendor_id: string | null; vendor_name: string | null }) => {
         if (!s.vendor_id) return { vendor_id: null, vendor_name: s.vendor_name }
         const rosterName = rosterNames.get(s.vendor_id.toLowerCase())
-        if (rosterName === undefined) return { vendor_id: null, vendor_name: s.vendor_name, deletedVendor: true as const }
+        if (rosterName === undefined) return { vendor_id: null, vendor_name: s.vendor_name, deletedVendor: true as const, fromVendorId: s.vendor_id }
         const same = (s.vendor_name ?? "").trim() === rosterName.trim()
         return { vendor_id: s.vendor_id, vendor_name: same ? s.vendor_name : rosterName }
       }
@@ -431,8 +431,18 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
         }
         return v
       }
+      // 2026-11-17 S2 擴大驗收 #3：來源綁的是已刪除廠商 → 複本保留非登錄，但記一筆「曾綁定」稽核（rebindReason），
+      // 讓核准頁紅框（分攤到曾解綁／改綁的副委託、收款為手動）命中。先產 id 才對得到。
+      const unboundFromDeleted: Array<{ id: string; fromVendorId: string; vendorName: string | null }> = []
+      const rows = subs.map((s) => {
+        const id = crypto.randomUUID()
+        const raw = vendorOfRaw(s as { vendor_id: string | null; vendor_name: string | null })
+        if ("deletedVendor" in raw && raw.fromVendorId) unboundFromDeleted.push({ id, fromVendorId: raw.fromVendorId, vendorName: raw.vendor_name })
+        return { id, s }
+      })
       const { error: insErr } = await supabaseAdmin.from("project_subcontracts").insert(
-        subs.map((s) => ({
+        rows.map(({ id, s }) => ({
+          id,
           tenant_id: tenantId,
           project_id: newId,
           kind: s.kind,
@@ -453,6 +463,18 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
         })),
       )
       if (insErr) throw new Error(`project-duplicate subcontracts(insert): ${insErr.message}`)
+      for (const u of unboundFromDeleted) {
+        await writeAuditLog({
+          tenantId,
+          tableName: "project_subcontracts",
+          recordId: u.id,
+          action: "UPDATE",
+          oldRow: { vendor_id: u.fromVendorId, vendor_name: u.vendorName },
+          newRow: { vendor_id: null, vendor_name: u.vendorName, unbind: true, rebindReason: "複製專案時來源綁定的名冊廠商已刪除，改為非登錄" },
+          actorEmpId,
+          context: "POST /projects/:id/duplicate 來源副委託綁定的名冊廠商已刪除",
+        })
+      }
     }
   }
 

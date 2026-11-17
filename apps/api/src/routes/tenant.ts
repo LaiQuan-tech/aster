@@ -179,7 +179,7 @@ export const tenantSettingsSchema = z.object({
        * 見 routes/group-overview.ts）。
        *
        * 權限邊界（2026-10-11 業主拍板，services/privileged-accounts.ts）——HR 不能靠下面三條路變成老闆：
-       *   ① 換老闆設定（approval.fallbackApproverEmpId）→ 只有老闆本人或 platform_admin（還沒有老闆時 HR 可做第一次設定）；
+       *   ① 換老闆設定（approval.fallbackApproverEmpId）→ 2026-11-17 起一律只限在職 platform_admin（老闆交棒、HR 第一次設定都不行）；
        *   ② 指派 platform_admin 角色（POST/PATCH /employees、批次建立帳號）→ 只有 platform_admin；
        *   ③ 重設／接管老闆、老闆指定的解鎖人、hr_admin、platform_admin 的密碼（重設密碼、寄重設／邀請信、
        *      批次建立綁到既有列）→ 只有老闆或 platform_admin。

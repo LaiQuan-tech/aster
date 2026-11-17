@@ -187,3 +187,19 @@ describe("複製專案 — 非登錄副委託撞名冊廠商名稱（2026-11-17 
     expect(result.ok && result.subcontractWarnings).toEqual([{ vendorName: "測試重名工程行", candidates: 2, kind: "ambiguous" }])
   })
 })
+
+describe("2026-11-17 S2 擴大驗收 #3：來源綁已刪除廠商 → 複本非登錄＋記「曾綁定」稽核（核准頁紅框命中）", () => {
+  it("複本 vendor_id 空、同 id 寫一筆 rebindReason 稽核；正常綁定的列不寫", async () => {
+    fake.db.project_subcontracts = [sub({ vendor_id: V_DELETED, vendor_name: "測試已刪廠商" }), sub({ vendor_id: V_A, vendor_name: "測試名冊甲廠商" })]
+    const result = await duplicate()
+    expect(result.ok).toBe(true)
+    const subs = insertedSubs()
+    const unbound = subs.find((s) => s.vendor_name === "測試已刪廠商")!
+    expect(unbound.vendor_id).toBeNull()
+    expect(unbound.id).toBeTruthy()
+    const audits = (fake.db.audit_logs ?? []).filter((a) => a.table_name === "project_subcontracts")
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ record_id: unbound.id, old_row: { vendor_id: V_DELETED }, new_row: { vendor_id: null, unbind: true } })
+    expect(String((audits[0]!.new_row as Row).rebindReason)).toContain("已刪除")
+  })
+})

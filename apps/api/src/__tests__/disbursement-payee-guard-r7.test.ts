@@ -182,6 +182,7 @@ describe("第七輪 H2：封存專案的未付期款照算（同應付清單）"
     expect(res.body.error).toBe("vendor_in_use")
   })
   it("副委託改綁 → 400 rebind_reason_required", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }] // S2 擴大驗收：老闆檢查先於原因，這裡以老闆身分驗原因規則
     const body = await subsBody(P2, (x) => (x.id === SE ? { ...x, vendorId: VB, vendorName: "測試乙工程行" } : x))
     const res = await putSubs(P2, body)
     expect(res.status).toBe(400)
@@ -206,6 +207,7 @@ describe("第七輪 H2：封存專案的未付期款照算（同應付清單）"
 
 describe("第七輪 H1：既有列解除名冊綁定（A → null）也要原因", () => {
   it("有未付期款：沒原因 → 400 rebind_reason_required(unbind)、0 寫入；有原因 → 200 且嚴格稽核寫在更新之前", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }] // S2 擴大驗收：老闆檢查先於原因，這裡以老闆身分驗原因規則
     const body = await subsBody(P1, (x) => (x.id === SA1 ? { ...x, vendorId: null, vendorName: "測試另一下包" } : x))
     fake.writes.length = 0
     const no = await putSubs(P1, body)
@@ -213,13 +215,8 @@ describe("第七輪 H1：既有列解除名冊綁定（A → null）也要原因
     expect(no.body).toMatchObject({ error: "rebind_reason_required", id: SA1, unbind: true, oldVendorName: "測試甲工程行" })
     expect(no.body.message).toContain("解除與名冊廠商「測試甲工程行」的綁定")
     expect(fake.writes).toHaveLength(0)
-    // 2026-11-17 驗收 S2：有未付期款的改綁只限老闆／platform_admin——HR 帶原因也 403；改由 HR 擔任設定老闆再驗原因＋稽核。
+    // 2026-11-17 S2 擴大：改綁只限老闆／platform_admin（非老闆另有測試）；本測試以 HR 擔任設定老闆驗原因＋稽核。
     const withReason = { subcontracts: (body.subcontracts as Row[]).map((x) => (x.id === SA1 ? { ...x, rebindReason: "測試：改給非登錄下包" } : x)) }
-    const hrOnly = await putSubs(P1, withReason)
-    expect(hrOnly.status).toBe(403)
-    expect(hrOnly.body.error).toBe("rebind_requires_boss")
-    expect(fake.writes).toHaveLength(0)
-    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }]
     const ok = await putSubs(P1, withReason)
     expect(ok.status, r(ok)).toBe(200)
     const auditIdx = fake.writes.findIndex((w) => w.table === "audit_logs" && (w.payload as Row).record_id === SA1)
@@ -233,6 +230,7 @@ describe("第七輪 H1：既有列解除名冊綁定（A → null）也要原因
     expect(fake.db.project_subcontracts!.find((s) => s.id === SA1)!.vendor_id).toBeNull()
   })
   it("A → null → B 兩步改綁：第一步就要原因（不能繞過）", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }] // S2 擴大驗收：老闆檢查先於原因，這裡以老闆身分驗原因規則
     const step1 = await putSubs(P1, await subsBody(P1, (x) => (x.id === SA1 ? { ...x, vendorId: null, vendorName: "測試中繼名稱" } : x)))
     expect(step1.status).toBe(400)
     expect(step1.body.error).toBe("rebind_reason_required")
@@ -496,5 +494,66 @@ describe("2026-11-17 S2 擴大（業主決定）：已綁定名冊廠商的副�
     const b2 = await subsBody(P1, (x) => x)
     const del = await putAs("acc-user", P1, { subcontracts: (b2.subcontracts as Row[]).filter((x) => x.id !== "dddddddd-0000-4000-8000-0000000000f9"), deleteReason: "測試" })
     expect(del.status, JSON.stringify(del.body)).toBe(200)
+  })
+})
+
+describe("2026-11-17 S2 擴大驗收：老闆檢查先於原因、寫入時併發重確認", () => {
+  const ACC = "bbbbbbbb-0000-4000-8000-0000000000c1"
+  const putAs = (token: string, project: string, body: Row) => request(app).put(`/projects/${project}/subcontracts`).set("Authorization", `Bearer ${token}`).send(body)
+  beforeEach(() => {
+    fake.db.employees!.push({ id: ACC, tenant_id: TENANT_ID, user_id: "acc-user", role: "accountant", dept_id: null, name: "測試會計", status: "active", emp_no: null, created_at: "2026-01-01T00:00:00.000Z" })
+  })
+  /** 在對 project_subcontracts 的第一次 update 之前，把指定列綁上名冊廠商（模擬讀完到寫入之間別人綁定）。 */
+  const raceBind = (subId: string) => {
+    const origFrom = fake.from
+    let raced = false
+    fake.from = ((table: string) => {
+      const builder = origFrom(table) as unknown as Record<string, (...args: unknown[]) => unknown>
+      if (table === "project_subcontracts" && !raced) {
+        const update = builder.update
+        builder.update = (...args: unknown[]) => {
+          raced = true
+          fake.db.project_subcontracts!.find((s) => s.id === subId)!.vendor_id = VB
+          return update(...args)
+        }
+      }
+      return builder
+    }) as typeof fake.from
+    return () => {
+      fake.from = origFrom
+    }
+  }
+
+  it("非老闆解綁不帶原因 → 直接 403 rebind_requires_boss（不先要原因）", async () => {
+    const body = await subsBody(P1, (x) => (x.id === SA1 ? { ...x, vendorId: null, vendorName: "測試另一下包" } : x))
+    const res = await putAs("acc-user", P1, body)
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("rebind_requires_boss")
+  })
+  it("非老闆刪除讀到時未綁定的列，寫入前被別人綁上 → 409 conflict_retry、沒刪", async () => {
+    // 已驗收的期別本來就不能刪（既有規則）；先撤銷驗收。
+    fake.db.project_subcontract_payments = fake.db.project_subcontract_payments!.map((p) => (p.subcontract_id === SF ? { ...p, accepted_on: null } : p))
+    const body = await subsBody(P1, (x) => x)
+    const restore = raceBind(SF)
+    try {
+      const res = await putAs("acc-user", P1, { subcontracts: (body.subcontracts as Row[]).filter((x) => x.id !== SF), deleteReason: "測試" })
+      expect(res.status, JSON.stringify(res.body)).toBe(409)
+      expect(res.body.error).toBe("conflict_retry")
+    } finally {
+      restore()
+    }
+    expect(fake.db.project_subcontracts!.find((s) => s.id === SF)).toMatchObject({ deleted_at: null, vendor_id: VB })
+  })
+  it("非老闆對讀到時未綁定的列送 vendorId: null，寫入前被別人綁上 → 409 conflict_retry、綁定不被洗掉", async () => {
+    const body = await subsBody(P1, (x) => (x.id === SF ? { ...x, vendorId: null, vendorName: "測試非登錄下包", amount: 1234 } : x))
+    const restore = raceBind(SF)
+    try {
+      const res = await putAs("acc-user", P1, body)
+      expect(res.status, JSON.stringify(res.body)).toBe(409)
+      expect(res.body.error).toBe("conflict_retry")
+    } finally {
+      restore()
+    }
+    expect(fake.db.project_subcontracts!.find((s) => s.id === SF)!.vendor_id).toBe(VB)
   })
 })

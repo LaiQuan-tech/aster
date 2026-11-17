@@ -404,8 +404,9 @@ describe("第八輪 H1：改綁一律留原因", () => {
     // 第 2 步：解除綁定
     fake.writes.length = 0
     const unbind = await putSubs(P1, await subsBody(P1, (x) => (x.id === SA1 ? { ...x, vendorId: null, vendorName: "測試中繼名稱" } : x)))
-    expect(unbind.status).toBe(400)
-    expect(unbind.body).toMatchObject({ error: "rebind_reason_required", id: SA1, unbind: true })
+    // 2026-11-17 S2 擴大：非老闆解除已綁定列一律 403（先於原因檢查），比「要原因」更嚴。
+    expect(unbind.status).toBe(403)
+    expect(unbind.body).toMatchObject({ error: "rebind_requires_boss", id: SA1 })
     expect(fake.writes).toHaveLength(0)
     expect(fake.db.project_subcontracts!.find((s) => s.id === SA1)!.vendor_id).toBe(VA)
   })

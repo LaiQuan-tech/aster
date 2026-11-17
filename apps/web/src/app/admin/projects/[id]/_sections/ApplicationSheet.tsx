@@ -1125,7 +1125,9 @@ export function ApplicationSheet({
   const subRowNodes = subRows.map((slot, idx) => {
     const n = idx + 1;
     // S2 擴大：已綁定名冊廠商的列，非老闆／平台管理員不能改單位名稱（＝改綁／解綁）也不能移除。
-    const boundLocked = !!slot.sub?.vendorId && !canManageBound;
+    // 權限還在載入（null）→ 中性：先唯讀但不畫鎖頭；確定不能（false）才畫鎖頭與說明。
+    const boundLocked = !!slot.sub?.vendorId && canManageBound !== true;
+    const boundLockedKnown = boundLocked && canManageBound === false;
     const removed = !!slot.sub?.id && subRemoved.has(slot.sub.id);
     const paid = subcontractHasPaid(slot.sub);
     const rowLabel = `發包第 ${n} 列`;
@@ -1159,9 +1161,9 @@ export function ApplicationSheet({
           ) : isAmount ? (
             slot.sub ? fmtMoney(slot.sub.amount) : ""
           ) : (
-            <span className="whitespace-normal break-words" title={field === "vendorName" && boundLocked ? BOUND_SUBCONTRACT_LOCKED_NOTE : undefined}>
+            <span className="whitespace-normal break-words" title={field === "vendorName" && boundLockedKnown ? BOUND_SUBCONTRACT_LOCKED_NOTE : undefined}>
               {slot.sub?.[field] ?? ""}
-              {field === "vendorName" && boundLocked && editable && <span className="ml-1 text-[11px] text-gray-400 print:hidden">🔒</span>}
+              {field === "vendorName" && boundLockedKnown && editable && <span className="ml-1 text-[11px] text-gray-400 print:hidden">🔒</span>}
             </span>
           )}
         </td>
@@ -1180,7 +1182,7 @@ export function ApplicationSheet({
             ) : slot.sub && paid ? (
               <span className="cursor-not-allowed text-xs text-gray-300" title="已有付款紀錄的發包不能移除；要移除請先到下方「副委託」撤銷付款">移除</span>
             ) : boundLocked ? (
-              <span className="cursor-not-allowed text-xs text-gray-300" title={BOUND_SUBCONTRACT_LOCKED_NOTE}>移除</span>
+              <span className="cursor-not-allowed text-xs text-gray-300" title={boundLockedKnown ? BOUND_SUBCONTRACT_LOCKED_NOTE : undefined}>移除</span>
             ) : (
               <button
                 type="button"
