@@ -58,6 +58,7 @@ describe("terminatedLabel / employeeStatusNote", () => {
     expect(terminatedLabel(disabledNoDate, TODAY)).toBe("已離職（停用）");
     expect(terminatedLabel(active, TODAY)).toBeNull();
     expect(employeeStatusNote(leftLastMonth, TODAY)).toBe("已離職");
+    expect(employeeStatusNote(disabledNoDate, TODAY)).toBe("已停用");
     expect(employeeStatusNote(active, TODAY)).toBeUndefined();
   });
 });
@@ -74,18 +75,18 @@ describe("pickableEmployees", () => {
 
 describe("employedInPeriod", () => {
   const all = [active, leftLastMonth, disabledNoDate, emp("OLD", { status: "inactive", terminated_at: "2025-03-31" })];
-  it("列在職者＋期間內仍在職的離職者", () => {
-    expect(employedInPeriod(all, "2026-10-01", "2026-10-31", [], TODAY).map((e) => e.id)).toEqual(["A", "L"]);
+  it("列在職者＋期間內仍在職的離職者＋沒有離職日的停用帳號", () => {
+    expect(employedInPeriod(all, "2026-10-01", "2026-10-31", [], TODAY).map((e) => e.id)).toEqual(["A", "L", "D"]);
   });
-  it("期間在離職日之後 → 不列", () => {
-    expect(employedInPeriod(all, "2026-11-01", "2026-11-30", [], TODAY).map((e) => e.id)).toEqual(["A"]);
+  it("期間在離職日之後 → 不列（無離職日的停用帳號仍列）", () => {
+    expect(employedInPeriod(all, "2026-11-01", "2026-11-30", [], TODAY).map((e) => e.id)).toEqual(["A", "D"]);
   });
   it("期間在到職日之前 → 不列", () => {
     expect(employedInPeriod([leftLastMonth], "2024-01-01", "2024-12-31", [], TODAY)).toEqual([]);
   });
   it("沒有起日＝全列；keepIds 保留目前已選的人", () => {
     expect(employedInPeriod(all, "", "", [], TODAY)).toHaveLength(4);
-    expect(employedInPeriod(all, "2026-11-01", "2026-11-30", ["OLD"], TODAY).map((e) => e.id)).toEqual(["A", "OLD"]);
+    expect(employedInPeriod(all, "2026-11-01", "2026-11-30", ["OLD"], TODAY).map((e) => e.id)).toEqual(["A", "D", "OLD"]);
   });
 });
 

@@ -580,7 +580,7 @@ function ApprovalsView() {
               {employedInPeriod(employees, from, to, [employeeId]).map((employee) => (
                 <option key={employee.id} value={employee.id}>
                   {employeeLabel(employee)}
-                  {employeeStatusNote(employee) ? "（已離職）" : ""}
+                  {employeeStatusNote(employee) ? `（${employeeStatusNote(employee)}）` : ""}
                 </option>
               ))}
             </Select>

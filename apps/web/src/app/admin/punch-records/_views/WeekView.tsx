@@ -26,10 +26,14 @@ function todayLocal(): string {
 }
 
 /** 週表：列＝員工、欄＝日期（預設本週，最多 31 天）。 */
-export function WeekView({ filter }: { filter: OverviewFilter }) {
+export function WeekView({ filter, onRangeChange }: { filter: OverviewFilter; onRangeChange?: (from: string, to: string) => void }) {
   const initial = weekOf(todayLocal());
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
+  // 回報目前檢視的區間給上層（員工下拉依此列出該週仍在職的離職者）。
+  useEffect(() => {
+    onRangeChange?.(from, to);
+  }, [from, to, onRangeChange]);
   const [data, setData] = useState<PunchOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

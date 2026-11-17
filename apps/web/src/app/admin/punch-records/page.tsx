@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Segmented } from "@/components/ess-ui";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
 import { RecordsView } from "./_views/RecordsView";
@@ -8,7 +8,7 @@ import { DayView } from "./_views/DayView";
 import { WeekView } from "./_views/WeekView";
 import { LateReportsView } from "./_views/LateReportsView";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
-import { isEmployeeActive } from "@/lib/employee-status";
+import { employedInPeriod, employeeStatusNote, todayTaipei } from "@/lib/employee-status";
 
 type Tab = "day" | "week" | "records" | "late";
 
@@ -49,6 +49,11 @@ export default function PunchRecordsPage() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [fDept, setFDept] = useState("");
   const [fEmp, setFEmp] = useState("");
+  // 日／週檢視目前的日期區間（""＝今天）；員工下拉依此列出該期間仍在職的離職者。
+  const [range, setRange] = useState<{ from: string; to: string }>({ from: "", to: "" });
+  const onRangeChange = useCallback((from: string, to: string) => {
+    setRange((cur) => (cur.from === from && cur.to === to ? cur : { from, to }));
+  }, []);
 
   useEffect(() => {
     Promise.all([getEmployees(), getDepartments()])
@@ -61,8 +66,11 @@ export default function PunchRecordsPage() {
 
   // 選了單位就只列該單位的員工；原本選的員工不在該單位 → 清掉。
   const empOptions = useMemo(
-    () => employees.filter((e) => (isEmployeeActive(e) || e.id === fEmp) && (!fDept || e.dept_id === fDept)),
-    [employees, fDept, fEmp],
+    () =>
+      employedInPeriod(employees, range.from || todayTaipei(), range.to || todayTaipei(), [fEmp]).filter(
+        (e) => !fDept || e.dept_id === fDept,
+      ),
+    [employees, fDept, fEmp, range],
   );
   useEffect(() => {
     if (fEmp && fDept && !empOptions.some((e) => e.id === fEmp)) setFEmp("");
@@ -88,7 +96,7 @@ export default function PunchRecordsPage() {
             <div className="w-44">
               <label className={labelCls}>員工</label>
               <EmployeeCombobox
-                options={empOptions.map((e) => ({ id: e.id, label: e.emp_no ? `${e.emp_no} ${e.name}` : e.name, searchText: `${e.emp_no ?? ""} ${e.name}` }))}
+                options={empOptions.map((e) => ({ id: e.id, label: e.emp_no ? `${e.emp_no} ${e.name}` : e.name, searchText: `${e.emp_no ?? ""} ${e.name}`, note: employeeStatusNote(e) }))}
                 value={fEmp}
                 onChange={setFEmp}
                 emptyLabel="全部"
@@ -99,8 +107,8 @@ export default function PunchRecordsPage() {
         )}
       </div>
 
-      {tab === "day" && <DayView filter={filter} />}
-      {tab === "week" && <WeekView filter={filter} />}
+      {tab === "day" && <DayView filter={filter} onRangeChange={onRangeChange} />}
+      {tab === "week" && <WeekView filter={filter} onRangeChange={onRangeChange} />}
       {tab === "late" && <LateReportsView />}
       {tab === "records" && (
         <RecordsView

@@ -469,6 +469,15 @@ export default function EmployeesPage() {
     setStatusFilterState(parseStatusFilter(params.get("status")));
     setSearchText(params.get("q") ?? "");
   }, []);
+  // 搜尋字寫回 URL（?q=），方便分享連結。
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const q = searchText.trim();
+    if ((url.searchParams.get("q") ?? "") === q) return;
+    if (q) url.searchParams.set("q", q);
+    else url.searchParams.delete("q");
+    window.history.replaceState(window.history.state, "", url.toString());
+  }, [searchText]);
   function setStatusFilter(next: EmploymentStatusFilter) {
     setStatusFilterState(next);
     // 換篩選就清勾選：避免批次動作套到畫面上看不到的人。
@@ -478,21 +487,24 @@ export default function EmployeesPage() {
     else url.searchParams.set("status", next);
     window.history.replaceState(window.history.state, "", url.toString());
   }
-  const terminatedCount = useMemo(() => countTerminated(rows), [rows]);
+  // N 依目前公司篩選計算。
+  const terminatedCount = useMemo(() => countTerminated(filterByCompany(rows, companyFilter)), [rows, companyFilter]);
   const visibleRows = useMemo(
     () => searchEmployees(filterByEmploymentStatus(filterByCompany(rows, companyFilter), statusFilter), searchText),
     [rows, companyFilter, statusFilter, searchText],
   );
   const visibleIds = useMemo(() => visibleRows.map((row) => row.id), [visibleRows]);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+  // 批次動作只套用「畫面上看得到且已勾選」的人（換搜尋字／公司篩選後被藏起來的勾選不送）。
+  const selectedVisibleIds = useMemo(() => visibleIds.filter((id) => selectedIds.has(id)), [visibleIds, selectedIds]);
 
   /** 多選批次指派所屬公司（「」＝改回未指派）。成功後清掉勾選、靜默重載。 */
   async function applyBatchCompany() {
-    if (batchBusy || selectedIds.size === 0) return;
+    if (batchBusy || selectedVisibleIds.length === 0) return;
     setBatchBusy(true);
     setBatchError(null);
     try {
-      const res = await assignEmployeesCompany([...selectedIds], batchCompanyId || null);
+      const res = await assignEmployeesCompany(selectedVisibleIds, batchCompanyId || null);
       const target = batchCompanyId ? (companies.find((c) => c.id === batchCompanyId)?.name ?? "所選公司") : "未指派";
       setMessage(`已把 ${res.updated} 位員工指派到「${target}」`);
       setSelectedIds(new Set());
@@ -922,9 +934,9 @@ export default function EmployeesPage() {
               />
               顯示已離職員工（{terminatedCount}）
             </label>
-            {canManage && selectedIds.size > 0 && (
+            {canManage && selectedVisibleIds.length > 0 && (
               <div className="flex flex-wrap items-end gap-2 rounded-lg bg-slate-50 px-3 py-2" data-testid="batch-company-bar">
-                <span className="self-center text-sm text-gray-700">已選 {selectedIds.size} 人，指派到</span>
+                <span className="self-center text-sm text-gray-700">已選 {selectedVisibleIds.length} 人，指派到</span>
                 <select
                   aria-label="批次指派的公司"
                   className={inputCls}

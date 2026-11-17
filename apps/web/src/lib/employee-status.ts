@@ -51,9 +51,10 @@ export function terminatedLabel(employee: Omit<EmployeeStatusFields, "id">, toda
   return term ? `已離職（${term}）` : "已離職（停用）";
 }
 
-/** 下拉選項右側小字（EmployeeOption.note）：離職者「已離職」，在職者 undefined。 */
+/** 下拉選項右側小字（EmployeeOption.note）：離職者「已離職」、沒有離職日的停用帳號「已停用」，在職者 undefined。 */
 export function employeeStatusNote(employee: Omit<EmployeeStatusFields, "id">, today: string = todayTaipei()): string | undefined {
-  return isEmployeeActive(employee, today) ? undefined : "已離職";
+  if (isEmployeeActive(employee, today)) return undefined;
+  return day(employee.terminated_at) ? "已離職" : "已停用";
 }
 
 function keepSet(keepIds: Iterable<string | null | undefined>): Set<string> {
@@ -77,7 +78,7 @@ export function pickableEmployees<T extends EmployeeStatusFields>(
 
 /**
  * 「查歷史」下拉的候選：在職者＋在 [from, to] 期間仍在職的離職者（離職日 ≥ from，且到職日 ≤ to 或沒填）。
- * 沒有離職日的停用帳號無法判斷何時離開 → 不列（要查請用 keepIds 或員工管理頁的「已離職」篩選）。
+ * 沒有離職日的停用帳號無法判斷何時離開 → 一律列出（呼叫端用 employeeStatusNote 標「已停用」），避免舊資料選不到。
  * from/to 為 YYYY-MM-DD；from 為空＝不限（離職者全列）。
  */
 export function employedInPeriod<T extends EmployeeStatusFields>(
@@ -94,7 +95,8 @@ export function employedInPeriod<T extends EmployeeStatusFields>(
     if (keep.has(e.id) || isEmployeeActive(e, today)) return true;
     const term = day(e.terminated_at);
     if (!f) return true;
-    if (!term || term < f) return false;
+    if (!term) return true;
+    if (term < f) return false;
     const hire = day(e.hire_date);
     return !t || !hire || hire <= t;
   });

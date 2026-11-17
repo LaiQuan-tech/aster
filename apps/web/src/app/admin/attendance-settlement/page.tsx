@@ -13,7 +13,7 @@ import {
 import { errorMessageOf } from "@/lib/period-closed";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
-import { employedInPeriod, employeeStatusNote, monthRange as monthBounds } from "@/lib/employee-status";
+import { employedInPeriod, employeeStatusNote } from "@/lib/employee-status";
 const monthNow = new Date().toISOString().slice(0, 7);
 
 type DataType = "all" | "worked" | "late" | "overtime" | "night" | "anomaly";
@@ -245,8 +245,8 @@ export default function AttendanceSettlementPage() {
             <div className="lg:col-span-2">
               <label className={labelCls}>工號 / 姓名</label>
               <EmployeeCombobox
-                // 查歷史：在職者＋該薪資月仍在職的離職者（標「已離職」）。
-                options={employedInPeriod(employees, ...monthBounds(payrollMonth), [employeeId]).map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}`, note: employeeStatusNote(employee) }))}
+                // 查歷史：在職者＋查詢區間仍在職的離職者（標「已離職」）。
+                options={employedInPeriod(employees, from, to, [employeeId]).map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}`, note: employeeStatusNote(employee) }))}
                 value={employeeId}
                 onChange={setEmployeeId}
                 emptyLabel="全部人員"

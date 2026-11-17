@@ -46,9 +46,13 @@ function Stat({ label, value, tone, active, onClick }: { label: string; value: n
 /** 「今天」頁自動刷新間隔（頁面可見時）。 */
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
 
-export function DayView({ filter }: { filter: OverviewFilter }) {
+export function DayView({ filter, onRangeChange }: { filter: OverviewFilter; onRangeChange?: (from: string, to: string) => void }) {
   // ""＝今天（由 API 依租戶時區決定）。首次載入不帶日期、回應後也不回填 date → 不會因為 date 改變再打一次。
   const [date, setDate] = useState("");
+  // 回報目前檢視的日期給上層（員工下拉依此列出當天仍在職的離職者）；""＝今天。
+  useEffect(() => {
+    onRangeChange?.(date, date);
+  }, [date, onRangeChange]);
   const [data, setData] = useState<PunchOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
