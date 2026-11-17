@@ -112,9 +112,71 @@ function isCheckFailed(err: unknown): boolean {
   return e.code === LEAVE_BALANCE_CHECK_FAILED_CODE || e.message.includes(LEAVE_BALANCE_CHECK_FAILED_CODE);
 }
 
-/** describeError 用：額度相關錯誤（400/409 不足、503 檢查失敗）→ 人話；否則 null。 */
+/* ─────────────── 生理假（2026-11-17，API services/menstrual-leave.ts）─────────────── */
+
+export const MENSTRUAL_MONTHLY_CAP_CODE = "menstrual_monthly_cap";
+export const MENSTRUAL_EXCEEDS_SICK_BALANCE_CODE = "menstrual_exceeds_sick_balance";
+export const MENSTRUAL_MONTHLY_CAP_MESSAGE = "生理假每月以 1 日為限";
+
+/** 生理假假別：statutoryKind='menstrual'；舊 API 沒回 statutoryKind 時退回名稱／code 判斷（與 API 推斷同規則）。 */
+export function isMenstrualLeaveType(
+  type: { code?: string | null; name?: string | null; statutoryKind?: string | null } | null | undefined,
+): boolean {
+  if (!type) return false;
+  if (type.statutoryKind !== undefined) return type.statutoryKind === "menstrual";
+  return /生理假/.test(type.name ?? "") || /^menstrual/i.test((type.code ?? "").trim());
+}
+
+/**
+ * 生理假錯誤（400 送單／409 核准，或批次核准的一項）→ 人話；不是生理假錯誤 → null。
+ *   menstrual_monthly_cap：「生理假每月以 1 日為限（2026-11 已請 4 小時，本單 8 小時）」
+ *   menstrual_exceeds_sick_balance：「生理假全年超過 3 日的部分併入病假計算：本單併入 4 小時，病假剩餘 0 小時，無法送出」
+ */
+export function menstrualErrorFromBody(body: unknown, verb: "送出" | "核准", hoursPerDay?: number): string | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  const nested = b.menstrual && typeof b.menstrual === "object" ? (b.menstrual as Record<string, unknown>) : {};
+  const pick = (key: string) => (nested[key] !== undefined && nested[key] !== null ? nested[key] : b[key]);
+  const fmt = (h: number) => formatLeaveDuration(Math.max(0, h), hoursPerDay);
+  if (b.error === MENSTRUAL_MONTHLY_CAP_CODE) {
+    const month = pick("month");
+    const used = numOrNull(pick("usedHours"));
+    const requested = numOrNull(pick("requestedHours"));
+    if (typeof month === "string" && used !== null && requested !== null) {
+      return `${MENSTRUAL_MONTHLY_CAP_MESSAGE}（${month} 已請 ${fmt(used)}，本單 ${fmt(requested)}），無法${verb}`;
+    }
+    return `${MENSTRUAL_MONTHLY_CAP_MESSAGE}，無法${verb}`;
+  }
+  if (b.error === MENSTRUAL_EXCEEDS_SICK_BALANCE_CODE) {
+    const merged = numOrNull(pick("mergedHours"));
+    const available = numOrNull(pick("availableHours"));
+    const head = "生理假全年超過 3 日的部分併入病假計算";
+    if (merged !== null && available !== null) return `${head}：本單併入 ${fmt(merged)}，病假剩餘 ${fmt(available)}，無法${verb}`;
+    return `${head}，病假剩餘不足，無法${verb}`;
+  }
+  return null;
+}
+
+function menstrualErrorOf(err: unknown, verb: "送出" | "核准", hoursPerDay?: number): string | null {
+  if (!(err instanceof Error)) return null;
+  const e = err as Error & { code?: string; body?: unknown };
+  const code =
+    e.code ??
+    (e.message.includes(MENSTRUAL_MONTHLY_CAP_CODE)
+      ? MENSTRUAL_MONTHLY_CAP_CODE
+      : e.message.includes(MENSTRUAL_EXCEEDS_SICK_BALANCE_CODE)
+        ? MENSTRUAL_EXCEEDS_SICK_BALANCE_CODE
+        : undefined);
+  if (code !== MENSTRUAL_MONTHLY_CAP_CODE && code !== MENSTRUAL_EXCEEDS_SICK_BALANCE_CODE) return null;
+  const body = e.body && typeof e.body === "object" ? e.body : { error: code };
+  return menstrualErrorFromBody({ ...(body as Record<string, unknown>), error: code }, verb, hoursPerDay);
+}
+
+/** describeError 用：額度相關錯誤（400/409 不足、503 檢查失敗、生理假上限）→ 人話；否則 null。 */
 export function leaveBalanceErrorText(err: unknown, verb: "送出" | "核准", hoursPerDay?: number): string | null {
   if (isCheckFailed(err)) return leaveBalanceCheckFailedMessage(verb);
+  const menstrual = menstrualErrorOf(err, verb, hoursPerDay);
+  if (menstrual) return menstrual;
   if (err instanceof Error) {
     const e = err as Error & { code?: string };
     if (e.code === LEAVE_BALANCE_REVERT_FAILED_CODE || e.message.includes(LEAVE_BALANCE_REVERT_FAILED_CODE)) return LEAVE_BALANCE_REVERT_FAILED_MESSAGE;
@@ -129,6 +191,8 @@ export function leaveBalanceBatchItemText(item: unknown, verb: "送出" | "核�
   const error = (item as { error?: unknown }).error;
   if (error === LEAVE_BALANCE_CHECK_FAILED_CODE) return `${leaveBalanceCheckFailedMessage(verb)}。`;
   if (error === LEAVE_BALANCE_REVERT_FAILED_CODE) return `${LEAVE_BALANCE_REVERT_FAILED_MESSAGE}。`;
+  const menstrual = menstrualErrorFromBody(item, verb, hoursPerDay);
+  if (menstrual) return `${menstrual}。`;
   const info = leaveBalanceFromBody(item);
   return info ? `${leaveBalanceMessage(info, verb, hoursPerDay)}。` : null;
 }

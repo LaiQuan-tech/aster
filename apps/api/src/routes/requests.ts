@@ -14,6 +14,15 @@ import {
   debitLeaveBalanceChecked,
   type LeaveBalanceInsufficient,
 } from "../services/leave-balance-cap.js"
+import {
+  MENSTRUAL_EXCEEDS_SICK_BALANCE,
+  MENSTRUAL_MONTHLY_CAP,
+  applyMenstrualOnFinalApproval,
+  checkMenstrualForApproval,
+  checkMenstrualForCreate,
+  reverseMenstrualSickMerge,
+  type MenstrualViolation,
+} from "../services/menstrual-leave.js"
 import { checkOtRequestCaps, splitMinutesByLocalDay, validateOtRequestTimes, type OtCapExceeded } from "../services/overtime-approval.js"
 import { findSheet, recomputeSheet } from "../services/attendance-sheets.js"
 import { resolveApproverChain, type StepKind } from "../services/approval-chain.js"
@@ -886,6 +895,20 @@ requestsRouter.post(
           res.status(400).json(insufficient)
           return
         }
+        // 生理假（2026-11-17，services/menstrual-leave.ts）：當月（已核准＋簽核中＋本單）> 1 日 → 400 menstrual_monthly_cap；
+        // 全年超過 3 日併入病假的部分 > 病假剩餘（病假有額度時）→ 400 menstrual_exceeds_sick_balance。不是生理假 → 不檢查。
+        let menstrual: MenstrualViolation | null = null
+        try {
+          menstrual = await checkMenstrualForCreate({ tenantId, employeeId: self.id, leaveTypeId, startAt, endAt, hours, segments: segments ?? null })
+        } catch (capErr) {
+          logger.warn({ err: capErr, tenantId, employeeId: self.id }, "POST /requests: menstrual leave check failed")
+          res.status(503).json({ error: LEAVE_BALANCE_CHECK_FAILED })
+          return
+        }
+        if (menstrual) {
+          res.status(400).json(menstrual)
+          return
+        }
       }
 
       // 公務車預約：鏈解析成功之後、建申請單之前先佔時段（vehicle_bookings，exclusion constraint）。
@@ -1420,6 +1443,9 @@ const DECISION_ERROR_STATUS: Record<string, number> = {
   leave_balance_check_failed: 503,
   // 額度不足要退回 pending 卻失敗：單子仍是 approved（未扣額度），需人工處理（回應帶中文 message）。
   leave_balance_revert_failed: 500,
+  // 生理假（2026-11-17）：每月 1 日上限、超過全年 3 日併入病假而病假剩餘不足（回應帶 message 與數字）。
+  [MENSTRUAL_MONTHLY_CAP]: 409,
+  [MENSTRUAL_EXCEEDS_SICK_BALANCE]: 409,
 }
 
 /** 決策錯誤的中文說明（回應的 message；前端也有同一句對照）。 */
@@ -1469,6 +1495,8 @@ async function decide(
           .json(
             outcome.cap
               ? outcome.cap
+              : outcome.menstrual
+                ? outcome.menstrual
               : outcome.balance
                 ? outcome.balance
                 : outcome.period
@@ -1512,7 +1540,7 @@ type DecisionOutcome =
       /** 公出／出差單駁回時自動撤回綁定報銷的結果（2026-10-17）；其他情況缺席。 */
       expenseClaims?: { withdrawn: number; kept: number; failed: boolean }
     }
-  | { ok: false; id: string; error: string; period?: string; cap?: OtCapExceeded; balance?: LeaveBalanceInsufficient }
+  | { ok: false; id: string; error: string; period?: string; cap?: OtCapExceeded; balance?: LeaveBalanceInsufficient; menstrual?: MenstrualViolation }
 
 /** markStep／transitionRequest 搶輸（列已不在預期的前一狀態）時回的哨兵值，對應 HTTP 409 not_pending。 */
 const NOT_PENDING = "not_pending"
@@ -1792,6 +1820,8 @@ async function decideOneRequest(params: {
   if (action === "approve" && lr.kind === "leave" && lr.leave_type_id) {
     const balOutcome = await leaveBalanceOutcome(tenantId, lr, requestId)
     if (balOutcome) return balOutcome
+    const menstrualOutcome = await menstrualLeaveOutcome(tenantId, lr, requestId)
+    if (menstrualOutcome) return menstrualOutcome
   }
   // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人（HR 代簽不改寫，見 markStep）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.id
@@ -2016,22 +2046,44 @@ async function decideOneRequest(params: {
   let leaveAlreadyDebited = false
   if (lr.kind === "leave" && lr.leave_type_id) {
     let failure: Extract<DecisionOutcome, { ok: false }> | null = null
+    // 生理假（2026-11-17）：月上限重查（已核准＋簽核中＋本單）＋超過全年 3 日的部分記到病假桶（病假有額度時樂觀鎖檢查＋扣）。
+    // 不足 → 本張退回 pending（同下面額度不足的處理）；之後的額度扣款失敗也要把這裡併入的沖回（reverseMenstrualSickMerge，冪等）。
+    let menstrualMerged = false
     try {
-      const debit = await debitLeaveBalanceChecked({
+      const m = await applyMenstrualOnFinalApproval({
         tenantId,
         employeeId: lr.employee_id,
         leaveTypeId: lr.leave_type_id,
         startAt: lr.start_at,
         endAt: lr.end_at,
         hours: lr.hours,
+        segments: lr.segments,
         requestId,
       })
-      // 補休帳扣的是另一本帳：leave_balances 的記帳桶照舊由 applyApprovalEffects 累加（既有行為、畫面不變）。
-      if (debit.status === "debited" && debit.ledger === "balance") leaveAlreadyDebited = true
-      else if (debit.status === "insufficient") failure = { ok: false, id: requestId, error: debit.info.error, balance: debit.info }
+      if (m.status === "blocked") failure = { ok: false, id: requestId, error: m.violation.error, menstrual: m.violation }
+      else if (m.status === "ok" && m.mergedHours > 0) menstrualMerged = true
     } catch (err) {
-      logger.warn({ err, tenantId, requestId }, "decideOneRequest: leave balance checked debit failed")
+      logger.warn({ err, tenantId, requestId }, "decideOneRequest: menstrual leave final check failed")
       failure = { ok: false, id: requestId, error: LEAVE_BALANCE_CHECK_FAILED }
+    }
+    if (!failure) {
+      try {
+        const debit = await debitLeaveBalanceChecked({
+          tenantId,
+          employeeId: lr.employee_id,
+          leaveTypeId: lr.leave_type_id,
+          startAt: lr.start_at,
+          endAt: lr.end_at,
+          hours: lr.hours,
+          requestId,
+        })
+        // 補休帳扣的是另一本帳：leave_balances 的記帳桶照舊由 applyApprovalEffects 累加（既有行為、畫面不變）。
+        if (debit.status === "debited" && debit.ledger === "balance") leaveAlreadyDebited = true
+        else if (debit.status === "insufficient") failure = { ok: false, id: requestId, error: debit.info.error, balance: debit.info }
+      } catch (err) {
+        logger.warn({ err, tenantId, requestId }, "decideOneRequest: leave balance checked debit failed")
+        failure = { ok: false, id: requestId, error: LEAVE_BALANCE_CHECK_FAILED }
+      }
     }
     if (failure) {
       const { error: revertErr } = await supabaseAdmin
@@ -2056,6 +2108,14 @@ async function decideOneRequest(params: {
         return { ok: false, id: requestId, error: "leave_balance_revert_failed" }
       }
       await revertStep(step, "approved", actor.id)
+      // 已退回待簽核：生理假這次併入病假的時數沖回（冪等；退回失敗、單子仍是 approved 時不沖，保持一致）。
+      if (menstrualMerged) {
+        try {
+          await reverseMenstrualSickMerge(tenantId, requestId)
+        } catch (err) {
+          logger.error({ err, tenantId, requestId }, "decideOneRequest: menstrual sick merge reverse failed — 病假桶需人工沖回")
+        }
+      }
       await writeAuditLog({
         tenantId,
         tableName: "leave_requests",
@@ -2191,6 +2251,34 @@ async function leaveBalanceOutcome(
     return info ? { ok: false, id: requestId, error: info.error, balance: info } : null
   } catch (err) {
     logger.warn({ err, tenantId, requestId }, "decideOneRequest: leave balance check failed")
+    return { ok: false, id: requestId, error: LEAVE_BALANCE_CHECK_FAILED }
+  }
+}
+
+/**
+ * 生理假檢查（核准前，每一關；services/menstrual-leave.ts）→ DecisionOutcome（null＝通過或不是生理假）。
+ * 月上限／病假剩餘不足 → 409（帶 menstrual）；檢查失敗 → leave_balance_check_failed（503）。
+ */
+async function menstrualLeaveOutcome(
+  tenantId: string,
+  lr: { employee_id: string; leave_type_id: string | null; start_at: string; end_at: string; hours: unknown; segments?: unknown },
+  requestId: string,
+): Promise<Extract<DecisionOutcome, { ok: false }> | null> {
+  if (!lr.leave_type_id) return null
+  try {
+    const v = await checkMenstrualForApproval({
+      tenantId,
+      employeeId: lr.employee_id,
+      leaveTypeId: lr.leave_type_id,
+      startAt: lr.start_at,
+      endAt: lr.end_at,
+      hours: lr.hours,
+      segments: lr.segments,
+      requestId,
+    })
+    return v ? { ok: false, id: requestId, error: v.error, menstrual: v } : null
+  } catch (err) {
+    logger.warn({ err, tenantId, requestId }, "decideOneRequest: menstrual leave check failed")
     return { ok: false, id: requestId, error: LEAVE_BALANCE_CHECK_FAILED }
   }
 }

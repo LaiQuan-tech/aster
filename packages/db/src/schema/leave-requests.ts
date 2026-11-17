@@ -95,6 +95,11 @@ export const leaveRequests = pgTable("leave_requests", {
   // 月加班上限標記（見上方說明）；只對 kind='ot' 有意義。
   beyondCap: boolean("beyond_cap").notNull().default(false),
   beyondCapDetail: jsonb("beyond_cap_detail"),
+  /**
+   * 生理假（migration 0102）：最終核准時「超過全年 3 日、併入病假」記到病假餘額桶的時數
+   * `[{ bucketId, hours }]`；撤銷／退回時照這份沖回後清成 null。null＝沒有併入。
+   */
+  menstrualSickMerge: jsonb("menstrual_sick_merge"),
 }, (table) => ({
   tenantSettledPeriodIdx: index("leave_requests_tenant_settled_period_idx").on(
     table.tenantId,

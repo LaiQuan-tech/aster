@@ -5,12 +5,16 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { catalogCode } from "../services/catalog-code.js"
+import { inferStatutoryKind, leaveTypesHaveStatutoryKind } from "../services/menstrual-leave.js"
 
 export const leaveTypesRouter = Router()
 
 // deductRate 0–1（DB numeric(3,2)）：null = 依 paid 推算（見 packages/db 的
 // leave_types schema 註解），故顯式允許 null（清空覆寫、退回用 paid 推算）。
 const deductRateSchema = z.number().min(0).max(1).nullable()
+
+// 法定假別語意（migration 0102）：null＝一般；sick＝普通傷病假；menstrual＝生理假（services/menstrual-leave.ts）。
+const statutoryKindSchema = z.enum(["sick", "menstrual"]).nullable()
 
 const createSchema = z.object({
   /** Kept optional for older API clients; new admin UI lets the server create it. */
@@ -22,6 +26,7 @@ const createSchema = z.object({
   // B7：該假別是否要求附件（例如病假須附診所收據）；requests.ts 核准時已在檢查
   // leave_types.requires_attachment，這裡補上讓 HR 能經 API 設定它。
   requiresAttachment: z.boolean().optional(),
+  statutoryKind: statutoryKindSchema.optional(),
 })
 
 // PATCH allows any subset; at least one field must be present.
@@ -33,6 +38,7 @@ const updateSchema = z
     special: z.boolean().optional(),
     deductRate: deductRateSchema.optional(),
     requiresAttachment: z.boolean().optional(),
+    statutoryKind: statutoryKindSchema.optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -45,6 +51,8 @@ const listQuerySchema = z.object({
 })
 
 const SELECT_COLS = "id, tenant_id, code, name, paid, special, deduct_rate, requires_attachment, created_at"
+/** statutory_kind 是 migration 0102 才加的；未套的庫退回 SELECT_COLS，statutoryKind 改用名稱推斷。 */
+const SELECT_COLS_WITH_KIND = `${SELECT_COLS}, statutory_kind`
 
 /**
  * Leave-type routes are HR-admin-only and tenant-scoped. The tenant boundary is
@@ -68,9 +76,10 @@ leaveTypesRouter.get(
       return
     }
     try {
+      const hasKind = await leaveTypesHaveStatutoryKind()
       let query = supabaseAdmin
         .from("leave_types")
-        .select(SELECT_COLS)
+        .select(hasKind ? SELECT_COLS_WITH_KIND : SELECT_COLS)
         .eq("tenant_id", tenantId)
       if (parsed.data.special !== undefined) query = query.eq("special", parsed.data.special)
 
@@ -81,9 +90,15 @@ leaveTypesRouter.get(
         return
       }
       // requires_attachment (DB) → requiresAttachment (API)，其餘欄位維持原樣。
+      // statutory_kind (DB) → statutoryKind (API)；欄位未套時用名稱／code 推斷（與 migration 回填同規則）。
       const leaveTypes = (data ?? []).map((row) => {
-        const { requires_attachment, ...rest } = row as Record<string, unknown>
-        return { ...rest, requiresAttachment: requires_attachment === true }
+        const { requires_attachment, statutory_kind, ...rest } = row as unknown as Record<string, unknown>
+        const statutoryKind = hasKind
+          ? statutory_kind === "sick" || statutory_kind === "menstrual"
+            ? statutory_kind
+            : null
+          : inferStatutoryKind(rest as { code?: string; name?: string })
+        return { ...rest, requiresAttachment: requires_attachment === true, statutoryKind }
       })
       res.status(200).json({ leaveTypes })
     } catch (err) {
@@ -106,17 +121,20 @@ leaveTypesRouter.post(
       return
     }
     try {
+      const row: Record<string, unknown> = {
+        tenant_id: tenantId,
+        code: parsed.data.code ?? catalogCode(parsed.data.name),
+        name: parsed.data.name,
+        paid: parsed.data.paid ?? true,
+        special: parsed.data.special ?? false,
+        deduct_rate: parsed.data.deductRate ?? null,
+        requires_attachment: parsed.data.requiresAttachment ?? false,
+      }
+      // 欄位未套（migration 0102）時不寫，避免整筆新增失敗。
+      if (parsed.data.statutoryKind !== undefined && (await leaveTypesHaveStatutoryKind())) row.statutory_kind = parsed.data.statutoryKind
       const { data, error } = await supabaseAdmin
         .from("leave_types")
-        .insert({
-          tenant_id: tenantId,
-          code: parsed.data.code ?? catalogCode(parsed.data.name),
-          name: parsed.data.name,
-          paid: parsed.data.paid ?? true,
-          special: parsed.data.special ?? false,
-          deduct_rate: parsed.data.deductRate ?? null,
-          requires_attachment: parsed.data.requiresAttachment ?? false,
-        })
+        .insert(row)
         .select("id")
         .single()
 
@@ -158,6 +176,18 @@ leaveTypesRouter.patch(
     if (parsed.data.special !== undefined) patch.special = parsed.data.special
     if (parsed.data.deductRate !== undefined) patch.deduct_rate = parsed.data.deductRate
     if (parsed.data.requiresAttachment !== undefined) patch.requires_attachment = parsed.data.requiresAttachment
+
+    try {
+      if (parsed.data.statutoryKind !== undefined && (await leaveTypesHaveStatutoryKind())) patch.statutory_kind = parsed.data.statutoryKind
+    } catch (err) {
+      next(err)
+      return
+    }
+    if (Object.keys(patch).length === 0) {
+      // 只帶 statutoryKind 而欄位尚未套用：沒有東西可寫。
+      res.status(409).json({ error: "statutory_kind_unavailable" })
+      return
+    }
 
     try {
       const { data, error } = await supabaseAdmin

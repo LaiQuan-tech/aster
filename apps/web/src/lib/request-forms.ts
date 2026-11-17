@@ -210,6 +210,9 @@ export const REQUEST_ERROR_MESSAGES: Record<string, string> = {
   // 發薪鎖定（2026-10-11）：申請單碰到已結算月（送出、撤回都會）。拿得到月份時走 describePeriodClosed 的
   // 「YYYY-MM 已結算，請洽管理者」；這條是只有錯誤碼、沒有月份時的通用說法。
   period_closed: periodClosedMessage(),
+  // 生理假（2026-11-17）：通常由 leaveBalanceErrorText 帶數字說明；這兩條是只有錯誤碼時的通用說法。
+  menstrual_monthly_cap: "生理假每月以 1 日為限",
+  menstrual_exceeds_sick_balance: "生理假全年超過 3 日的部分併入病假計算，病假剩餘不足",
 };
 
 /** 從 apiFetch 的錯誤訊息（`[status] code`）取出錯誤碼；不是 Error → null。 */

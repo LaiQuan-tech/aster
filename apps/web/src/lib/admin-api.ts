@@ -840,6 +840,8 @@ export interface LeaveType {
   deduct_rate: string | null;
   /** 核准前是否須附憑證（例如病假須附診所收據）。 */
   requiresAttachment: boolean;
+  /** 法定假別語意（2026-11-17）：menstrual＝生理假（每月 1 日、全年超過 3 日併入病假）、sick＝普通傷病假、null＝一般；舊 API 缺席。 */
+  statutoryKind?: "sick" | "menstrual" | null;
   created_at: string;
 }
 
@@ -853,6 +855,7 @@ export function createLeaveType(body: {
   special?: boolean;
   deductRate?: number | null;
   requiresAttachment?: boolean;
+  statutoryKind?: "sick" | "menstrual" | null;
 }) {
   return apiFetch<{ id: string }>("/leave-types", {
     method: "POST",
@@ -862,7 +865,15 @@ export function createLeaveType(body: {
 
 export function updateLeaveType(
   id: string,
-  body: { code?: string; name?: string; paid?: boolean; special?: boolean; deductRate?: number | null; requiresAttachment?: boolean },
+  body: {
+    code?: string;
+    name?: string;
+    paid?: boolean;
+    special?: boolean;
+    deductRate?: number | null;
+    requiresAttachment?: boolean;
+    statutoryKind?: "sick" | "menstrual" | null;
+  },
 ) {
   return apiFetch<{ id: string }>(`/leave-types/${id}`, {
     method: "PATCH",

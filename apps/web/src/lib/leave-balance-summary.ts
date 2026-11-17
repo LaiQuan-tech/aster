@@ -15,6 +15,14 @@ export interface LeaveBalanceSummary {
   pendingHours: number;
   usedHours: number;
   hoursPerDay: number;
+  /** 病假：生理假超過全年 3 日併入的時數（已含在已請／剩餘裡）；沒有＝缺席。 */
+  menstrualMergedHours?: number;
+}
+
+/** 「（含生理假併入 4 小時）」；沒有併入 → 空字串。 */
+export function menstrualMergedNote(hours: number | null | undefined): string {
+  const h = round2(num(hours));
+  return h > 0 ? `（含生理假併入 ${h} 小時）` : "";
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -45,7 +53,7 @@ export function leaveBalanceSummaryView(
   const name = (leaveTypeName ?? "").trim();
   if (!lb.capped || lb.remainingHours == null) {
     const used = round2(num(lb.usedHours));
-    return { text: `今年已請${name ? name : ""} ${used} 小時（約 ${formatLeaveDuration(used, hpd)}）`, warning: null };
+    return { text: `今年已請${name ? name : ""} ${used} 小時（約 ${formatLeaveDuration(used, hpd)}）${menstrualMergedNote(lb.menstrualMergedHours)}`, warning: null };
   }
   const remaining = round2(num(lb.remainingHours));
   const pending = round2(num(lb.pendingHours));
@@ -54,7 +62,8 @@ export function leaveBalanceSummaryView(
     remaining < 0
       ? `${label} ${formatLeaveRemaining(remaining, hpd)}`
       : `${label} ${remaining} 小時（約 ${formatLeaveRemaining(remaining, hpd)}）`;
-  const text = pending > 0 ? `${head} · 簽核中 ${pending} 小時` : head;
+  const merged = menstrualMergedNote(lb.menstrualMergedHours);
+  const text = pending > 0 ? `${head}${merged} · 簽核中 ${pending} 小時` : `${head}${merged}`;
   const self = round2(num(requestHours));
   const after = round2(remaining - self);
   let warning: string | null = null;
@@ -77,6 +86,8 @@ export interface LeaveTypeBalanceEntry {
   remainingHours: number | null;
   pendingHours: number;
   usedHours: number;
+  /** 病假：生理假超過全年 3 日併入的時數。 */
+  menstrualMergedHours?: number;
 }
 
 export interface LeaveTypeBalanceItem {
@@ -100,8 +111,9 @@ export function leaveTypeBalanceItems(
     const used = round2(num(e.usedHours));
     const pending = round2(num(e.pendingHours));
     const pendingText = pending > 0 ? `・簽核中 ${pending} 小時` : "";
+    const merged = menstrualMergedNote(e.menstrualMergedHours);
     if (!e.capped || e.remainingHours == null) {
-      return { leaveTypeId: e.leaveTypeId, name: e.name, current: e.current, text: `已請 ${used} 小時（無額度）${pendingText}`, overused: false };
+      return { leaveTypeId: e.leaveTypeId, name: e.name, current: e.current, text: `已請 ${used} 小時（無額度）${merged}${pendingText}`, overused: false };
     }
     const remaining = round2(num(e.remainingHours));
     const remainText =
@@ -110,7 +122,7 @@ export function leaveTypeBalanceItems(
       leaveTypeId: e.leaveTypeId,
       name: e.name,
       current: e.current,
-      text: `已請 ${used} 小時／${remainText}${pendingText}`,
+      text: `已請 ${used} 小時／${remainText}${merged}${pendingText}`,
       overused: remaining < 0,
     };
   });

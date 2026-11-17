@@ -30,6 +30,12 @@ export const leaveTypes = pgTable(
     /** 假別必附憑證：申請此假別時 ESS 端要求至少一筆附件（如病假的診斷證明）。 */
     requiresAttachment: boolean("requires_attachment").notNull().default(false),
     deductRate: numeric("deduct_rate", { precision: 3, scale: 2 }),
+    /**
+     * 法定假別語意（migration 0102）：null 一般；'sick' 普通傷病假（未住院一年 30 日）；
+     * 'menstrual' 生理假（每月 1 日；全年 3 日內不併入病假，超過的部分併入 'sick' 假別計算）。
+     * DB 有 CHECK (statutory_kind in ('sick','menstrual'))。
+     */
+    statutoryKind: text("statutory_kind"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

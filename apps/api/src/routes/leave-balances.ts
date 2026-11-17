@@ -26,6 +26,9 @@ import {
   sortLeaveTypes,
   type LeaveOverview,
 } from "../services/leave-overview.js"
+import { loadMenstrualUsage, menstrualMergedByBucket } from "../services/menstrual-leave.js"
+import { logger } from "../lib/logger.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { LeaveAdjustmentError, MAX_DELTA_HOURS, adjustLeaveBalance, listAdjustments } from "../services/leave-adjustments.js"
 
 export const leaveBalancesRouter = Router()
@@ -142,12 +145,16 @@ leaveBalancesRouter.get(
         .select(hasPeriod ? PERIOD_COLS : BASE_COLS)
         .eq("tenant_id", tenantId)
 
+      // 只看一個人時（本人或 HR 指定 employeeId）才附生理假併入病假的時數，全租戶清單不查。
+      let pinnedEmployeeId: string | null = null
       if (isHr && scope !== "mine") {
         if (employeeId) query = query.eq("employee_id", employeeId)
+        pinnedEmployeeId = employeeId ?? null
       } else {
         // Non-HR (or scope=mine): always pinned to self. No employee row →
         // impossible filter → empty result (never another user's data).
         query = query.eq("employee_id", self?.id ?? NIL_UUID)
+        pinnedEmployeeId = self?.id ?? null
       }
 
       if (year !== undefined) {
@@ -167,7 +174,60 @@ leaveBalancesRouter.get(
       }
       // dailyRegularHours：只給前端把小時顯示成「天＋時」用（1 天 ＝ 幾小時，規則參數，預設 8）；
       // balances 的數字仍是小時，這個欄位讀不到時退回 8、不影響回應。
-      res.status(200).json({ balances: data ?? [], dailyRegularHours: await loadDailyRegularHours(tenantId) })
+      // menstrualMergedByBucket：生理假超過全年 3 日、併入病假的時數（依病假桶 id；已含在該桶 used 裡），
+      // 給畫面在病假列加註「含生理假併入 X 小時」。讀不到只記 warn、回空物件，不影響主回應。
+      let menstrualMerged: Record<string, number> = {}
+      if (pinnedEmployeeId) {
+        try {
+          menstrualMerged = Object.fromEntries(await menstrualMergedByBucket(tenantId, [pinnedEmployeeId]))
+        } catch (mErr) {
+          logger.warn({ err: mErr, tenantId }, "GET /leave-balances: menstrual merged read failed")
+        }
+      }
+      res.status(200).json({
+        balances: data ?? [],
+        dailyRegularHours: await loadDailyRegularHours(tenantId),
+        menstrualMergedByBucket: menstrualMerged,
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+const menstrualUsageQuerySchema = z.object({
+  /** 參考日（租戶時區，YYYY-MM-DD）；省略＝今天。 */
+  date: z.string().regex(DATE_KEY).optional(),
+})
+
+/**
+ * GET /leave-balances/menstrual-usage?date= — 本人生理假用量（ESS 請假表單選生理假時顯示
+ * 「本月已用 X／1 日、今年已用 Y／3 日」）。一律只回自己（已核准＋簽核中）。
+ */
+leaveBalancesRouter.get(
+  "/leave-balances/menstrual-usage",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    const parsed = menstrualUsageQuerySchema.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const self = await resolveSelf(tenantId, userId)
+      if (!self) {
+        res.status(403).json({ error: "not_an_employee" })
+        return
+      }
+      const date = parsed.data.date ?? todayKey(await getTenantTimezone(tenantId))
+      res.status(200).json(await loadMenstrualUsage(tenantId, self.id, date))
     } catch (err) {
       next(err)
     }

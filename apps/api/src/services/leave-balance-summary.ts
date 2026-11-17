@@ -26,6 +26,7 @@ import { loadDailyRegularHours } from "./daily-regular-hours.js"
 import { resolveHours, type BalanceBucket } from "./ledger.js"
 import { bucketHasQuota, bucketRemaining, isCompLeaveType } from "./leave-balance-cap.js"
 import { sortLeaveTypes } from "./leave-overview.js"
+import { menstrualMergedByBucket } from "./menstrual-leave.js"
 
 export interface LeaveBalanceSummary {
   /** 有額度上限（balance 桶有額度，或補休帳）。 */
@@ -39,6 +40,8 @@ export interface LeaveBalanceSummary {
   usedHours: number
   /** 1 天＝幾小時（payroll.dailyRegularHours，與 GET /leave-balances 的 dailyRegularHours 同源）。 */
   hoursPerDay: number
+  /** 病假桶：生理假超過全年 3 日併入的時數（已含在 usedHours／剩餘裡）；沒有＝缺席。 */
+  menstrualMergedHours?: number
 }
 
 /**
@@ -199,6 +202,18 @@ export async function loadLeaveBalanceDetails(
     }
   }
 
+  // 生理假併入病假（依桶 id）：讀不到不影響摘要（顯示用加註）。
+  let mergedByBucket = new Map<string, number>()
+  try {
+    mergedByBucket = await menstrualMergedByBucket(tenantId, employeeIds)
+  } catch (err) {
+    logger.warn({ err, tenantId }, "leave balance summary: menstrual merged read failed")
+  }
+  const withMerged = (s: LeaveBalanceSummary, bucket: BalanceBucket | null): LeaveBalanceSummary => {
+    const merged = bucket ? mergedByBucket.get(bucket.id) ?? 0 : 0
+    return merged > 0 ? { ...s, menstrualMergedHours: round2(merged) } : s
+  }
+
   /** 某員某假別在 dateKey 的摘要（規則見檔頭）；excludeId＝不算進簽核中的那張（本單）。 */
   const summarizeOne = (employeeId: string, leaveTypeId: string, dateKey: string, excludeId: string | null): LeaveBalanceSummary => {
     const bucket = pickBucket(bucketsByKey.get(key(employeeId, leaveTypeId)) ?? [], dateKey, havePeriod)
@@ -217,9 +232,9 @@ export async function loadLeaveBalanceDetails(
       return { capped: true, source, remainingHours: round2(c.available), pendingHours: round2(pending), usedHours: round2(c.used), hoursPerDay }
     }
     if (source === "balance" && bucket) {
-      return { capped: true, source, remainingHours: bucketRemaining(bucket), pendingHours: round2(pending), usedHours: round2(bucket.used), hoursPerDay }
+      return withMerged({ capped: true, source, remainingHours: bucketRemaining(bucket), pendingHours: round2(pending), usedHours: round2(bucket.used), hoursPerDay }, bucket)
     }
-    return { capped: false, source: null, remainingHours: null, pendingHours: round2(pending), usedHours: round2(bucket?.used ?? 0), hoursPerDay }
+    return withMerged({ capped: false, source: null, remainingHours: null, pendingHours: round2(pending), usedHours: round2(bucket?.used ?? 0), hoursPerDay }, bucket)
   }
 
   const sortedTypes = sortLeaveTypes(typeRows.map((t) => ({ id: t.id, code: t.code ?? "", name: t.name ?? "" })))

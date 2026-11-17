@@ -85,7 +85,7 @@ export interface LeaveOverview {
 }
 
 /** 常用假別放前面（依名稱或 code 比對；其餘照名稱排）。 */
-const PRIORITY: RegExp[] = [/特休|annual/i, /補休|comp/i, /病假|sick/i, /事假|personal/i, /家庭照顧|family/i]
+const PRIORITY: RegExp[] = [/特休|annual/i, /補休|comp/i, /病假|sick/i, /生理假|menstrual/i, /事假|personal/i, /家庭照顧|family/i]
 
 export function leaveTypeRank(type: { code: string; name: string }): number {
   const idx = PRIORITY.findIndex((re) => re.test(type.name) || re.test(type.code))

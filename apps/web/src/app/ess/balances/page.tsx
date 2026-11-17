@@ -5,6 +5,7 @@ import { Card, InlineError } from "@/components/ess-ui";
 import { getLeaveBalances, getLeaveTypes, type LeaveBalance, type LeaveType } from "@/lib/ess-api";
 import { balancePeriodLabel } from "@/lib/leave-balances-api";
 import { formatLeaveDuration, formatLeaveRemaining } from "@/lib/leave-duration";
+import { menstrualMergedNote } from "@/lib/leave-balance-summary";
 
 /**
  * 我的假別額度：`leave_balances` 一列一個「期間桶」。特休週年制（W1，2026-09-23）後
@@ -19,6 +20,8 @@ export default function BalancesPage() {
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
   const [hoursPerDay, setHoursPerDay] = useState<number | undefined>(undefined);
   const [types, setTypes] = useState<LeaveType[]>([]);
+  // 生理假超過全年 3 日併入病假的時數（病假桶 id → 小時；已含在該桶「已用」裡）。
+  const [merged, setMerged] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -26,6 +29,7 @@ export default function BalancesPage() {
       .then(([b, t]) => {
         setBalances(b.balances);
         setHoursPerDay(b.dailyRegularHours);
+        setMerged(b.menstrualMergedByBucket ?? {});
         setTypes(t.leaveTypes);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "載入失敗"));
@@ -69,6 +73,9 @@ export default function BalancesPage() {
                   <div><dt className="text-xs text-gray-400">可用</dt><dd className="font-medium text-gray-800">{fmt(entitled)}</dd></div>
                   <div><dt className="text-xs text-gray-400">已用</dt><dd className="font-medium text-gray-800">{fmt(used)}</dd></div>
                 </dl>
+                {menstrualMergedNote(merged[b.id]) && (
+                  <p className="mt-2 text-xs text-gray-500">{menstrualMergedNote(merged[b.id])}</p>
+                )}
               </article>
             );
           })}
@@ -93,7 +100,12 @@ export default function BalancesPage() {
                   <td className="py-2 pr-4 font-medium text-gray-800">{typeName(b.leave_type_id)}</td>
                   <td className="py-2 pr-4 whitespace-nowrap text-xs text-gray-500">{balancePeriodLabel(b)}</td>
                   <td className="py-2 pr-4">{fmt(entitled)}</td>
-                  <td className="py-2 pr-4">{fmt(used)}</td>
+                  <td className="py-2 pr-4">
+                    {fmt(used)}
+                    {menstrualMergedNote(merged[b.id]) && (
+                      <span className="block text-xs text-gray-500">{menstrualMergedNote(merged[b.id])}</span>
+                    )}
+                  </td>
                   <td className={`py-2 font-medium ${isOverused(entitled - used) ? "text-red-600" : ""}`}>
                     {fmtRemaining(entitled - used)}
                   </td>

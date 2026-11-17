@@ -715,6 +715,13 @@
       "when": 1795100000000,
       "tag": "0101_subcontract_withholding_default_zero",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1795200000000,
+      "tag": "0102_leave_type_statutory_kind",
+      "breakpoints": true
     }
   ]
 }

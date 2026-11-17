@@ -20,7 +20,7 @@
  */
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
 import { Button, Field, Input, Segmented, Select } from "@/components/ess-ui";
-import type { LeaveBalance, LeaveType } from "@/lib/ess-api";
+import { getMenstrualUsage, type LeaveBalance, type LeaveType, type MenstrualUsage } from "@/lib/ess-api";
 import { addDays, fmtDateWithWeekday, todayKey } from "@/lib/ess-format";
 import { describeLeaveDayRow, nextLeaveDate, resolveLeaveDayList, type LeaveDayRow } from "@/lib/leave-day-list";
 import {
@@ -33,7 +33,7 @@ import {
 } from "@/lib/leave-hours";
 import { formatLeaveDuration } from "@/lib/leave-duration";
 import { buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
-import { isCompLeaveType, quotaRemainingHours } from "@/lib/leave-balance-cap";
+import { MENSTRUAL_MONTHLY_CAP_MESSAGE, isCompLeaveType, isMenstrualLeaveType, quotaRemainingHours } from "@/lib/leave-balance-cap";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
 
@@ -142,6 +142,39 @@ export function LeaveForm({
     remaining != null
       ? `此假別剩餘 ${formatLeaveDuration(Math.max(0, remaining), hoursPerDay)}，申請 ${formatLeaveDuration(totalHours, hoursPerDay)}，超過額度無法送出`
       : "";
+
+  // 生理假（2026-11-17）：顯示本月／今年已用（已核准＋簽核中，GET /leave-balances/menstrual-usage）；
+  // 本單都在同一個月且加上去超過 1 日 → 紅字並停用送出（跨月的單交給 API 按月切開檢查）。讀不到就不顯示、不擋。
+  const isMenstrual = isMenstrualLeaveType(selectedType);
+  const [menstrualUsage, setMenstrualUsage] = useState<MenstrualUsage | null>(null);
+  useEffect(() => {
+    if (!isMenstrual) {
+      setMenstrualUsage(null);
+      return;
+    }
+    let alive = true;
+    getMenstrualUsage(bucketDate)
+      .then((u) => {
+        if (alive) setMenstrualUsage(u);
+      })
+      .catch(() => {
+        if (alive) setMenstrualUsage(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [isMenstrual, bucketDate]);
+  const menstrualMonths = new Set(
+    (isRange ? list.segments.map((seg) => seg.date) : [startDate]).filter(Boolean).map((d) => d.slice(0, 7)),
+  );
+  const menstrualOverMonth =
+    isMenstrual &&
+    menstrualUsage != null &&
+    !formError &&
+    menstrualMonths.size === 1 &&
+    menstrualMonths.has(menstrualUsage.month) &&
+    menstrualUsage.monthUsedHours + totalHours > menstrualUsage.monthCapHours + 0.001;
+  const menstrualOverText = menstrualOverMonth ? `${MENSTRUAL_MONTHLY_CAP_MESSAGE}，本月已用 ${formatLeaveDuration(menstrualUsage!.monthUsedHours, hoursPerDay)}，無法送出` : "";
 
   function newRow(date: string): LeaveDayRow {
     rowSeq.current += 1;
@@ -423,6 +456,13 @@ export function LeaveForm({
           </SummaryLine>
         )}
         {overBalance && <SummaryLine tone="red">{overBalanceText}</SummaryLine>}
+        {isMenstrual && menstrualUsage && (
+          <SummaryLine>
+            本月已用 {formatLeaveDuration(menstrualUsage.monthUsedHours, menstrualUsage.hoursPerDay)}／1 日、今年已用{" "}
+            {formatLeaveDuration(menstrualUsage.yearUsedHours, menstrualUsage.hoursPerDay)}／3 日（超過的部分併入病假計算）
+          </SummaryLine>
+        )}
+        {menstrualOverMonth && <SummaryLine tone="red">{menstrualOverText}</SummaryLine>}
       </div>
 
       <ReasonField value={reason} onChange={setReason} placeholder="選填，最多 250 字" />
@@ -447,7 +487,7 @@ export function LeaveForm({
 
       <SubmitBar
         submitting={submitting}
-        disabled={overBalance}
+        disabled={overBalance || menstrualOverMonth}
         error={localError === "此假別需要附上憑證" || localError === overBalanceText ? submitError : (localError ?? submitError)}
       />
     </form>

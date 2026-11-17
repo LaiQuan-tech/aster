@@ -81,6 +81,16 @@ function normalizeMode(mode: string | null | undefined): ApprovalFlowMode {
 }
 
 /** 扣薪比例顯示用：deduct_rate 為 null 時依 paid 推算（有薪 0、無薪 1），與 DB 欄位註解一致。 */
+/** 法定假別語意下拉（2026-11-17）：生理假每月 1 日、全年超過 3 日的部分併入「病假」計算。 */
+type StatutoryKindValue = "" | "sick" | "menstrual";
+const STATUTORY_KIND_OPTIONS: { value: StatutoryKindValue; label: string }[] = [
+  { value: "", label: "無" },
+  { value: "sick", label: "病假" },
+  { value: "menstrual", label: "生理假" },
+];
+const STATUTORY_KIND_LABEL: Record<string, string> = { sick: "法定：病假", menstrual: "法定：生理假" };
+const toStatutoryKind = (v: StatutoryKindValue): "sick" | "menstrual" | null => (v === "" ? null : v);
+
 function effectiveDeductRate(lt: Pick<LeaveType, "deduct_rate" | "paid">): number {
   if (lt.deduct_rate !== null && lt.deduct_rate !== undefined && lt.deduct_rate !== "") {
     const n = Number(lt.deduct_rate);
@@ -102,6 +112,7 @@ export default function LeaveTypesPage() {
   const [special, setSpecial] = useState(false);
   const [deductRate, setDeductRate] = useState("");
   const [requiresAttachment, setRequiresAttachment] = useState(false);
+  const [statutoryKind, setStatutoryKind] = useState<StatutoryKindValue>("");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -112,6 +123,7 @@ export default function LeaveTypesPage() {
   const [editSpecial, setEditSpecial] = useState(false);
   const [editDeductRate, setEditDeductRate] = useState("");
   const [editRequiresAttachment, setEditRequiresAttachment] = useState(false);
+  const [editStatutoryKind, setEditStatutoryKind] = useState<StatutoryKindValue>("");
 
   // approval flows: kind -> selected approver emp ids (ordered by employee list) + 簽核模式
   const [flowDraft, setFlowDraft] = useState<Record<string, string[]>>({});
@@ -185,12 +197,14 @@ export default function LeaveTypesPage() {
         special,
         deductRate: deductRate.trim() === "" ? null : Number(deductRate),
         requiresAttachment,
+        statutoryKind: toStatutoryKind(statutoryKind),
       });
       setName("");
       setPaid(true);
       setSpecial(false);
       setDeductRate("");
       setRequiresAttachment(false);
+      setStatutoryKind("");
       await load();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "新增失敗");
@@ -208,6 +222,7 @@ export default function LeaveTypesPage() {
         special: editSpecial,
         deductRate: editDeductRate.trim() === "" ? null : Number(editDeductRate),
         requiresAttachment: editRequiresAttachment,
+        statutoryKind: toStatutoryKind(editStatutoryKind),
       });
       setEditingId(null);
       await load();
@@ -294,7 +309,7 @@ export default function LeaveTypesPage() {
       {/* Leave types */}
       <CollapsibleCard title="新增假別">
         <form onSubmit={onCreate} className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div>
               <label className={labelCls}>名稱</label>
               <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="特休" />
@@ -312,6 +327,19 @@ export default function LeaveTypesPage() {
                 placeholder={paid ? "留空＝0（有薪）" : "留空＝1（無薪）"}
               />
               <p className="mt-1 text-xs text-gray-400">留空＝依「支薪」推算：支薪 0、不支薪 1</p>
+            </div>
+            <div>
+              <label className={labelCls}>法定假別</label>
+              <select
+                className={inputCls}
+                value={statutoryKind}
+                onChange={(e) => setStatutoryKind(e.target.value as StatutoryKindValue)}
+              >
+                {STATUTORY_KIND_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-400">生理假：每月 1 日為限，全年超過 3 日的部分併入「病假」計算</p>
             </div>
             <div className="flex items-end gap-4">
               <label className="flex items-center gap-2 pb-2 text-sm text-gray-700">
@@ -396,6 +424,19 @@ export default function LeaveTypesPage() {
                         />
                         必附憑證
                       </label>
+                      <label className="flex shrink-0 items-center gap-1 text-sm text-gray-700">
+                        法定假別
+                        <select
+                          value={editStatutoryKind}
+                          onChange={(e) => setEditStatutoryKind(e.target.value as StatutoryKindValue)}
+                          className="rounded-md border border-gray-300 px-2 py-1 text-sm"
+                          aria-label="法定假別"
+                        >
+                          {STATUTORY_KIND_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </label>
                     </div>
                     <div className="flex shrink-0 gap-2">
                       <Button variant="secondary" size="sm" onClick={() => setEditingId(null)}>取消</Button>
@@ -418,6 +459,11 @@ export default function LeaveTypesPage() {
                       {lt.requiresAttachment && (
                         <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">必附憑證</span>
                       )}
+                      {lt.statutoryKind && STATUTORY_KIND_LABEL[lt.statutoryKind] && (
+                        <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs text-violet-700">
+                          {STATUTORY_KIND_LABEL[lt.statutoryKind]}
+                        </span>
+                      )}
                       <span
                         className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700"
                         title={lt.deduct_rate !== null && lt.deduct_rate !== undefined ? "已明確設定" : "依「支薪」推算"}
@@ -434,6 +480,7 @@ export default function LeaveTypesPage() {
                           setEditSpecial(lt.special);
                           setEditDeductRate(lt.deduct_rate ?? "");
                           setEditRequiresAttachment(lt.requiresAttachment ?? false);
+                          setEditStatutoryKind(lt.statutoryKind ?? "");
                         }}
                         className="text-sm text-gray-600 hover:underline"
                       >

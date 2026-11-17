@@ -295,6 +295,8 @@ export interface LeaveType {
   paid: boolean;
   /** 核准前是否須附憑證（例如病假須附診所收據）。舊版 API 沒有這個欄位，讀取要 optional。 */
   requiresAttachment?: boolean;
+  /** 法定假別語意（2026-11-17）：menstrual＝生理假、sick＝病假、null＝一般；舊 API 缺席。 */
+  statutoryKind?: "sick" | "menstrual" | null;
   created_at: string;
 }
 
@@ -383,7 +385,25 @@ export function getMyCompTime() {
 export function getLeaveBalances() {
   // dailyRegularHours：1 天 ＝ 幾小時（規則參數，預設 8），只給畫面把小時顯示成「天＋時」用
   // （lib/leave-duration.ts）；balances 的數字仍是小時。舊版 API 沒有這欄 → 缺席時用 8。
-  return apiFetch<{ balances: LeaveBalance[]; dailyRegularHours?: number }>("/leave-balances?scope=mine");
+  // menstrualMergedByBucket：生理假超過全年 3 日併入病假的時數（病假桶 id → 小時；已含在該桶 used）。舊 API 缺席。
+  return apiFetch<{ balances: LeaveBalance[]; dailyRegularHours?: number; menstrualMergedByBucket?: Record<string, number> }>(
+    "/leave-balances?scope=mine",
+  );
+}
+
+/** 本人生理假用量（GET /leave-balances/menstrual-usage；已核准＋簽核中，小時）。 */
+export interface MenstrualUsage {
+  month: string;
+  year: string;
+  monthUsedHours: number;
+  yearUsedHours: number;
+  monthCapHours: number;
+  yearThresholdHours: number;
+  hoursPerDay: number;
+}
+
+export function getMenstrualUsage(date: string) {
+  return apiFetch<MenstrualUsage>(`/leave-balances/menstrual-usage?date=${encodeURIComponent(date)}`);
 }
 
 export interface Shift {
