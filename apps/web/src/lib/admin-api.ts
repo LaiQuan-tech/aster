@@ -610,6 +610,10 @@ export interface LeaveRequest {
   id: string;
   /** 簽核中的請假列：剩餘假摘要（API 批次附加；簽核人／HR 才有）。 */
   leaveBalance?: import("./leave-balance-summary").LeaveBalanceSummary | null;
+  /** 簽核中的請假列：申請人各假別今年已請／剩餘（API 批次附加；本單假別 current=true）。 */
+  leaveBalancesByType?: import("./leave-balance-summary").LeaveTypeBalanceEntry[] | null;
+  /** 假別名稱（API enrichRequestRows 帶，租戶假別設定為準；非請假單為 null）。 */
+  leave_type_name?: string | null;
   tenant_id: string;
   employee_id: string;
   kind: RequestKind;

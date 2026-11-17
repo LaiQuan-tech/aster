@@ -48,7 +48,7 @@ import { overtimeCapErrorText } from "@/lib/overtime-approval";
 import { leaveBalanceErrorText } from "@/lib/leave-balance-cap";
 import { approvalPeriodText, approvalWhenText } from "@/lib/request-forms";
 import { LateReportsSection } from "./_components/LateReportsSection";
-import { LeaveBalanceSummaryText } from "@/components/LeaveBalanceSummary";
+import { LeaveBalanceSummaryText, LeaveTypeBalanceList } from "@/components/LeaveBalanceSummary";
 import { BonusRunApprovalsSection } from "./_components/BonusRunApprovalsSection";
 import {
   BottomSheet,
@@ -641,7 +641,20 @@ export default function ApprovalsPage() {
                       <>
                         <dt className="text-gray-400">剩餘假</dt>
                         <dd>
-                          <LeaveBalanceSummaryText balance={row.leaveBalance} hours={row.hours} />
+                          <LeaveBalanceSummaryText balance={row.leaveBalance} hours={row.hours} leaveTypeName={row.leave_type_name} />
+                        </dd>
+                      </>
+                    )}
+                    {row.kind === "leave" && row.leaveBalancesByType && row.leaveBalancesByType.length > 0 && (
+                      <>
+                        <dt className="text-gray-400">各假別</dt>
+                        <dd>
+                          <LeaveTypeBalanceList
+                            list={row.leaveBalancesByType}
+                            hoursPerDay={row.leaveBalance?.hoursPerDay}
+                            showHeading={false}
+                            className="text-xs"
+                          />
                         </dd>
                       </>
                     )}

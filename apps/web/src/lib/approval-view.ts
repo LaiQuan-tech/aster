@@ -77,6 +77,16 @@ export const KIND_LABEL: Record<RequestKind, string> = {
   vehicle_booking: "公務車預約",
 };
 
+/**
+ * 表格「類型」chip 文字：請假列帶假別（「請假・病假」，2026-11-17 業主：主管審核畫面要顯示請假類別）。
+ * 假別名稱用 API 回的 leave_type_name（租戶假別設定為準，含自訂假別）；沒有名稱 → 只寫「請假」。
+ */
+export function kindChipLabel(row: Pick<LeaveRequest, "kind" | "leave_type_name">): string {
+  const base = KIND_LABEL[row.kind] ?? row.kind;
+  const name = row.kind === "leave" ? (row.leave_type_name ?? "").trim() : "";
+  return name ? `${base}・${name}` : base;
+}
+
 export const KIND_OPTIONS: ReadonlyArray<{ value: RequestKind; label: string }> = [
   { value: "leave", label: "請假" },
   { value: "ot", label: "加班" },

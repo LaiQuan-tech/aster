@@ -37,3 +37,14 @@ describe("leaveBalanceSummaryView", () => {
     });
   });
 });
+
+describe("leaveBalanceSummaryView 帶假別名稱", () => {
+  it("無額度 → 今年已請{假別}", () => {
+    expect(
+      leaveBalanceSummaryView({ capped: false, source: null, remainingHours: null, pendingHours: 0, usedHours: 12, hoursPerDay: 8 }, 4, "病假")?.text,
+    ).toBe("今年已請病假 12 小時（約 1 天 4 時）");
+  });
+  it("有額度 → {假別}剩餘", () => {
+    expect(leaveBalanceSummaryView({ ...base, pendingHours: 0 }, 4, "特休")?.text).toBe("特休剩餘 16 小時（約 2 天）");
+  });
+});

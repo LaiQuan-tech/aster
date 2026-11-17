@@ -71,8 +71,8 @@ import { overtimeBatchItemText, overtimeCapErrorText } from "@/lib/overtime-appr
 import { leaveBalanceBatchItemText, leaveBalanceErrorText } from "@/lib/leave-balance-cap";
 import {
   BUCKET_LABEL,
-  KIND_LABEL,
   KIND_OPTIONS,
+  kindChipLabel,
   applyClientFilters,
   bucketOf,
   buildApprovalLookup,
@@ -98,7 +98,7 @@ import {
 } from "@/lib/approval-view";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
-import { LeaveBalanceSummaryText } from "@/components/LeaveBalanceSummary";
+import { LeaveBalanceSummaryText, LeaveTypeBalanceList } from "@/components/LeaveBalanceSummary";
 type RequestAttachment = { id: string; fileName: string; sizeBytes: number; contentType: string; url: string };
 
 const BUCKET_TONE: Record<ApprovalBucket, PillTone> = {
@@ -719,7 +719,7 @@ function ApprovalsView() {
                         {lookup.employeeName(row.employee_id) ?? row.employee_id.slice(0, 8)}
                       </td>
                       <td className="py-3 pr-4">
-                        <Pill tone="gray">{KIND_LABEL[row.kind]}</Pill>
+                        <Pill tone={row.kind === "leave" && row.leave_type_name ? "blue" : "gray"}>{kindChipLabel(row)}</Pill>
                         {/* M1：加班單送出時已超過月加班上限；超額部分不入薪資加班費，改由「現金給付」另行支付 */}
                         {row.beyond_cap === true && (
                           <span className="mt-1 block">
@@ -734,7 +734,19 @@ function ApprovalsView() {
                           </p>
                         ))}
                         {row.kind === "leave" && row.leaveBalance && (
-                          <LeaveBalanceSummaryText balance={row.leaveBalance} hours={row.hours} className="mt-1 block text-xs" />
+                          <LeaveBalanceSummaryText
+                            balance={row.leaveBalance}
+                            hours={row.hours}
+                            leaveTypeName={row.leave_type_name}
+                            className="mt-1 block text-xs"
+                          />
+                        )}
+                        {row.kind === "leave" && row.leaveBalancesByType && (
+                          <LeaveTypeBalanceList
+                            list={row.leaveBalancesByType}
+                            hoursPerDay={row.leaveBalance?.hoursPerDay}
+                            className="mt-1 text-xs"
+                          />
                         )}
                       </td>
                       <td className="py-3 pr-4 text-gray-600">{lookup.approverLabel(row)}</td>
@@ -887,7 +899,7 @@ function ApprovalsView() {
         title="HR 代理簽核"
         message={
           proxyTarget
-            ? `確定要以 HR 身分代理核准 ${lookup.employeeName(proxyTarget.employee_id) ?? proxyTarget.employee_id.slice(0, 8)} 的${KIND_LABEL[proxyTarget.kind]}申請？\n目前簽核人：${lookup.approverLabel(proxyTarget)}${actionComment ? `\n簽核意見：${actionComment}` : "\n簽核意見：HR 代理簽核"}`
+            ? `確定要以 HR 身分代理核准 ${lookup.employeeName(proxyTarget.employee_id) ?? proxyTarget.employee_id.slice(0, 8)} 的${kindChipLabel(proxyTarget)}申請？\n目前簽核人：${lookup.approverLabel(proxyTarget)}${actionComment ? `\n簽核意見：${actionComment}` : "\n簽核意見：HR 代理簽核"}`
             : undefined
         }
         confirmLabel="代理核准"
@@ -901,7 +913,7 @@ function ApprovalsView() {
           <div className="space-y-4">
             <p className="text-sm text-gray-600">
               {lookup.employeeName(deleteTarget.employee_id) ?? deleteTarget.employee_id.slice(0, 8)} 的
-              {KIND_LABEL[deleteTarget.kind]}申請（{dateOnly(deleteTarget.created_at)}）。
+              {kindChipLabel(deleteTarget)}申請（{dateOnly(deleteTarget.created_at)}）。
               紀錄不會被刪除，僅標記為已註銷並保留附件與簽核軌跡供追溯。
             </p>
             <Field label="註銷理由" required htmlFor="approvals-delete-reason" error={deleteError ?? undefined}>

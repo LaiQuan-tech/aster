@@ -25,6 +25,7 @@ import { leaveBalancesHavePeriod } from "./annual-leave.js"
 import { loadDailyRegularHours } from "./daily-regular-hours.js"
 import { resolveHours, type BalanceBucket } from "./ledger.js"
 import { bucketHasQuota, bucketRemaining, isCompLeaveType } from "./leave-balance-cap.js"
+import { sortLeaveTypes } from "./leave-overview.js"
 
 export interface LeaveBalanceSummary {
   /** 有額度上限（balance 桶有額度，或補休帳）。 */
@@ -38,6 +39,18 @@ export interface LeaveBalanceSummary {
   usedHours: number
   /** 1 天＝幾小時（payroll.dailyRegularHours，與 GET /leave-balances 的 dailyRegularHours 同源）。 */
   hoursPerDay: number
+}
+
+/**
+ * 申請人「各假別」今年已請／剩餘（2026-11-17 業主：簽核時要看到這個人每種假各請了多少、還剩多少）。
+ * 每個假別的算法與 LeaveBalanceSummary 相同（同一個 summarizeOne）；參考日＝本單起日（租戶時區），
+ * 所以選到的桶與送單／核准擋額度、ESS「我的假別額度」（剩餘＝entitled＋deferred−used）是同一桶。
+ */
+export interface LeaveTypeBalanceEntry extends Omit<LeaveBalanceSummary, "hoursPerDay"> {
+  leaveTypeId: string
+  name: string
+  /** 本張申請的假別（畫面要醒目）。 */
+  current: boolean
 }
 
 export interface SummarizableRow {
@@ -103,15 +116,26 @@ const key = (employeeId: string, leaveTypeId: string) => `${employeeId}|${leaveT
  * 批次算每張（簽核中）請假單的剩餘假摘要。回 Map<requestId, summary>；不適用的列（非請假、非 pending、沒假別）不在 Map 裡。
  */
 export async function loadLeaveBalanceSummaries(tenantId: string, rows: SummarizableRow[]): Promise<Map<string, LeaveBalanceSummary>> {
+  return (await loadLeaveBalanceDetails(tenantId, rows)).summaries
+}
+
+/**
+ * 同 loadLeaveBalanceSummaries，另回 byType：Map<requestId, 申請人各假別一覽>（依 sortLeaveTypes 排序；
+ * 本單假別的那一筆＝summaries 同一份數字）。查詢數固定，不隨列數／申請人數增加。
+ */
+export async function loadLeaveBalanceDetails(
+  tenantId: string,
+  rows: SummarizableRow[],
+): Promise<{ summaries: Map<string, LeaveBalanceSummary>; byType: Map<string, LeaveTypeBalanceEntry[]> }> {
   const out = new Map<string, LeaveBalanceSummary>()
+  const byTypeOut = new Map<string, LeaveTypeBalanceEntry[]>()
   const targets = rows.filter(
     (r): r is SummarizableRow & { leave_type_id: string } =>
       (r.kind == null || r.kind === "leave") && r.status === "pending" && !!r.leave_type_id,
   )
-  if (targets.length === 0) return out
+  if (targets.length === 0) return { summaries: out, byType: byTypeOut }
 
   const employeeIds = Array.from(new Set(targets.map((r) => r.employee_id)))
-  const leaveTypeIds = Array.from(new Set(targets.map((r) => r.leave_type_id)))
 
   const [tz, hoursPerDay, havePeriod] = await Promise.all([
     getTenantTimezone(tenantId),
@@ -124,8 +148,7 @@ export async function loadLeaveBalanceSummaries(tenantId: string, rows: Summariz
       .from("leave_balances")
       .select(havePeriod ? "id, employee_id, leave_type_id, used, entitled, deferred, year, period_start, period_end, created_at" : "id, employee_id, leave_type_id, used, entitled, deferred, year, created_at")
       .eq("tenant_id", tenantId)
-      .in("employee_id", employeeIds)
-      .in("leave_type_id", leaveTypeIds),
+      .in("employee_id", employeeIds),
     supabaseAdmin
       .from("leave_requests")
       .select("id, employee_id, leave_type_id, hours, start_at, end_at")
@@ -133,9 +156,9 @@ export async function loadLeaveBalanceSummaries(tenantId: string, rows: Summariz
       .eq("kind", "leave")
       .eq("status", "pending")
       .is("deleted_at", null)
-      .in("employee_id", employeeIds)
-      .in("leave_type_id", leaveTypeIds),
-    supabaseAdmin.from("leave_types").select("id, code, name").eq("tenant_id", tenantId).in("id", leaveTypeIds),
+      .in("employee_id", employeeIds),
+    // 全部假別（申請人各假別一覽要用）；仍是一次查詢。
+    supabaseAdmin.from("leave_types").select("id, code, name").eq("tenant_id", tenantId),
   ])
   if (balRes.error) throw new Error(`leave balance summary (balances): ${balRes.error.message}`)
   if (pendRes.error) throw new Error(`leave balance summary (pending): ${pendRes.error.message}`)
@@ -156,25 +179,17 @@ export async function loadLeaveBalanceSummaries(tenantId: string, rows: Summariz
     arr.push(p)
     pendingByKey.set(k, arr)
   }
-  const compTypeIds = new Set(
-    ((typeRes.data ?? []) as Array<{ id: string; code?: string | null; name?: string | null }>).filter((t) => isCompLeaveType(t)).map((t) => t.id),
-  )
+  const typeRows = (typeRes.data ?? []) as Array<{ id: string; code?: string | null; name?: string | null }>
+  const compTypeIds = new Set(typeRows.filter((t) => isCompLeaveType(t)).map((t) => t.id))
 
-  // 先決定每列的來源，只有用到補休帳的員工才查 comp_time_ledger（一次）。
-  const plans = targets.map((r) => {
-    const dateKey = localDateKey(r.start_at, tz)
-    const bucket = pickBucket(bucketsByKey.get(key(r.employee_id, r.leave_type_id)) ?? [], dateKey, havePeriod)
-    const source: LeaveBalanceSummary["source"] = bucketHasQuota(bucket) ? "balance" : compTypeIds.has(r.leave_type_id) ? "comp" : null
-    return { r, dateKey, bucket, source }
-  })
-  const compEmployees = Array.from(new Set(plans.filter((p) => p.source === "comp").map((p) => p.r.employee_id)))
+  // 補休帳：租戶有補休假別才查（一次，涵蓋所有申請人）。
   const compByEmp = new Map<string, { available: number; used: number }>()
-  if (compEmployees.length > 0) {
+  if (compTypeIds.size > 0) {
     const { data, error } = await supabaseAdmin
       .from("comp_time_ledger")
       .select("employee_id, hours_earned, hours_used")
       .eq("tenant_id", tenantId)
-      .in("employee_id", compEmployees)
+      .in("employee_id", employeeIds)
     if (error) throw new Error(`leave balance summary (comp_time_ledger): ${error.message}`)
     for (const row of (data ?? []) as Array<{ employee_id: string; hours_earned: unknown; hours_used: unknown }>) {
       const cur = compByEmp.get(row.employee_id) ?? { available: 0, used: 0 }
@@ -184,40 +199,75 @@ export async function loadLeaveBalanceSummaries(tenantId: string, rows: Summariz
     }
   }
 
-  for (const { r, bucket, source } of plans) {
-    const others = (pendingByKey.get(key(r.employee_id, r.leave_type_id)) ?? []).filter((p) => p.id !== r.id)
+  /** 某員某假別在 dateKey 的摘要（規則見檔頭）；excludeId＝不算進簽核中的那張（本單）。 */
+  const summarizeOne = (employeeId: string, leaveTypeId: string, dateKey: string, excludeId: string | null): LeaveBalanceSummary => {
+    const bucket = pickBucket(bucketsByKey.get(key(employeeId, leaveTypeId)) ?? [], dateKey, havePeriod)
+    const source: LeaveBalanceSummary["source"] = bucketHasQuota(bucket) ? "balance" : compTypeIds.has(leaveTypeId) ? "comp" : null
     let pending = 0
-    for (const p of others) {
+    for (const p of pendingByKey.get(key(employeeId, leaveTypeId)) ?? []) {
+      if (p.id === excludeId) continue
       if (source !== "comp") {
         const pKey = localDateKey(p.start_at, tz)
-        if (bucket ? !bucketCovers(bucket, pKey) : pKey.slice(0, 4) !== localDateKey(r.start_at, tz).slice(0, 4)) continue
+        if (bucket ? !bucketCovers(bucket, pKey) : pKey.slice(0, 4) !== dateKey.slice(0, 4)) continue
       }
       pending += resolveHours(p)
     }
     if (source === "comp") {
-      const c = compByEmp.get(r.employee_id) ?? { available: 0, used: 0 }
-      out.set(r.id, { capped: true, source, remainingHours: round2(c.available), pendingHours: round2(pending), usedHours: round2(c.used), hoursPerDay })
-    } else if (source === "balance" && bucket) {
-      out.set(r.id, { capped: true, source, remainingHours: bucketRemaining(bucket), pendingHours: round2(pending), usedHours: round2(bucket.used), hoursPerDay })
-    } else {
-      out.set(r.id, { capped: false, source: null, remainingHours: null, pendingHours: round2(pending), usedHours: round2(bucket?.used ?? 0), hoursPerDay })
+      const c = compByEmp.get(employeeId) ?? { available: 0, used: 0 }
+      return { capped: true, source, remainingHours: round2(c.available), pendingHours: round2(pending), usedHours: round2(c.used), hoursPerDay }
     }
+    if (source === "balance" && bucket) {
+      return { capped: true, source, remainingHours: bucketRemaining(bucket), pendingHours: round2(pending), usedHours: round2(bucket.used), hoursPerDay }
+    }
+    return { capped: false, source: null, remainingHours: null, pendingHours: round2(pending), usedHours: round2(bucket?.used ?? 0), hoursPerDay }
   }
-  return out
+
+  const sortedTypes = sortLeaveTypes(typeRows.map((t) => ({ id: t.id, code: t.code ?? "", name: t.name ?? "" })))
+  // 同一申請人、同一參考日的各假別一覽只算一次（同一人多張單共用）。
+  const allMemo = new Map<string, Array<{ leaveTypeId: string; name: string; s: LeaveBalanceSummary }>>()
+  const allFor = (employeeId: string, dateKey: string) => {
+    const mk = `${employeeId}|${dateKey}`
+    let list = allMemo.get(mk)
+    if (!list) {
+      list = sortedTypes.map((t) => ({ leaveTypeId: t.id, name: t.name, s: summarizeOne(employeeId, t.id, dateKey, null) }))
+      allMemo.set(mk, list)
+    }
+    return list
+  }
+
+  for (const r of targets) {
+    const dateKey = localDateKey(r.start_at, tz)
+    const own = summarizeOne(r.employee_id, r.leave_type_id, dateKey, r.id)
+    const byType: LeaveTypeBalanceEntry[] = []
+    for (const e of allFor(r.employee_id, dateKey)) {
+      const current = e.leaveTypeId === r.leave_type_id
+      const s = current ? own : e.s
+      // 沒額度、沒請過、沒有簽核中的假別不列（避免一長串 0）；本單假別一定列。
+      if (!current && !s.capped && s.usedHours === 0 && s.pendingHours === 0) continue
+      const { hoursPerDay: _hpd, ...rest } = s
+      byType.push({ leaveTypeId: e.leaveTypeId, name: e.name, current, ...rest })
+    }
+    out.set(r.id, own)
+    byTypeOut.set(r.id, byType)
+  }
+  return { summaries: out, byType: byTypeOut }
 }
 
-/** 把摘要附到列上（leaveBalance）；讀取失敗 → 原樣回傳、記 warn。 */
+/**
+ * 把摘要附到列上：leaveBalance（本單假別）＋ leaveBalancesByType（申請人各假別一覽，只含該列申請人自己的數字）；
+ * 讀取失敗 → 原樣回傳、記 warn。
+ */
 export async function attachLeaveBalances<T extends SummarizableRow>(
   tenantId: string,
   rows: T[],
   only?: (r: T) => boolean,
-): Promise<Array<T & { leaveBalance?: LeaveBalanceSummary }>> {
+): Promise<Array<T & { leaveBalance?: LeaveBalanceSummary; leaveBalancesByType?: LeaveTypeBalanceEntry[] }>> {
   try {
-    const map = await loadLeaveBalanceSummaries(tenantId, only ? rows.filter(only) : rows)
+    const { summaries: map, byType } = await loadLeaveBalanceDetails(tenantId, only ? rows.filter(only) : rows)
     if (map.size === 0) return rows
     return rows.map((r) => {
       const s = map.get(r.id)
-      return s ? { ...r, leaveBalance: s } : r
+      return s ? { ...r, leaveBalance: s, leaveBalancesByType: byType.get(r.id) ?? [] } : r
     })
   } catch (err) {
     logger.warn({ err, tenantId }, "attachLeaveBalances: 讀取失敗，清單不附剩餘假")
