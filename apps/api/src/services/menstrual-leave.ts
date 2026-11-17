@@ -431,7 +431,8 @@ export interface PendingMergeEstimate {
 
 /**
  * 簽核中生理假單 → 預估併入（純函式）。已有併入紀錄的單：仍記在桶上的部分已含在桶 used 裡，**不再預估**；
- * 標 reversed 的部分再核准會補回同一桶 → 算在 byBucket。其他單以 approvedYearUsed 為底依日期先後吃 3 日門檻。
+ * 標 reversed 的部分再核准會補回同一桶 → 算在 byBucket。有紀錄的單日數**照樣算進 3 日門檻底數**（它們已經吃過門檻），
+ * 其他單以「approvedYearUsed＋有紀錄的簽核中單」為底依日期先後吃 3 日門檻（與簽核畫面本單預估同一規則）。
  */
 export function estimatePendingMergeFrom(
   approvedYearUsed: Map<string, number>,
@@ -440,14 +441,16 @@ export function estimatePendingMergeFrom(
 ): PendingMergeEstimate {
   const plain = new Map<string, number>()
   const byBucket = new Map<string, number>()
+  const base = new Map(approvedYearUsed)
   for (const p of pending) {
     if (p.merge.length > 0) {
       for (const e of p.merge) if (e.reversed) byBucket.set(e.bucketId, round2((byBucket.get(e.bucketId) ?? 0) + e.hours))
+      for (const [y, h] of sumByPrefix(p.byDate, 4)) base.set(y, round2((base.get(y) ?? 0) + h))
       continue
     }
     for (const [d, h] of p.byDate) plain.set(d, round2((plain.get(d) ?? 0) + h))
   }
-  return { byDate: plain.size > 0 ? mergedHoursByDate(approvedYearUsed, plain, dayHours) : new Map(), byBucket }
+  return { byDate: plain.size > 0 ? mergedHoursByDate(base, plain, dayHours) : new Map(), byBucket }
 }
 
 /** 預估併入裡落在某病假桶的時數。 */
@@ -762,9 +765,15 @@ async function reapplyReversedEntries(
     }
   }
   try {
+    const gone = new Set<string>()
     for (const e of entries.filter((x) => x.reversed)) {
       const bucket = await readBucket(supabase, e.bucketId)
-      if (!bucket) throw new Error("menstrual reapply: bucket vanished")
+      // 桶已被刪：沒有地方補回，這筆從紀錄拿掉（不再擋核准；舊資料相容，沖回時已不會寫進這種項目）。
+      if (!bucket) {
+        gone.add(e.bucketId)
+        logger.warn({ tenantId: t.tenantId, requestId: t.requestId, bucketId: e.bucketId, hours: e.hours }, "menstrual reapply: 病假桶已不存在，略過這筆")
+        continue
+      }
       if (bucketHasQuota(bucket)) {
         const short = await debitQuotaBucketChecked(supabase, bucket, e.hours)
         if (short !== null) {
@@ -782,18 +791,23 @@ async function reapplyReversedEntries(
           }
         }
       } else if (!(await adjustBucketUsed(supabase, e.bucketId, e.hours))) {
-        throw new Error("menstrual reapply: bucket vanished")
+        gone.add(e.bucketId)
+        continue
       }
       redone.push(e)
     }
-    const full = entries.map((e) => ({ bucketId: e.bucketId, hours: e.hours }))
-    const { error } = await supabase
+    const full = entries.filter((e) => !(e.reversed && gone.has(e.bucketId))).map((e) => ({ bucketId: e.bucketId, hours: e.hours }))
+    // 條件更新（2026-11-17 複驗）：只在本單仍是 approved 時寫（本函式在「寫成 approved 之後」才呼叫）；
+    // 寫不進＝本單已被退回／改狀態 → 撤掉這次補扣，紀錄不動（避免紀錄與桶不一致）。
+    const { data: marked, error } = await supabase
       .from("leave_requests")
-      .update({ menstrual_sick_merge: full })
+      .update({ menstrual_sick_merge: full.length > 0 ? full : null })
       .eq("tenant_id", t.tenantId)
       .eq("id", t.requestId)
+      .eq("status", "approved")
       .select("id")
     if (error) throw new Error(`menstrual reapply mark: ${error.message}`)
+    if ((marked ?? []).length === 0) throw new Error("menstrual reapply mark: request no longer approved")
     return { status: "ok", mergedHours: round2(full.reduce((s, e) => s + e.hours, 0)) }
   } catch (err) {
     await undo()
@@ -847,9 +861,11 @@ export async function reverseMenstrualSickMerge(
       continue
     }
     try {
-      // 桶已不存在（被刪）＝沒有可沖回的，視同已沖回。
-      if (await adjustBucketUsed(supabase, e.bucketId, -e.hours)) total += e.hours
-      result.push({ bucketId: e.bucketId, hours: e.hours, reversed: true })
+      // 桶已不存在（被刪）＝沒有可沖回、也沒有地方補回 → 不寫進紀錄（否則再核准會卡在這筆）。
+      if (await adjustBucketUsed(supabase, e.bucketId, -e.hours)) {
+        total += e.hours
+        result.push({ bucketId: e.bucketId, hours: e.hours, reversed: true })
+      }
     } catch (err) {
       result.push({ bucketId: e.bucketId, hours: e.hours })
       failedCount += 1
@@ -872,7 +888,7 @@ export async function reverseMenstrualSickMerge(
         "menstrual reverse FAILED and restore FAILED — 病假桶未沖回且紀錄寫回失敗，需人工處理",
       )
     } else {
-      logger.error({ err: firstErr, tenantId, requestId, failed }, "menstrual reverse partially FAILED — 紀錄已寫回（已沖回的標 reversed），可重試")
+      logger.error({ err: firstErr, tenantId, requestId, failed }, "menstrual reverse partially FAILED — 紀錄已寫回單上（已沖回的標 reversed），未沖回的病假時數需人工處理（單子再核准時會依紀錄補回／不重複併入）")
     }
     throw new Error(`menstrual reverse: ${failedCount} bucket(s) not reversed (${round2(total)}h reversed)`)
   }
@@ -916,8 +932,9 @@ export async function loadMenstrualUsage(tenantId: string, employeeId: string, d
 }
 
 /**
- * 已核准生理假併入病假的時數，依病假桶 id 加總（ESS 額度頁、簽核畫面病假列「含生理假併入 X 小時」）。
- * 欄位未套 → 空 Map。
+ * 生理假併入病假、**目前仍記在桶上**的時數，依病假桶 id 加總（ESS 額度頁、簽核畫面病假列「含生理假併入 X 小時」）。
+ * 不限狀態：已核准的單，以及部分沖回失敗後被退回／駁回／撤回／註銷、紀錄上仍有未沖回項目的單都算
+ * （那些時數確實還在病假 used 裡）；標 reversed 的項目不算。欄位未套 → 空 Map。
  */
 export async function menstrualMergedByBucket(tenantId: string, employeeIds: string[]): Promise<Map<string, number>> {
   const out = new Map<string, number>()
@@ -928,8 +945,6 @@ export async function menstrualMergedByBucket(tenantId: string, employeeIds: str
     .select("menstrual_sick_merge")
     .eq("tenant_id", tenantId)
     .in("employee_id", employeeIds)
-    .eq("status", "approved")
-    .is("deleted_at", null)
     .not("menstrual_sick_merge", "is", null)
   if (error) {
     if (isMissingColumnError(error)) return out

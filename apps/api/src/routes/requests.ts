@@ -1879,6 +1879,7 @@ async function decideOneRequest(params: {
       await revertStep(step, "rejected", actor.id)
       return { ok: false, id: requestId, error: reqFail }
     }
+    await releaseMenstrualMergeOnExit(tenantId, requestId, lr.kind, "reject")
 
     await writeAuditLog({
       tenantId,
@@ -2086,6 +2087,16 @@ async function decideOneRequest(params: {
       }
     }
     if (failure) {
+      // 生理假這次併入病假的時數**先沖回、再退回待簽核**（2026-11-17 複驗）：沖回期間本單仍是 approved，
+      // 別的簽核人不可能趁空窗再核准（核准要求 pending）→ 紀錄與病假桶不會不一致。
+      // 沖回失敗不擋退回：紀錄已寫回單上（已沖回的標 reversed），再核准時只補回那幾筆。
+      if (menstrualMerged) {
+        try {
+          await reverseMenstrualSickMerge(tenantId, requestId)
+        } catch (err) {
+          logger.error({ err, tenantId, requestId }, "decideOneRequest: menstrual sick merge reverse failed — 紀錄保留在單上，未沖回的病假時數需人工處理")
+        }
+      }
       const { error: revertErr } = await supabaseAdmin
         .from("leave_requests")
         .update({ status: "pending" })
@@ -2095,6 +2106,23 @@ async function decideOneRequest(params: {
         .select("id")
       if (revertErr) {
         logger.error({ err: revertErr, tenantId, requestId }, "decideOneRequest: leave balance check failed to revert approval")
+        // 單子仍是 approved：剛才沖回的生理假併入補回去，維持「已核准＝已併入」（best-effort）。
+        if (menstrualMerged) {
+          try {
+            await applyMenstrualOnFinalApproval({
+              tenantId,
+              employeeId: lr.employee_id,
+              leaveTypeId: lr.leave_type_id,
+              startAt: lr.start_at,
+              endAt: lr.end_at,
+              hours: lr.hours,
+              segments: lr.segments,
+              requestId,
+            })
+          } catch (err) {
+            logger.error({ err, tenantId, requestId }, "decideOneRequest: menstrual merge restore failed after revert failure — 病假桶需人工補記")
+          }
+        }
         await writeAuditLog({
           tenantId,
           tableName: "leave_requests",
@@ -2108,14 +2136,6 @@ async function decideOneRequest(params: {
         return { ok: false, id: requestId, error: "leave_balance_revert_failed" }
       }
       await revertStep(step, "approved", actor.id)
-      // 已退回待簽核：生理假這次併入病假的時數沖回（冪等；退回失敗、單子仍是 approved 時不沖，保持一致）。
-      if (menstrualMerged) {
-        try {
-          await reverseMenstrualSickMerge(tenantId, requestId)
-        } catch (err) {
-          logger.error({ err, tenantId, requestId }, "decideOneRequest: menstrual sick merge reverse failed — 病假桶需人工沖回")
-        }
-      }
       await writeAuditLog({
         tenantId,
         tableName: "leave_requests",
@@ -2252,6 +2272,21 @@ async function leaveBalanceOutcome(
   } catch (err) {
     logger.warn({ err, tenantId, requestId }, "decideOneRequest: leave balance check failed")
     return { ok: false, id: requestId, error: LEAVE_BALANCE_CHECK_FAILED }
+  }
+}
+
+/**
+ * 請假單離開 pending（駁回、申請人撤回、HR 註銷）時，把單上還記著的生理假併入病假時數沖回
+ * （2026-11-17 複驗：部分沖回失敗後退回待簽核的單，紀錄上仍有未沖回項目，取消後那些時數會永久留在病假 used）。
+ * 紀錄是 null（絕大多數單）→ reverseMenstrualSickMerge 只讀一次就回 0。失敗只記 log、不擋操作；
+ * 紀錄保留在單上（已沖回的標 reversed），供人工處理。
+ */
+async function releaseMenstrualMergeOnExit(tenantId: string, requestId: string, kind: unknown, via: string): Promise<void> {
+  if (kind !== "leave") return
+  try {
+    await reverseMenstrualSickMerge(tenantId, requestId)
+  } catch (err) {
+    logger.error({ err, tenantId, requestId, via }, "menstrual merge reverse on exit failed — 紀錄保留在單上，未沖回的病假時數需人工處理")
   }
 }
 
@@ -2768,6 +2803,7 @@ requestsRouter.post(
         next(new Error(`POST /requests/${requestId}/cancel (update): ${upErr.message}`))
         return
       }
+      await releaseMenstrualMergeOnExit(tenantId, requestId, lr.kind, "cancel")
 
       await writeAuditLog({
         tenantId,
@@ -2966,6 +3002,7 @@ requestsRouter.delete(
         next(new Error(`DELETE /requests/${requestId}: ${delErr.message}`))
         return
       }
+      await releaseMenstrualMergeOnExit(tenantId, requestId, lr.kind, "delete")
 
       await writeAuditLog({
         tenantId,
