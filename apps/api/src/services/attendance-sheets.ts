@@ -73,6 +73,7 @@ import {
 import {
   SHEET_TRANSITIONS,
   type AnomalySeverity,
+  type MoneyPreviewError,
   type SheetAnomaly,
   type SheetDayView,
   type SheetMoney,
@@ -80,6 +81,7 @@ import {
   type SheetTotals,
   type SheetView,
 } from "./attendance-sheet-types.js"
+import { hasWageBasis } from "./salary-completeness.js"
 
 /**
  * Attendance sheets — 亞斯特 P1 出勤月表 的月結流程核心（DB ↔ SheetView）。
@@ -2112,7 +2114,13 @@ async function composeLiveView(
       )
     : payrollDays
   let money: SheetMoney | null = null
-  if (inputs?.salary) {
+  // 2026-11-17：試算不出金額時把原因帶到畫面（原本一律吞掉，頁面只說「沒有薪資資料」誤導 HR）。
+  let previewError: MoneyPreviewError | null = null
+  if (inputs && !inputs.salary) previewError = "salary_structure_missing"
+  else if (inputs?.salary && !hasWageBasis(inputs.salary)) {
+    // 本薪與時薪都空／0：引擎會丟「hourlyWage or baseSalary required」，先判斷、不必丟錯再接。
+    previewError = "salary_base_missing"
+  } else if (inputs?.salary) {
     try {
       // 個人開關「不計夜間加給」：與薪資執行同一個入口（employee-features.applyNightPolicy）。
       const policy = applyNightPolicy(inputs.features, payrollDays, inputs.rules)
@@ -2124,7 +2132,8 @@ async function composeLiveView(
         inputs.rules,
       )
     } catch (err) {
-      // 引擎拒絕猜時薪（無時薪且無本薪）→ money 留 null，月表其餘照常。
+      // 其他試算錯誤 → money 留 null，月表其餘照常；畫面顯示「試算失敗」。
+      previewError = "preview_failed"
       logger.warn({ err, tenantId, sheetId: sheet.id }, "attendance-sheets: money preview unavailable")
     }
   }
@@ -2146,6 +2155,7 @@ async function composeLiveView(
     monthAnomalies,
     totals,
     money,
+    ...(opts.includeMoney ? { previewError } : {}),
     anomalyCount: countAnomalies(days, monthAnomalies),
   }
   return { view, payrollDays, payrollDaysUncapped, inputs }

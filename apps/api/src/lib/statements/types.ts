@@ -1,5 +1,5 @@
 import type { OvertimeSegment } from "@hr/rules"
-import type { SheetView } from "../../services/attendance-sheet-types.js"
+import type { MoneyPreviewError, SheetView } from "../../services/attendance-sheet-types.js"
 
 /**
  * 兩張表（出勤統計表／薪資明細表）的輸入資料：由 services/employee-statements.ts 從系統各處讀來、
@@ -94,6 +94,8 @@ export interface StatementSalaryInfo {
   nhiDependents: number | null
   /** 投保薪資（勞保）調整歷程：生效日 ≤ 該月底的最近 3 筆、舊→新（2026-11-10；舊資料／表未套用＝空或沒有）。 */
   insuredAdjustments?: Array<{ effectiveOn: string; laborInsuredSalary: number }>
+  /** 2026-11-17：薪資結構的本薪與時薪都空／0（引擎無從折算，試算與跑薪資都會略過此人）。 */
+  wageBasisMissing?: boolean
 }
 
 /** 行事曆當日（tenant_calendar_days）：假日名稱（雙十節、颱風假…）與日別。 */
@@ -120,6 +122,11 @@ export interface StatementData {
   company: StatementCompany | null
   attendance: SheetView | null
   money: StatementMoney | null
+  /**
+   * 2026-11-17：看得到金額卻沒有金額（money null）時的原因代碼；有金額、看不到金額或原因不明＝null／不帶。
+   * 見 SheetView.previewError。
+   */
+  previewError?: MoneyPreviewError | null
   expenses: StatementExpense[] | null
   salary: StatementSalaryInfo | null
   /** 假別 code → 名稱（缺勤區「事假／病假」對應用）。 */

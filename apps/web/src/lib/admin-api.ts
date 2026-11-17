@@ -1352,6 +1352,23 @@ export function putSalaryStructure(
   });
 }
 
+/** 薪資設定不完整的在職員工（2026-11-17；API GET /salary-structures/incomplete，HR／會計；不含金額）。 */
+export interface IncompleteSalaryEntry {
+  employeeId: string;
+  name: string;
+  empNo: string | null;
+  method: string;
+  issue: "base_salary_required" | "hourly_wage_required" | "daily_wage_required" | "wage_basis_required";
+  /** 短標籤（月薪制缺本薪…）。 */
+  label: string;
+  /** 本薪與時薪都沒有 → 執行薪資時會被跳過。 */
+  skippedByPayroll: boolean;
+}
+
+export function getIncompleteSalaries() {
+  return apiFetch<{ count: number; employees: IncompleteSalaryEntry[] }>("/salary-structures/incomplete");
+}
+
 export interface Payslip {
   id: string;
   employee_id: string;
@@ -1384,7 +1401,13 @@ export interface PayrollRunWarning {
 }
 
 export function runPayroll(period: string, employeeId?: string) {
-  return apiFetch<{ generated: number; skipped: string[]; warnings?: PayrollRunWarning[] }>(`/payroll/run`, {
+  return apiFetch<{
+    generated: number;
+    skipped: string[];
+    /** 略過原因（finalized／hourly_wage_missing＝缺本薪時薪／sheet_not_approved）；舊 API 沒有。 */
+    skippedDetails?: Array<{ employeeId: string; reason: string }>;
+    warnings?: PayrollRunWarning[];
+  }>(`/payroll/run`, {
     method: "POST",
     body: JSON.stringify({ period, employeeId }),
   });

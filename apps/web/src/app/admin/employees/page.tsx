@@ -70,9 +70,10 @@ import {
   type PrivilegePolicy,
   type PrivilegeViewer,
 } from "@/lib/privileged-accounts";
-import { isHrRole } from "@/lib/roles";
+import { isAdminRole, isHrRole } from "@/lib/roles";
 import { useSession } from "@/lib/use-session";
 import { useEmployeeAccountActions } from "./_components/useEmployeeAccountActions";
+import { IncompleteSalaryNotice } from "./_components/IncompleteSalaryNotice";
 
 const ROLES: { value: string; label: string }[] = [
   { value: "employee", label: "一般員工" },
@@ -745,6 +746,9 @@ export default function EmployeesPage() {
   return (
     <>
       {message && <p className="rounded-lg bg-green-50 px-4 py-2 text-sm text-green-700">{message}</p>}
+
+      {/* 2026-11-17 薪資設定不完整（缺本薪／時薪）提示：HR／平台管理員／會計；名單點進該員工「薪資」分頁。 */}
+      {isAdminRole(viewer?.role) && <IncompleteSalaryNotice variant="employees" />}
 
       {/* 資料異動待審是 HR 的核准佇列（核准／退回只有 HR 能打）；會計只會看到自己的待審單，按了必 403，所以不顯示。 */}
       {canManage && <ProfileChangeQueue onApplied={() => void load()} />}

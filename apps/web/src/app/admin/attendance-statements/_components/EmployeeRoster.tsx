@@ -2,6 +2,7 @@
 
 import { SHEET_STATUS_LABEL } from "@/lib/attendance-sheets-api";
 import { otAlertClass, type RosterRow } from "@/lib/attendance-statements-page";
+import { anomalyPills, type SheetFocus } from "@/lib/sheet-focus";
 
 /**
  * 出勤統計表合併頁左側的員工清單（2026-11-09；取代原「出勤月表」列表頁的每員工一列）：
@@ -21,7 +22,8 @@ export function EmployeeRoster({
 }: {
   rows: readonly RosterRow[];
   selectedId: string;
-  onSelect: (employeeId: string) => void;
+  /** focus：點的是「需處理／提醒」藥丸（直接到該員工的異常清單）。 */
+  onSelect: (employeeId: string, focus?: SheetFocus) => void;
   deptName: (deptId: string | null) => string | null;
 }) {
   if (rows.length === 0) return <p className="px-3 py-6 text-center text-sm text-gray-500">沒有符合條件的員工</p>;
@@ -57,12 +59,6 @@ export function EmployeeRoster({
                   <span className={`tabular-nums ${otAlertClass(s.overtimeMonthlyAlert)}`}>
                     加班 {(s.otTotalMinutes / 60).toFixed(1)}h{s.overtimeMonthlyAlert !== "none" && ` (${s.overtimeMonthlyAlert})`}
                   </span>
-                  {s.anomalyCount.error > 0 && (
-                    <span className="rounded-full bg-red-100 px-1.5 text-red-700">需處理 {s.anomalyCount.error}</span>
-                  )}
-                  {s.anomalyCount.warn > 0 && (
-                    <span className="rounded-full bg-amber-100 px-1.5 text-amber-700">提醒 {s.anomalyCount.warn}</span>
-                  )}
                   {(s.submittedAt || s.approvedAt) && (
                     <span className="w-full text-gray-400">
                       送出 {fmtShort(s.submittedAt)}・核准 {fmtShort(s.approvedAt)}
@@ -71,6 +67,29 @@ export function EmployeeRoster({
                 </div>
               )}
             </button>
+            {s && (s.anomalyCount.error > 0 || s.anomalyCount.warn > 0) && (
+              // 藥丸是獨立按鈕（不能包在列按鈕裡）：點了換到這位員工並展開、篩選異常清單。
+              <div
+                className={`flex flex-wrap gap-1.5 px-3 pb-2 text-[11px] ${selected ? "bg-gray-100" : ""}`}
+                style={selected ? { boxShadow: "inset 3px 0 0 var(--brand)" } : undefined}
+              >
+                {anomalyPills(s.anomalyCount).map((p) => (
+                  <button
+                    key={p.focus}
+                    type="button"
+                    onClick={() => onSelect(row.employeeId, p.focus)}
+                    aria-label={`${row.name}：${p.ariaLabel}`}
+                    className={`cursor-pointer rounded-full px-1.5 underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 ${
+                      p.focus === "anomalies-error"
+                        ? "bg-red-100 text-red-700 hover:bg-red-200 focus-visible:ring-red-400"
+                        : "bg-amber-100 text-amber-700 hover:bg-amber-200 focus-visible:ring-amber-400"
+                    }`}
+                  >
+                    {p.label} ›
+                  </button>
+                ))}
+              </div>
+            )}
           </li>
         );
       })}

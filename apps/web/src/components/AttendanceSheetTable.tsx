@@ -21,6 +21,7 @@ import {
   friendlyError,
   otTierLabelsOf,
   visibleMonthAnomalies,
+  type AnomalySeverity,
   type MonthAnomalyAudience,
   type SheetAnomaly,
   type SheetDayPatch,
@@ -30,6 +31,7 @@ import {
   type SheetView,
 } from "@/lib/attendance-sheets-api";
 import { NO_PUNCH_HINT, NO_PUNCH_LABEL } from "@/lib/sheet-no-punch";
+import { sheetDayRowId } from "@/lib/sheet-focus";
 
 /**
  * 出勤月表共用表格：ESS 自助填報頁與 Admin 審核頁共用同一份版面，靠 `editable`／
@@ -139,11 +141,17 @@ function rowTone(day: SheetDayView, noPunch = false): string {
 export function SheetMonthAnomalies({
   anomalies,
   audience,
+  severity,
+  hrefFor,
 }: {
   anomalies: SheetView["monthAnomalies"] | null | undefined;
   audience: MonthAnomalyAudience;
+  /** 只顯示這個嚴重度（後台狀態藥丸「需處理／提醒」點進來時）；不帶＝全部。 */
+  severity?: AnomalySeverity | null;
+  /** 項目可處理的頁面（lib/sheet-focus monthAnomalyHref）；回 null＝只顯示文字。 */
+  hrefFor?: (code: string) => string | null;
 }) {
-  const items = visibleMonthAnomalies(anomalies, audience);
+  const items = visibleMonthAnomalies(anomalies, audience).filter((i) => !severity || i.severity === severity);
   if (items.length === 0) return null;
   return (
     <section aria-label="本月異常" className="no-print rounded-xl border border-gray-100 p-3">
@@ -153,6 +161,14 @@ export function SheetMonthAnomalies({
           <li key={`${item.code}-${i}`} className={`rounded-lg px-3 py-2 text-xs font-medium ${SEVERITY_STYLE[item.severity]}`}>
             <span className="sr-only">{SEVERITY_TEXT[item.severity]}：</span>
             {item.text}
+            {(() => {
+              const href = hrefFor?.(item.code) ?? null;
+              return href ? (
+                <a href={href} className="ml-2 underline hover:opacity-80" aria-label={`前往處理：${item.text}`}>
+                  前往處理 →
+                </a>
+              ) : null;
+            })()}
           </li>
         ))}
       </ul>
@@ -352,7 +368,10 @@ function DayRow({
   const hasOverride = day.overtime.override != null;
   const beyondCap = day.overtime.beyondCap ?? 0;
   return (
-    <tr className={`border-b border-gray-100 align-top ${rowTone(day, noPunch) || "hover:bg-gray-50"}${hidden ? " hidden print:table-row" : ""}`}>
+    <tr
+      id={sheetDayRowId(day.date)}
+      className={`scroll-mt-24 border-b border-gray-100 align-top ${rowTone(day, noPunch) || "hover:bg-gray-50"}${hidden ? " hidden print:table-row" : ""}`}
+    >
       <td className="whitespace-nowrap py-2 pl-3 pr-2 tabular-nums">{day.date}</td>
       <td className="py-2 pr-2">{weekdayLabel(day.date)}</td>
       <td className="py-2 pr-2 tabular-nums">{hhmm(day.firstIn)}</td>

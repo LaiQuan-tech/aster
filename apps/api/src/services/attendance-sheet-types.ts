@@ -174,6 +174,9 @@ export interface SheetMoney {
   overtimeBaseIncludesAttendanceBonus?: boolean
 }
 
+/** 月表金額試算失敗的原因代碼（見 SheetView.previewError）。 */
+export type MoneyPreviewError = "salary_structure_missing" | "salary_base_missing" | "preview_failed"
+
 /** Full sheet view returned by GET /attendance-sheets/:id (and similar). */
 export interface SheetView {
   id: string
@@ -199,6 +202,12 @@ export interface SheetView {
   monthAnomalies: SheetAnomaly[]
   totals: SheetTotals
   money: SheetMoney | null
+  /**
+   * 2026-11-17：money 為 null 的原因（只有即時試算會帶；凍結快照沒有）。
+   * salary_structure_missing＝沒有薪資結構；salary_base_missing＝有結構但本薪與時薪都空／0（引擎拒算）；
+   * preview_failed＝其他試算錯誤。有算出金額或沒要求金額＝null／不帶。
+   */
+  previewError?: MoneyPreviewError | null
   anomalyCount: { error: number; warn: number; info: number }
   /** True once status is 'locked' — UI should render read-only. */
   frozen: boolean

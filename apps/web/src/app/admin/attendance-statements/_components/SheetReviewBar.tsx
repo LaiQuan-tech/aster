@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Empty, ErrorText, Pill } from "@/components/admin-ui";
 import { AttendanceSheetTable, SheetMonthAnomalies } from "@/components/AttendanceSheetTable";
 import {
@@ -15,12 +15,35 @@ import {
   reopenAttendanceSheet,
   returnAttendanceSheet,
   SHEET_STATUS_LABEL,
+  type AnomalySeverity,
   type SheetDayPatch,
   type SheetView,
 } from "@/lib/attendance-sheets-api";
 import { getRuleConfigVersions, type RuleConfigVersion } from "@/lib/admin-api";
 import { sheetActions } from "@/lib/attendance-statements-page";
 import { SheetSnapshots } from "./SheetSnapshots";
+import {
+  SHEET_FOCUS_EVENT,
+  anomalyPills,
+  approveHint,
+  filterBySeverity,
+  monthAnomalyHref,
+  parseSheetFocusHash,
+  requestSheetFocus,
+  severityFilterOf,
+  sheetDayRowId,
+  statusPillFocus,
+  type SheetFocus,
+} from "@/lib/sheet-focus";
+
+/** 可點藥丸的共用樣式（hover、游標、底線、鍵盤焦點框）。 */
+const PILL_LINK =
+  "cursor-pointer rounded-full px-2 py-0.5 text-xs underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1";
+
+/** 等 React 把剛展開的區塊畫出來再捲動（兩個 frame）。 */
+function afterPaint(fn: () => void) {
+  requestAnimationFrame(() => requestAnimationFrame(fn));
+}
 
 /**
  * 出勤統計表合併頁的「月表狀態列」（2026-11-09；原 /admin/attendance-sheets/[id] 詳細頁的功能搬到這裡）：
@@ -79,6 +102,68 @@ export function SheetReviewBar({
   const [showAnomalies, setShowAnomalies] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
   const [ruleVersions, setRuleVersions] = useState<RuleConfigVersion[] | null>(null);
+  /** 異常清單篩選（藥丸「需處理／提醒」點進來時）；null＝全部。 */
+  const [severity, setSeverity] = useState<AnomalySeverity | null>(null);
+  const anomaliesRef = useRef<HTMLDivElement | null>(null);
+  const approveRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 2026-11-17 狀態藥丸可點：#anomalies(-error|-warn) 展開異常清單（並篩選）捲過去；#approve 捲到核准區、
+   * 焦點移到第一顆可按的按鈕。同頁由 requestSheetFocus 廣播事件；跨頁連結靠載入月表時讀 hash。
+   */
+  const applyFocus = useCallback((focus: SheetFocus) => {
+    if (focus === "approve") {
+      afterPaint(() => {
+        approveRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        const first = approveRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])");
+        first?.focus({ preventScroll: true });
+      });
+      return;
+    }
+    setShowAnomalies(true);
+    setSeverity(severityFilterOf(focus));
+    afterPaint(() => {
+      anomaliesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      anomaliesRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  useEffect(() => {
+    const onFocus = (e: Event) => {
+      const f = (e as CustomEvent<SheetFocus>).detail;
+      if (f) applyFocus(f);
+    };
+    const onHash = () => {
+      const f = parseSheetFocusHash(window.location.hash);
+      if (f) applyFocus(f);
+    };
+    window.addEventListener(SHEET_FOCUS_EVENT, onFocus);
+    window.addEventListener("hashchange", onHash);
+    return () => {
+      window.removeEventListener(SHEET_FOCUS_EVENT, onFocus);
+      window.removeEventListener("hashchange", onHash);
+    };
+  }, [applyFocus]);
+
+  // 跨頁連結（…?employee=&period=#anomalies-error）：月表載入後套用一次。
+  const loadedSheetId = sheet?.id ?? null;
+  useEffect(() => {
+    if (!loadedSheetId) return;
+    const f = parseSheetFocusHash(window.location.hash);
+    if (f) applyFocus(f);
+  }, [loadedSheetId, applyFocus]);
+
+  /** 逐日異常 → 展開逐日月表、捲到那一天並短暫醒目。 */
+  function goToDay(date: string) {
+    setShowDetail(true);
+    afterPaint(() => {
+      const row = document.getElementById(sheetDayRowId(date));
+      if (!row) return;
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.add("ring-2", "ring-amber-400");
+      window.setTimeout(() => row.classList.remove("ring-2", "ring-amber-400"), 2400);
+    });
+  }
 
   const load = useCallback(async () => {
     if (!sheetId) {
@@ -100,6 +185,7 @@ export function SheetReviewBar({
   useEffect(() => {
     setMessage(null);
     setError(null);
+    setSeverity(null);
   }, [sheetId]);
 
   useEffect(() => {
@@ -225,7 +311,13 @@ export function SheetReviewBar({
           : `本月適用規則 v${matchedRuleVersion.version}（系統預設）`
         : "本月適用規則：預設規則";
 
-  const dayAnomalies = sheet.days.flatMap((d) => d.anomalies.map((a, i) => ({ date: d.date, a, key: `${d.date}-${a.code}-${i}` })));
+  const allDayAnomalies = sheet.days.flatMap((d) =>
+    d.anomalies.map((a, i) => ({ date: d.date, a, severity: a.severity, key: `${d.date}-${a.code}-${i}` })),
+  );
+  const dayAnomalies = filterBySeverity(allDayAnomalies, severity);
+  const pills = anomalyPills(sheet.anomalyCount);
+  const statusFocus = statusPillFocus(sheet.status);
+  const hint = approveHint(sheet.status, sheet.anomalyCount.error);
   const btn = "rounded-md px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40";
 
   return (
@@ -233,13 +325,35 @@ export function SheetReviewBar({
       <div className="no-print">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-semibold text-gray-900">出勤月表</span>
-        <Pill tone={STATUS_TONE[sheet.status] ?? "gray"}>{SHEET_STATUS_LABEL[sheet.status]}</Pill>
-        {sheet.anomalyCount.error > 0 && (
-          <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-700">需處理 {sheet.anomalyCount.error}</span>
+        {statusFocus ? (
+          <button
+            type="button"
+            onClick={() => requestSheetFocus(statusFocus)}
+            aria-label={`月表狀態：${SHEET_STATUS_LABEL[sheet.status]}，前往送出／核准操作區`}
+            className="cursor-pointer rounded-full hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
+            data-testid="sheet-status-pill"
+          >
+            <Pill tone={STATUS_TONE[sheet.status] ?? "gray"}>{SHEET_STATUS_LABEL[sheet.status]} ›</Pill>
+          </button>
+        ) : (
+          <Pill tone={STATUS_TONE[sheet.status] ?? "gray"}>{SHEET_STATUS_LABEL[sheet.status]}</Pill>
         )}
-        {sheet.anomalyCount.warn > 0 && (
-          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">提醒 {sheet.anomalyCount.warn}</span>
-        )}
+        {pills.map((p) => (
+          <button
+            key={p.focus}
+            type="button"
+            onClick={() => requestSheetFocus(p.focus)}
+            aria-label={p.ariaLabel}
+            data-testid={`sheet-pill-${p.focus}`}
+            className={`${PILL_LINK} ${
+              p.focus === "anomalies-error"
+                ? "bg-red-100 text-red-700 hover:bg-red-200 focus-visible:ring-red-400"
+                : "bg-amber-100 text-amber-700 hover:bg-amber-200 focus-visible:ring-amber-400"
+            }`}
+          >
+            {p.label} ›
+          </button>
+        ))}
         {loading && <span className="text-xs text-gray-400">更新中…</span>}
       </div>
 
@@ -259,7 +373,7 @@ export function SheetReviewBar({
         </div>
       )}
 
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div ref={approveRef} id="approve" className="mt-3 flex scroll-mt-24 flex-wrap gap-2" aria-label="月表簽核操作">
         <button
           type="button"
           onClick={onApprove}
@@ -287,6 +401,21 @@ export function SheetReviewBar({
           匯出月表 xlsx
         </button>
       </div>
+      {hint && (
+        <p className="mt-2 text-xs text-amber-800" data-testid="approve-hint">
+          {hint.focus ? (
+            <button
+              type="button"
+              onClick={() => requestSheetFocus(hint.focus!)}
+              className="cursor-pointer text-left underline hover:text-amber-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+            >
+              {hint.text} → 查看異常清單
+            </button>
+          ) : (
+            hint.text
+          )}
+        </p>
+      )}
 
       <div className="mt-3 flex flex-wrap gap-2 border-t border-gray-100 pt-3">
         <button
@@ -296,7 +425,7 @@ export function SheetReviewBar({
           className="text-sm font-medium hover:underline"
           style={{ color: "var(--brand)" }}
         >
-          {showAnomalies ? "▾" : "▸"} 異常清單（本月 {sheet.monthAnomalies.length}、逐日 {dayAnomalies.length}）
+          {showAnomalies ? "▾" : "▸"} 異常清單（本月 {sheet.monthAnomalies.length}、逐日 {allDayAnomalies.length}）
         </button>
         <button
           type="button"
@@ -310,15 +439,35 @@ export function SheetReviewBar({
       </div>
 
       {showAnomalies && (
-        <div className="mt-3 space-y-3">
-          <SheetMonthAnomalies anomalies={sheet.monthAnomalies} audience="admin" />
+        <div ref={anomaliesRef} id="anomalies" tabIndex={-1} className="mt-3 scroll-mt-24 space-y-3 focus:outline-none" aria-label="異常清單">
+          {severity && (
+            <p className="flex flex-wrap items-center gap-2 text-xs text-gray-600" data-testid="anomaly-filter">
+              <span>只看{severity === "error" ? "需處理" : "提醒"}項目</span>
+              <button type="button" onClick={() => setSeverity(null)} className="underline hover:text-gray-900">
+                顯示全部
+              </button>
+            </p>
+          )}
+          <SheetMonthAnomalies
+            anomalies={sheet.monthAnomalies}
+            audience="admin"
+            severity={severity}
+            hrefFor={(code) => monthAnomalyHref(code, sheet.employeeId)}
+          />
           {dayAnomalies.length > 0 ? (
             <section aria-label="逐日異常" className="rounded-xl border border-gray-100 p-3">
               <p className="mb-2 text-xs font-medium text-gray-500">逐日異常</p>
               <ul className="space-y-1">
                 {dayAnomalies.map(({ date, a, key }) => (
                   <li key={key} className="flex flex-wrap items-center gap-2 text-xs">
-                    <span className="tabular-nums text-gray-600">{date.slice(5)}</span>
+                    <button
+                      type="button"
+                      onClick={() => goToDay(date)}
+                      aria-label={`到逐日月表 ${date}：${dayAnomalyText(a)}`}
+                      className="cursor-pointer tabular-nums text-gray-600 underline hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
+                    >
+                      {date.slice(5)} ›
+                    </button>
                     <span
                       className={`rounded-full px-2 py-0.5 font-medium ${
                         a.severity === "error"
@@ -335,7 +484,9 @@ export function SheetReviewBar({
               </ul>
             </section>
           ) : (
-            sheet.monthAnomalies.length === 0 && <p className="text-xs text-gray-400">本月沒有異常</p>
+            filterBySeverity(sheet.monthAnomalies, severity).length === 0 && (
+              <p className="text-xs text-gray-400">{severity ? "沒有符合篩選的異常" : "本月沒有異常"}</p>
+            )
           )}
         </div>
       )}

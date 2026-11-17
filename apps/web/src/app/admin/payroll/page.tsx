@@ -43,6 +43,8 @@ import {
 import { payrollPeriodErrorMessage } from "@/lib/payroll-periods-api";
 import { errorMessageOf } from "@/lib/period-closed";
 import { EmployeeMonthPanel } from "./_components/EmployeeMonthPanel";
+import { IncompleteSalaryNotice } from "../employees/_components/IncompleteSalaryNotice";
+import { payrollSkipText } from "@/lib/salary-completeness";
 import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
 import { PeriodLockCard } from "./_components/PeriodLockCard";
 import { SEND_SKIP_LABEL, money, payslipTotalsOf, PayslipLedgerTable, type PayslipRow } from "./_components/payslip-bits";
@@ -205,7 +207,8 @@ export default function PayrollMonthPage() {
       setRunMsg({
         ok: true,
         text:
-          `已執行 ${period} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
+          `已執行 ${period} 薪資作業：產生 ${result.generated} 筆` +
+          payrollSkipText(result, empName) +
           (adjustmentCount > 0 ? `；含加減項（前期更正）${adjustmentCount} 筆` : "") +
           (missingPension.length > 0
             ? `；算不出勞退提繳工資（雇主提撥與自提為 0，請到員工內頁的「薪資」分頁手填）：${missingPension.map((id) => empName(id)).join("、")}`
@@ -342,6 +345,10 @@ export default function PayrollMonthPage() {
           >
             匯出工資清冊 CSV
           </Button>
+        </div>
+        {/* 2026-11-17 執行薪資前：缺本薪／時薪的人列名（會被跳過），點名字到該員工「薪資」分頁補。 */}
+        <div className="mt-3">
+          <IncompleteSalaryNotice variant="payroll" reloadKey={refreshKey} />
         </div>
         {runMsg && (
           <p role={runMsg.ok ? "status" : "alert"} className={`mt-3 break-words text-sm ${runMsg.ok ? "text-green-700" : "text-red-600"}`}>

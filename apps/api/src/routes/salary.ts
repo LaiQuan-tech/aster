@@ -8,7 +8,7 @@ import {
 } from "@hr/rules"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { logger } from "../lib/logger.js"
@@ -19,6 +19,13 @@ import { todayKey } from "../lib/tz.js"
 import { getRequestContext } from "../lib/request-context.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { recordSalarySaveHistory, type SaveHistoryResult } from "../services/salary-history.js"
+import {
+  SALARY_STRUCTURE_ISSUE_LABELS,
+  SALARY_STRUCTURE_ISSUE_MESSAGES,
+  hasWageBasis,
+  salaryStructureIssue,
+  type SalaryStructureIssue,
+} from "../services/salary-completeness.js"
 
 export const salaryRouter = Router()
 
@@ -170,6 +177,91 @@ salaryRouter.get(
   },
 )
 
+export interface IncompleteSalaryEntry {
+  employeeId: string
+  name: string
+  empNo: string | null
+  method: string
+  issue: SalaryStructureIssue
+  /** 短標籤（月薪制缺本薪…）。 */
+  label: string
+  /** 本薪與時薪都沒有 → 執行薪資時引擎無法計算，會被跳過（hourly_wage_missing）。 */
+  skippedByPayroll: boolean
+}
+
+/**
+ * 純函式：薪資結構列 ＋ 員工 → 設定不完整的名單（已離職／停用的人不列；依員編、姓名排序）。
+ * 判準同 PUT 存檔驗證（services/salary-completeness.ts）。
+ */
+export function incompleteSalaryEntries(
+  salaries: Array<{ employee_id: string; method: string | null; base_salary: unknown; daily_wage: unknown; hourly_wage: unknown }>,
+  employees: Array<{ id: string; name: string | null; emp_no: string | null; status?: string | null; terminated_at?: string | null }>,
+  today: string,
+): IncompleteSalaryEntry[] {
+  const empById = new Map(employees.map((e) => [e.id, e] as const))
+  const out: IncompleteSalaryEntry[] = []
+  for (const s of salaries) {
+    const e = empById.get(s.employee_id)
+    if (!e) continue
+    if (e.status && e.status !== "active") continue
+    if (e.terminated_at && String(e.terminated_at).slice(0, 10) <= today) continue
+    const input = {
+      method: s.method,
+      baseSalary: numOrNull(s.base_salary),
+      dailyWage: numOrNull(s.daily_wage),
+      hourlyWage: numOrNull(s.hourly_wage),
+    }
+    const issue = salaryStructureIssue(input)
+    if (!issue) continue
+    out.push({
+      employeeId: e.id,
+      name: e.name ?? "",
+      empNo: e.emp_no ?? null,
+      method: s.method ?? "monthly",
+      issue,
+      label: SALARY_STRUCTURE_ISSUE_LABELS[issue],
+      skippedByPayroll: !hasWageBasis(input),
+    })
+  }
+  return out.sort((a, b) => (a.empNo ?? "\uffff").localeCompare(b.empNo ?? "\uffff") || a.name.localeCompare(b.name))
+}
+
+// GET /salary-structures/incomplete — 薪資設定不完整的在職員工（2026-11-17；HR／平台管理員／會計）。
+// 只回姓名、員編、計薪方式與缺哪一欄，不回金額。
+salaryRouter.get(
+  "/salary-structures/incomplete",
+  requireAuth,
+  requireTenant,
+  requireFinance,
+  async (_req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    try {
+      const { data: sal, error: salErr } = await supabaseAdmin
+        .from("salary_structures")
+        .select("employee_id, method, base_salary, daily_wage, hourly_wage")
+        .eq("tenant_id", tenantId)
+      if (salErr) throw new Error(`GET /salary-structures/incomplete (salary_structures): ${salErr.message}`)
+      const salaries = (sal ?? []) as Array<{ employee_id: string; method: string | null; base_salary: unknown; daily_wage: unknown; hourly_wage: unknown }>
+      const ids = salaries.map((r) => r.employee_id)
+      let employees: Array<{ id: string; name: string | null; emp_no: string | null; status?: string | null; terminated_at?: string | null }> = []
+      if (ids.length > 0) {
+        const { data: emps, error: empErr } = await supabaseAdmin
+          .from("employees")
+          .select("id, name, emp_no, status, terminated_at")
+          .eq("tenant_id", tenantId)
+          .in("id", ids)
+        if (empErr) throw new Error(`GET /salary-structures/incomplete (employees): ${empErr.message}`)
+        employees = (emps ?? []) as typeof employees
+      }
+      const today = todayKey(await getTenantTimezone(tenantId))
+      const entries = incompleteSalaryEntries(salaries, employees, today)
+      res.status(200).json({ count: entries.length, employees: entries })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
 // PUT /salary/:employeeId — upsert the structure (one per tenant+employee).
 salaryRouter.put(
   "/salary/:employeeId",
@@ -182,8 +274,47 @@ salaryRouter.put(
     const parsed = upsertSchema.safeParse(req.body)
     if (!parsed.success) {
       const hourlyWageMissing = parsed.error.issues.some((i) => i.message === "hourly_wage_required")
-      res.status(400).json({ error: hourlyWageMissing ? "hourly_wage_required" : "invalid_body", details: parsed.error.flatten() })
+      res.status(400).json({
+        error: hourlyWageMissing ? "hourly_wage_required" : "invalid_body",
+        ...(hourlyWageMissing ? { message: SALARY_STRUCTURE_ISSUE_MESSAGES.hourly_wage_required } : {}),
+        details: parsed.error.flatten(),
+      })
       return
+    }
+
+    // 2026-11-17 薪資設定完整度：這次有動到計薪方式／本薪／日薪／時薪 → 以「存檔後」的整組值檢查
+    //（月薪制本薪 > 0、時薪制時薪 > 0、按出勤天數制日薪 > 0 且有時薪或本薪當基準）。只擋新存檔；
+    // 沒碰這四欄的 PUT（只改投保、勞退…）照存，既有資料不動。
+    const touchesWage =
+      parsed.data.method !== undefined ||
+      parsed.data.baseSalary !== undefined ||
+      parsed.data.dailyWage !== undefined ||
+      parsed.data.hourlyWage !== undefined
+    if (touchesWage) {
+      let pw: Record<string, unknown> | null
+      try {
+        const { data: prevWage, error: prevWageErr } = await supabaseAdmin
+          .from("salary_structures")
+          .select("method, base_salary, daily_wage, hourly_wage")
+          .eq("tenant_id", tenantId)
+          .eq("employee_id", employeeId)
+          .maybeSingle()
+        if (prevWageErr) throw new Error(`PUT /salary/${employeeId} (wage check): ${prevWageErr.message}`)
+        pw = (prevWage as Record<string, unknown> | null) ?? null
+      } catch (err) {
+        next(err)
+        return
+      }
+      const issue = salaryStructureIssue({
+        method: parsed.data.method ?? ((pw?.method as string | null | undefined) ?? null),
+        baseSalary: parsed.data.baseSalary !== undefined ? parsed.data.baseSalary : numOrNull(pw?.base_salary),
+        dailyWage: parsed.data.dailyWage !== undefined ? parsed.data.dailyWage : numOrNull(pw?.daily_wage),
+        hourlyWage: parsed.data.hourlyWage !== undefined ? parsed.data.hourlyWage : numOrNull(pw?.hourly_wage),
+      })
+      if (issue) {
+        res.status(400).json({ error: issue, message: SALARY_STRUCTURE_ISSUE_MESSAGES[issue] })
+        return
+      }
     }
 
     const row: Record<string, unknown> = {

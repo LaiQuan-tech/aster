@@ -5,6 +5,8 @@ import { Button, Card, Empty, ErrorText, Pill, useToast } from "@/components/adm
 import { MonthPicker } from "@/components/MonthPicker";
 import { StatementTable } from "@/components/StatementTable";
 import { apiErrorMessage } from "@/lib/api-client";
+import { SALARY_BASE_MISSING_NOTE, missingMoneyNote, salarySettingsHref } from "@/lib/salary-completeness";
+import { requestSheetFocus } from "@/lib/sheet-focus";
 import {
   downloadStatementXlsx,
   getEmployeeStatements,
@@ -43,7 +45,11 @@ function sourceNote(data: EmployeeStatements, kind: StatementTab): string | null
   if (!summary.hasAttendance) notes.push("此月尚無出勤月表，逐日與時數為空白");
   if (data.canSeeMoney) {
     if (summary.moneySource === "preview") notes.push("尚未產生薪資單，金額為月表試算");
-    else if (summary.moneySource === null) notes.push("沒有薪資資料（未設定薪資結構或尚未產生薪資單），金額顯示「—」");
+    else if (summary.moneySource === null) {
+      // 2026-11-17：依 API 帶的原因說清楚（缺本薪／時薪另外顯示＋連結，見 SalaryBaseMissingNote）。
+      const missing = missingMoneyNote(summary.previewError);
+      if (missing) notes.push(missing);
+    }
     else if (summary.payslipStatus === "draft") notes.push("薪資單尚未定案（草稿）");
   } else if (kind === "attendance") {
     notes.push("金額欄位僅 HR 可見");
@@ -148,7 +154,20 @@ export function EmployeeStatementsPanel({
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-base font-semibold text-gray-900">{label}</h2>
           {data && period && data.periods.includes(period) && <Pill tone="green">有資料</Pill>}
-          {live && att && (frozen ? <Pill tone="blue">已核准（凍結）</Pill> : att.hasAttendance ? <Pill tone="amber">未核准（即時）</Pill> : null)}
+          {live && att && (frozen ? (
+            <Pill tone="blue">已核准（凍結）</Pill>
+          ) : att.hasAttendance ? (
+            // 2026-11-17：可點 → 捲到同頁「出勤月表」卡片的核准區（前置條件不足時那裡有說明可點到異常清單）。
+            <button
+              type="button"
+              onClick={() => requestSheetFocus("approve")}
+              aria-label="未核准（即時）：前往出勤月表的核准操作區"
+              className="cursor-pointer rounded-full hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+              data-testid="statement-unapproved-pill"
+            >
+              <Pill tone="amber">未核准（即時） ›</Pill>
+            </button>
+          ) : null)}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {period && !controlled && <MonthPicker value={period} onChange={(p) => void load(p)} disabled={loading} />}
@@ -214,6 +233,15 @@ export function EmployeeStatementsPanel({
         <p className="mb-3 text-xs text-gray-500 print:hidden">
           {liveNote}
           {att?.computedAt ? `（最後計算 ${fmtDateTime(att.computedAt)}）` : ""}
+        </p>
+      )}
+      {data?.canSeeMoney && summary?.moneySource === null && summary.previewError === "salary_base_missing" && (
+        <p className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 print:hidden" role="alert" data-testid="salary-base-missing-note">
+          {SALARY_BASE_MISSING_NOTE}。{" "}
+          {/* 一般 <a>：在員工內頁本身也要整頁換到「薪資」分頁（分頁只在載入時讀網址）。 */}
+          <a href={salarySettingsHref(employeeId)} className="font-medium underline" data-testid="salary-settings-link">
+            前往薪資設定
+          </a>
         </p>
       )}
       {note && <p className="mb-3 text-xs text-amber-700 print:hidden">{note}</p>}

@@ -30,6 +30,7 @@ import { periodStatusDetail, periodStatusLabel } from "@/lib/payroll-periods-api
 import type { EmployeeStatements } from "@/lib/statements-api";
 import { EmployeeStatementsPanel } from "../employees/_components/EmployeeStatementsPanel";
 import { EmployeeRoster } from "./_components/EmployeeRoster";
+import { requestSheetFocus, type SheetFocus } from "@/lib/sheet-focus";
 import { SheetReviewBar } from "./_components/SheetReviewBar";
 
 /**
@@ -125,8 +126,9 @@ export default function AttendanceStatementsPage() {
   // 2) 網址同步（可分享、重新整理保留）。
   useEffect(() => {
     if (!queryReady) return;
-    const next = `${window.location.pathname}${buildStatementsSearch({ employee: employeeId || null, period, status, dept, anomaly: onlyAnomaly })}`;
-    if (next !== `${window.location.pathname}${window.location.search}`) window.history.replaceState(window.history.state, "", next);
+    // 保留 hash（#anomalies-error／#approve：狀態藥丸跨頁連結的落點，月表卡片載入後才套用）。
+    const next = `${window.location.pathname}${buildStatementsSearch({ employee: employeeId || null, period, status, dept, anomaly: onlyAnomaly })}${window.location.hash}`;
+    if (next !== `${window.location.pathname}${window.location.search}${window.location.hash}`) window.history.replaceState(window.history.state, "", next);
   }, [queryReady, employeeId, period, status, dept, onlyAnomaly]);
 
   useEffect(() => {
@@ -203,8 +205,13 @@ export default function AttendanceStatementsPage() {
   const selectedRow = roster.find((r) => r.employeeId === employeeId) ?? null;
   const selectedSheet = sheets.find((s) => s.employeeId === employeeId) ?? null;
 
-  function selectEmployee(id: string) {
+  /** 點清單列＝換員工（清掉上一位的 #錨點）；點列上的「需處理／提醒」藥丸＝換員工並直接到異常清單。 */
+  function selectEmployee(id: string, focus?: SheetFocus) {
     setEmployeeId(id);
+    if (focus) requestSheetFocus(focus);
+    else if (window.location.hash) {
+      window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}`);
+    }
     if (window.matchMedia?.("(max-width: 1023px)").matches) {
       setRosterOpen(false);
       window.scrollTo({ top: 0, behavior: "smooth" });

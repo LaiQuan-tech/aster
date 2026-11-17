@@ -1,4 +1,5 @@
 import { apiDownload, apiFetch } from "./api-client";
+import type { StatementPreviewError } from "./salary-completeness";
 
 /**
  * 出勤統計表／薪資明細表（Excel 版面）的 API（apps/api/src/routes/employee-statements.ts）。
@@ -71,6 +72,11 @@ export interface StatementSummary {
   sheetStatus: string | null;
   moneySource: "payslip" | "preview" | null;
   payslipStatus: string | null;
+  /**
+   * 2026-11-17：moneySource 為 null 的原因。salary_base_missing＝薪資結構缺本薪／時薪；
+   * salary_structure_missing＝沒有薪資結構；preview_failed＝試算錯誤；null／舊 API 沒有＝原因不明。
+   */
+  previewError?: StatementPreviewError | null;
 }
 
 /** 出勤統計表：另帶「請假單」「支出表」兩頁與月表凍結狀態（2026-11-09）。舊 API 沒有這些欄位。 */

@@ -20,7 +20,8 @@ import type {
   StatementMoney,
   StatementSalaryInfo,
 } from "../lib/statements/types.js"
-import type { SheetMoney, SheetView } from "./attendance-sheet-types.js"
+import type { MoneyPreviewError, SheetMoney, SheetView } from "./attendance-sheet-types.js"
+import { hasWageBasis } from "./salary-completeness.js"
 import { findSheet, generateSheets, sheetViewFromRow } from "./attendance-sheets.js"
 import { PeriodClosedError, isPeriodClosed } from "./period-lock.js"
 import { buildPayrollInputs, loadRuleConfigFor } from "./payroll-inputs.js"
@@ -294,6 +295,7 @@ async function loadSalaryInfo(tenantId: string, employeeId: string, period: stri
   return {
     laborInsuredSalary: insured != null && Number(insured) > 0 ? Number(insured) : null,
     nhiDependents: inputs.salary?.nhiDependents ?? null,
+    wageBasisMissing: !hasWageBasis(inputs.salary ?? {}),
     // 2026-11-10 表尾「投保薪資調整」：生效日在該月底以前的最近 3 筆（表未套用＝空）。
     insuredAdjustments: await loadInsuredAdjustmentsForStatement(tenantId, employeeId, monthRangeKeys(period).to),
   }
@@ -438,6 +440,11 @@ export async function loadStatementData(
   if (includeMoney) {
     money = payslipMoney ?? (!finalizedOnly && attendance?.money ? moneyFromPreview(attendance.money) : null)
   }
+  // 2026-11-17：沒有金額時說清楚為什麼（月表試算的原因優先；凍結月表／沒月表就看薪資結構本身）。
+  let previewError: MoneyPreviewError | null = null
+  if (includeMoney && !finalizedOnly && !money) {
+    previewError = attendance?.previewError ?? (salary?.wageBasisMissing ? "salary_base_missing" : null)
+  }
 
   return {
     period,
@@ -446,6 +453,7 @@ export async function loadStatementData(
     company,
     attendance,
     money,
+    previewError,
     expenses,
     salary,
     leaveNames,
@@ -466,6 +474,11 @@ export interface StatementSummary {
   /** 金額來源：payslip＝薪資單、preview＝月表試算、null＝沒有金額（或看不到金額）。 */
   moneySource: "payslip" | "preview" | null
   payslipStatus: string | null
+  /**
+   * 2026-11-17：moneySource 為 null 的原因（salary_base_missing／salary_structure_missing／preview_failed）；
+   * 有金額、看不到金額或原因不明＝null。前端依此顯示具體白話與「去補薪資設定」連結。
+   */
+  previewError: MoneyPreviewError | null
 }
 
 /** 出勤統計表：另帶同一份資料排出的「請假單」「支出表」兩頁，以及月表凍結狀態（2026-11-09）。 */
@@ -491,6 +504,7 @@ export function attendanceStatementOf(data: StatementData, canSeeMoney: boolean)
     sheetStatus: view?.status ?? null,
     moneySource: canSeeMoney ? (data.money?.source ?? null) : null,
     payslipStatus: canSeeMoney ? (data.money?.payslipStatus ?? null) : null,
+    previewError: canSeeMoney && !data.money ? (data.previewError ?? null) : null,
     frozen: view?.frozen === true,
     approvedAt: view?.approvedAt ?? null,
     lockedAt: view?.lockedAt ?? null,
@@ -505,6 +519,7 @@ export function payslipStatementOf(data: StatementData): StatementSummary {
     sheetStatus: data.attendance?.status ?? null,
     moneySource: data.money?.source ?? null,
     payslipStatus: data.money?.payslipStatus ?? null,
+    previewError: data.money ? null : (data.previewError ?? null),
   }
 }
 

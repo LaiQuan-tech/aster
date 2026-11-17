@@ -25,6 +25,8 @@ import { pensionWageHintText, pensionWageInputCheck, type FixedAllowanceSummary 
 import { FixedAllowancesCard } from "../../payroll/_components/FixedAllowancesCard";
 import { salaryFormChanges, todayDateKey, type SalaryFormValues } from "@/lib/salary-history";
 import { SalaryHistorySection } from "./SalaryHistorySection";
+import { apiErrorMessage } from "@/lib/api-client";
+import { salaryFormError } from "@/lib/salary-completeness";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -149,6 +151,12 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
     if (!empId || saving) return;
     setSalaryMsg(null);
     setInsuredHint(null);
+    // 2026-11-17：月薪制本薪 > 0、時薪制時薪 > 0、按出勤天數制日薪 > 0 且有時薪／本薪基準（API 也會擋）。
+    const wageError = salaryFormError({ method, baseSalary, dailyWage, hourlyWage });
+    if (wageError) {
+      setSalaryMsg(wageError);
+      return;
+    }
     const wageCheck = pensionWageInputCheck(pensionWage, allowanceSummary?.pension?.levels);
     if (wageCheck.error) {
       setSalaryMsg(wageCheck.error);
@@ -217,7 +225,8 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
       }
       return true;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "儲存失敗";
+      // API 的中文訊息（例如「月薪制的本薪必須大於 0」）優先，不顯示「[400] base_salary_required」。
+      const msg = apiErrorMessage(err, "儲存失敗");
       setSalaryMsg(msg);
       if (change) setChangeError(msg);
       return false;
@@ -405,7 +414,15 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
           )}
           <div className="flex flex-wrap items-center gap-3">
             <PrimaryButton type="submit" disabled={saving}>{saving ? "儲存中…" : "儲存薪資資料"}</PrimaryButton>
-            {salaryMsg && <span className="text-sm text-green-600">{salaryMsg}</span>}
+            {salaryMsg && (
+              <span
+                role={salaryMsg.startsWith("已儲存") ? "status" : "alert"}
+                className={`text-sm ${salaryMsg.startsWith("已儲存") ? "text-green-600" : "text-red-600"}`}
+                data-testid="salary-save-msg"
+              >
+                {salaryMsg}
+              </span>
+            )}
           </div>
           {insuredHint && (
             <p className="rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-800">{insuredHint}</p>
