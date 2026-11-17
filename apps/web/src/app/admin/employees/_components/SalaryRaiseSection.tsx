@@ -19,6 +19,7 @@ import {
   cancelSalaryRaise,
   completeSalaryRaise,
   createSalaryRaise,
+  defaultCompletePension,
   getSalaryRaises,
   periodText,
   raisePeriodText,
@@ -56,6 +57,7 @@ export function SalaryRaiseSection({
   const [doneForm, setDoneForm] = useState(EMPTY_DONE);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pensionSuggested, setPensionSuggested] = useState(false);
 
   const load = useCallback(async () => {
     if (!employeeId) return;
@@ -75,6 +77,11 @@ export function SalaryRaiseSection({
   const pending = data?.pending ?? null;
   const past = (data?.raises ?? []).filter((r) => r.status !== "pending");
   const baseNum = currentBase.trim() ? Number(currentBase.replace(/,/g, "")) : null;
+  const hints = data?.hints;
+  const hourlyNote =
+    hints?.hourlyNegotiated && hints.hourlyWage != null
+      ? `此員工的手填時薪 ${formatMoney(hints.hourlyWage, { maximumFractionDigits: 4 })} 與本薪 ÷ ${hints.divisor} 不同，視為議定時薪：調薪中仍用手填時薪計請假／加班，調薪完成時也不會自動改，請確認是否要另外調整。`
+      : null;
 
   function openStart() {
     setStartForm({ ...EMPTY_START, effectiveDate: todayDateKey() });
@@ -89,8 +96,9 @@ export function SalaryRaiseSection({
       completedPeriod: now < pending.startPeriod ? pending.startPeriod : now,
       labor: pending.newLaborInsuredSalary != null ? String(pending.newLaborInsuredSalary) : "",
       health: pending.newHealthInsuredSalary != null ? String(pending.newHealthInsuredSalary) : "",
-      pension: pending.newPensionWage != null ? String(pending.newPensionWage) : "",
+      pension: defaultCompletePension(pending.newPensionWage, data?.hints).value,
     });
+    setPensionSuggested(defaultCompletePension(pending.newPensionWage, data?.hints).suggested);
     setError(null);
     setDoneOpen(true);
   }
@@ -161,7 +169,7 @@ export function SalaryRaiseSection({
           </p>
           <p className="mt-1 text-xs">
             薪資照新本薪發（請假、加班、加給以新時薪計），勞保／健保仍照舊投保級距扣；出勤統計表「薪資」欄顯示原本薪，另列調薪差額。
-            政府端投保調整辦完後按「調薪完成」。
+            政府端投保調整辦完後按「調薪完成」。月中生效也整月適用（不按日比例）。
             {pending.newLaborInsuredSalary != null || pending.newHealthInsuredSalary != null
               ? ` 預定新投保：勞保 ${formatMoney(pending.newLaborInsuredSalary)}、健保 ${formatMoney(pending.newHealthInsuredSalary)}。`
               : ""}
@@ -174,6 +182,7 @@ export function SalaryRaiseSection({
               取消調薪中
             </Button>
           </div>
+          {hourlyNote && <p className="mt-1 text-xs" data-testid="salary-raise-hourly-note">{hourlyNote}</p>}
           {error && !doneOpen && <ErrorText>{error}</ErrorText>}
         </div>
       ) : (
@@ -200,8 +209,9 @@ export function SalaryRaiseSection({
       <BottomSheet open={startOpen} onClose={() => (busy ? undefined : setStartOpen(false))} title="標記調薪中">
         <form className="space-y-3" onSubmit={onStart} data-testid="salary-raise-start-form">
           <p className="text-sm text-gray-600">
-            目前本薪 {formatMoney(baseNum)}。生效日所在月份起，薪資照新本薪發，勞保／健保照舊級距扣，直到按「調薪完成」。
+            目前本薪 {formatMoney(baseNum)}。生效日所在月份起（月中生效也整月適用，不按日比例），薪資照新本薪發，勞保／健保照舊級距扣，直到按「調薪完成」。生效月之前不能按「調薪完成」。
           </p>
+          {hourlyNote && <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">{hourlyNote}</p>}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className={labelCls}>調薪生效日</label>
@@ -238,6 +248,7 @@ export function SalaryRaiseSection({
 
       <BottomSheet open={doneOpen} onClose={() => (busy ? undefined : setDoneOpen(false))} title="調薪完成">
         <form className="space-y-3" onSubmit={onDone} data-testid="salary-raise-complete-form">
+          {hourlyNote && <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">{hourlyNote}</p>}
           <p className="text-sm text-gray-600">
             完成月份起，薪資資料改成新本薪 {formatMoney(pending?.newBaseSalary)} 與下列新投保；之前的月份（調薪中期間）重算仍照舊投保。已定案的薪資單不會變。
           </p>
@@ -256,7 +267,10 @@ export function SalaryRaiseSection({
             </div>
             <div>
               <label className={labelCls}>新勞退月提繳工資（留空＝不改）</label>
-              <MoneyInput className={inputCls} value={doneForm.pension} onValueChange={(v) => setDoneForm({ ...doneForm, pension: v })} />
+              <MoneyInput className={inputCls} value={doneForm.pension} onValueChange={(v) => { setPensionSuggested(false); setDoneForm({ ...doneForm, pension: v }); }} data-testid="salary-raise-done-pension" />
+              {pensionSuggested && hints?.pensionManual != null && (
+                <p className="mt-1 text-xs text-amber-700">目前勞退月提繳工資是手填 {formatMoney(hints.pensionManual)}，已帶入新本薪對應的建議級距，請確認。</p>
+              )}
             </div>
           </div>
           {error && <ErrorText>{error}</ErrorText>}

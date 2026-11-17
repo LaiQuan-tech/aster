@@ -91,7 +91,11 @@ export function pickRaiseForPeriod<T extends Pick<SalaryRaiseRow, "status" | "st
  * 純函式：薪資列 ＋ 該月適用的調薪中 → 計薪用的薪資列（不改傳入的物件）。
  * 非月薪制、新本薪無效 → 原樣回傳。
  */
-export function applyRaiseToSalaryRow(row: SalaryRow, raise: SalaryRaiseRow): SalaryRow & { salary_raise?: SalaryRowRaise } {
+export function applyRaiseToSalaryRow(
+  row: SalaryRow,
+  raise: SalaryRaiseRow,
+  divisor = 240,
+): SalaryRow & { salary_raise?: SalaryRowRaise } {
   if (row.method && row.method !== "monthly") return row
   const newBase = num(raise.new_base_salary)
   if (newBase === null || newBase <= 0) return row
@@ -101,8 +105,9 @@ export function applyRaiseToSalaryRow(row: SalaryRow, raise: SalaryRaiseRow): Sa
   const out: SalaryRow & { salary_raise?: SalaryRowRaise } = {
     ...row,
     base_salary: String(newBase),
-    // 時薪基準＝新本薪 ÷ 240（引擎 resolveHourlyWage）：明示時薪是舊本薪的折算，調薪中期間不用。
-    hourly_wage: null,
+    // 時薪基準＝新本薪 ÷ 240（引擎 resolveHourlyWage）：明示時薪若只是舊本薪的折算（＝舊本薪÷除數），調薪中期間不用；
+    // 與舊本薪÷除數不同（差 > 0.01）＝議定時薪，照用手填值（驗收建議 1）。
+    hourly_wage: negotiatedHourly(row.method, row.hourly_wage, prevBase, divisor) ? row.hourly_wage : null,
     salary_raise: { raise_id: raise.id, prev_base: prevBase ?? 0, since: raise.start_period, status: raise.status },
   }
   if (completed) {
@@ -117,25 +122,36 @@ export function applyRaiseToSalaryRow(row: SalaryRow, raise: SalaryRaiseRow): Sa
  * loadPayrollInputs 用：把該月適用調薪中的員工薪資列換掉（就地改 Map）。
  * salary_raises 未套用（migration 0112）→ 什麼都不做；其他查詢錯誤丟出（寧可不算，也不要算錯薪水）。
  */
-export async function applySalaryRaises(tenantId: string, period: string, salaryByEmployee: Map<string, SalaryRow>): Promise<void> {
+export async function applySalaryRaises(
+  tenantId: string,
+  period: string,
+  salaryByEmployee: Map<string, SalaryRow>,
+  rules?: Parameters<typeof resolveHourlyWageDivisor>[0],
+): Promise<void> {
   const ids = Array.from(salaryByEmployee.keys())
   if (ids.length === 0) return
-  const { data, error } = await supabaseAdmin
-    .from(SALARY_RAISE_TABLE)
-    .select(SALARY_RAISE_COLS)
-    .eq("tenant_id", tenantId)
-    .in("employee_id", ids)
-    .in("status", ["pending", "completed"])
-    .lte("start_period", period)
-  if (error) {
-    if (isMissingTableError(error)) {
-      warnSchemaGapOnce("salary_raises", error)
-      return
+  const divisor = rules ? resolveHourlyWageDivisor(rules) : 240
+  const all: SalaryRaiseRow[] = []
+  // 員工 id 每 100 筆一批（PostgREST URL 長度）。
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await supabaseAdmin
+      .from(SALARY_RAISE_TABLE)
+      .select(SALARY_RAISE_COLS)
+      .eq("tenant_id", tenantId)
+      .in("employee_id", ids.slice(i, i + 100))
+      .in("status", ["pending", "completed"])
+      .lte("start_period", period)
+    if (error) {
+      if (isMissingTableError(error)) {
+        warnSchemaGapOnce("salary_raises", error)
+        return
+      }
+      throw new Error(`applySalaryRaises: ${error.message}`)
     }
-    throw new Error(`applySalaryRaises: ${error.message}`)
+    all.push(...((data ?? []) as unknown as SalaryRaiseRow[]))
   }
   const byEmp = new Map<string, SalaryRaiseRow[]>()
-  for (const r of (data ?? []) as unknown as SalaryRaiseRow[]) {
+  for (const r of all) {
     const list = byEmp.get(r.employee_id) ?? []
     list.push(r)
     byEmp.set(r.employee_id, list)
@@ -144,8 +160,72 @@ export async function applySalaryRaises(tenantId: string, period: string, salary
     const raise = pickRaiseForPeriod(rows, period)
     const row = salaryByEmployee.get(empId)
     if (!raise || !row) continue
-    salaryByEmployee.set(empId, applyRaiseToSalaryRow(row, raise))
+    salaryByEmployee.set(empId, applyRaiseToSalaryRow(row, raise, divisor))
   }
+}
+
+/**
+ * 月薪制手填時薪是否為「議定時薪」：有填（> 0）且與 本薪 ÷ 除數 差超過 0.01（純函式）。
+ * 不是議定時薪（沒填、或只是本薪的折算）→ 調薪中改用新本薪 ÷ 除數、調薪完成時改寫成新本薪 ÷ 除數。
+ */
+export function negotiatedHourly(method: string | null | undefined, hourly: unknown, base: number | null, divisor = 240): boolean {
+  if (method && method !== "monthly") return false
+  const h = num(hourly)
+  if (h === null || h <= 0) return false
+  if (base === null || base <= 0) return true
+  return Math.abs(h - base / divisor) > 0.01
+}
+
+/** 某員工某月計薪實際用的薪資列（salary_structures ＋ 該月適用的調薪中；與 loadPayrollInputs 同一條路）。沒有薪資列回 null。 */
+export async function effectiveSalaryRowFor(
+  tenantId: string,
+  employeeId: string,
+  period: string,
+  rules?: Parameters<typeof resolveHourlyWageDivisor>[0],
+): Promise<(SalaryRow & { salary_raise?: SalaryRowRaise }) | null> {
+  const { salarySelectCols } = await import("./payroll-inputs.js")
+  const { data, error } = await supabaseAdmin
+    .from("salary_structures")
+    .select(await salarySelectCols())
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .maybeSingle()
+  if (error) throw new Error(`effectiveSalaryRowFor: ${error.message}`)
+  if (!data) return null
+  const map = new Map<string, SalaryRow>([[employeeId, data as unknown as SalaryRow]])
+  await applySalaryRaises(tenantId, period, map, rules)
+  return (map.get(employeeId) ?? null) as (SalaryRow & { salary_raise?: SalaryRowRaise }) | null
+}
+
+/** 薪資單草稿記下的調薪中參照（payroll run 寫進 breakdown.salaryRaiseRef）。 */
+export interface SalaryRaiseRef {
+  id: string
+  status: SalaryRaiseStatus
+  prevBase: number
+  newBase: number
+}
+
+export function salaryRaiseRefOf(row: (SalaryRow & { salary_raise?: SalaryRowRaise }) | null | undefined): SalaryRaiseRef | null {
+  const r = row?.salary_raise
+  if (!r) return null
+  return { id: r.raise_id, status: r.status, prevBase: r.prev_base, newBase: num(row?.base_salary) ?? 0 }
+}
+
+/**
+ * 定稿前比對（驗收 B-2）：草稿算的時候套用的調薪中（breakdown.salaryRaiseRef；舊草稿只有 salaryRaise）跟該月「現在」應適用的
+ * 是不是同一筆、同一狀態、同一組新舊本薪。草稿後才開始／取消／完成調薪 → true（要重跑）。
+ */
+export function salaryRaiseStale(breakdown: unknown, expected: SalaryRaiseRef | null): boolean {
+  const b = (breakdown ?? {}) as { salaryRaiseRef?: Partial<SalaryRaiseRef> | null; salaryRaise?: unknown }
+  const ref = b.salaryRaiseRef ?? null
+  if (!expected) return !!ref || !!b.salaryRaise
+  if (!ref) return true
+  return (
+    ref.id !== expected.id ||
+    ref.status !== expected.status ||
+    Math.round(Number(ref.prevBase) * 100) !== Math.round(expected.prevBase * 100) ||
+    Math.round(Number(ref.newBase) * 100) !== Math.round(expected.newBase * 100)
+  )
 }
 
 /** 調薪完成時，月薪制原本「明示」的時薪（加班費基準）改成新本薪 ÷ 除數（四捨五入到小數 4 位）；沒明示回 null＝不動。 */
@@ -154,11 +234,15 @@ export function completedHourlyWage(
   prevHourly: unknown,
   newBase: number,
   rules: Parameters<typeof resolveHourlyWageDivisor>[0],
+  prevBase: number | null = null,
 ): number | null {
   if (method && method !== "monthly") return null
   const h = num(prevHourly)
   if (h === null || h <= 0) return null
-  return Math.round((newBase / resolveHourlyWageDivisor(rules)) * 10000) / 10000
+  const divisor = resolveHourlyWageDivisor(rules)
+  // 議定時薪（≠ 舊本薪 ÷ 除數）不覆蓋（驗收建議 1）。
+  if (prevBase !== null && negotiatedHourly(method, h, prevBase, divisor)) return null
+  return Math.round((newBase / divisor) * 10000) / 10000
 }
 
 /** API 回應用。 */

@@ -317,8 +317,9 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
   g.set(H + 1, 10, moneyCell(money ? allowanceTotal(money) || null : null, { format: "intSp", colSpan: 3, ...center }))
   g.set(H + 1, 13, moneyCell(money ? netPay(money) : null, { format: "intSp", bold: true, color: RED, ...center }))
   g.thinGrid(H, 0, H + 1, LAST)
-  const raiseNote = salaryRaiseNote(raise)
-  if (raiseNote) g.set(H + 2, 0, { value: raiseNote, colSpan: LAST + 1, align: "left", color: RED, size: 10, money: true })
+  // 小結列沒有勞退自提／預支／遲到早退／前期更正扣回欄 → 下一列補「其他扣款 −X」，小結＋差額＋其他＝實領（2026-11-17 驗收）。
+  const notes = [salaryRaiseNote(raise), money ? otherDeductionsNote(money) : null].filter((n): n is string => !!n)
+  if (notes.length > 0) g.set(H + 2, 0, { value: notes.join("；"), colSpan: LAST + 1, align: "left", color: RED, size: 10, money: true })
 
   // 列 44：支出／薪資+支出
   const S = H + 3 // 43
@@ -388,6 +389,25 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
       printArea: "A1:N47",
     },
   }
+}
+
+/**
+ * 小結列（薪資、勞保、健保、請假、加班、加給）沒列到的扣款：應扣合計 − 勞保 − 健保 − 請假扣款
+ *（＝勞退自提＋預支＋遲到早退＋前期更正扣回）。0 回 null。例「其他扣款（勞退自提、遲到早退）−2,520」。
+ */
+export function otherDeductionsNote(money: Pick<StatementMoney, "totalDeductions" | "laborInsurance" | "healthInsurance" | "leaveDeduction" | "pensionVoluntary" | "advance" | "lateEarlyDeduction" | "adjustmentDeductions">): string | null {
+  const other = Math.round((money.totalDeductions - money.laborInsurance - money.healthInsurance - money.leaveDeduction) * 100) / 100
+  if (Math.abs(other) < 0.005) return null
+  const parts = [
+    [money.pensionVoluntary, "勞退自提"],
+    [money.advance, "預支"],
+    [money.lateEarlyDeduction, "遲到早退"],
+    [money.adjustmentDeductions, "前期更正扣回"],
+  ]
+    .filter(([v]) => Number(v) !== 0)
+    .map(([, name]) => name)
+  const label = parts.length > 0 ? `其他扣款（${parts.join("、")}）` : "其他扣款"
+  return `${label}${other >= 0 ? "−" : "＋"}${Math.abs(other).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
 }
 
 /** 「含調薪差額 ＋2,000 元（調薪中：新本薪 40,000 − 原本薪 38,000）」；沒有調薪中回 null。 */

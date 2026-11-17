@@ -3,6 +3,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { columnsExist, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { chunk, fetchAllPages } from "../lib/select-all-pages.js"
 import { logger } from "../lib/logger.js"
+import type { SalaryRow } from "./payroll-inputs.js"
 
 /**
  * 員工固定津貼（employee_fixed_allowances；migration 0086 ＝ sql/0076；2026-11-08）。
@@ -268,10 +269,18 @@ export async function staleDraftPayslips(
   for (const d of drafts) byPeriod.set(d.period, [...(byPeriod.get(d.period) ?? []), d])
   for (const [period, list] of byPeriod) {
     const current = await loadFixedAllowancesByEmployee(tenantId, period, [...new Set(list.map((d) => d.employee_id))])
+    // 調薪中（2026-11-17 驗收）：勞退設定要比「該月應適用」的值（套用 salary_raises 區間，與 loadPayrollInputs 同一路徑）。
+    const { applySalaryRaises } = await import("./salary-raises.js")
+    const effective = new Map<string, SalaryRow>()
+    for (const d of list) {
+      const row = pensionByEmployee.get(d.employee_id)
+      if (row) effective.set(d.employee_id, row as unknown as SalaryRow)
+    }
+    await applySalaryRaises(tenantId, period, effective)
     for (const d of list) {
       const reasons: StaleReason[] = []
       if (fixedAllowancesStale(embeddedFixedAllowancesOf(d.breakdown), current.get(d.employee_id))) reasons.push("fixed_allowances")
-      if (pensionSettingsStale(d.breakdown, pensionByEmployee.get(d.employee_id))) reasons.push("pension_settings")
+      if (pensionSettingsStale(d.breakdown, (effective.get(d.employee_id) as PensionSettingsRow | undefined) ?? pensionByEmployee.get(d.employee_id))) reasons.push("pension_settings")
       if (reasons.length > 0) out.push({ employeeId: d.employee_id, period: d.period, payslipId: d.id, reasons })
     }
   }

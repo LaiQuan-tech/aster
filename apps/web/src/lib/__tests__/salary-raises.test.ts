@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCompleteBody, buildRaiseBody, raisePeriodText, raiseSummary } from "../salary-raises";
+import { buildCompleteBody, buildRaiseBody, defaultCompletePension, raisePeriodText, raiseSummary } from "../salary-raises";
 import { sheetMoneySections } from "../attendance-sheet-money";
 import type { SheetMoney } from "../attendance-sheets-api";
 
@@ -42,5 +42,15 @@ describe("顯示文字", () => {
     expect(sheetMoneySections(m, tiers)[0].rows[0]).toEqual(["本薪", 48000]);
     const r = sheetMoneySections({ ...m, salaryRaise: { prevBase: 36000, newBase: 48000, diff: 12000 } }, tiers)[0].rows;
     expect(r.slice(0, 2)).toEqual([["本薪（原）", 36000], ["調薪差額（調薪中）", 12000]]);
+  });
+});
+
+describe("defaultCompletePension", () => {
+  const hints = { hourlyNegotiated: false, hourlyWage: null, divisor: 240, pensionManual: 36300, suggestedPensionWage: 48200 };
+  it("這筆有新值 → 用新值；原本手填且沒新值 → 帶建議級距並標示；原本自動算 → 留空", () => {
+    expect(defaultCompletePension(45800, hints)).toEqual({ value: "45800", suggested: false });
+    expect(defaultCompletePension(null, hints)).toEqual({ value: "48200", suggested: true });
+    expect(defaultCompletePension(null, { ...hints, pensionManual: null })).toEqual({ value: "", suggested: false });
+    expect(defaultCompletePension(null, undefined)).toEqual({ value: "", suggested: false });
   });
 });

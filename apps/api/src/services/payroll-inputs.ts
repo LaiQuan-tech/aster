@@ -442,7 +442,7 @@ export async function loadPayrollInputs(
   const salaryByEmployee = new Map<string, SalaryRow>()
   for (const row of (salData ?? []) as unknown as SalaryRow[]) salaryByEmployee.set(row.employee_id, row)
   // 調薪中（2026-11-17）：該月適用的員工改用新本薪＋舊投保（services/salary-raises.ts）。
-  await applySalaryRaises(tenantId, period, salaryByEmployee)
+  await applySalaryRaises(tenantId, period, salaryByEmployee, rules)
 
   const scopeIds = employeeIds ?? Array.from(salaryByEmployee.keys())
   const empty: PayrollInputs = {

@@ -35,6 +35,26 @@ export interface SalaryRaisesResponse {
   pending: SalaryRaiseView | null;
   /** false：資料表未套用（migration 0112）。 */
   available: boolean;
+  /** UI 提示（議定時薪、勞退手填時的建議級距）；舊 API 沒有。 */
+  hints?: SalaryRaiseHints;
+}
+
+export interface SalaryRaiseHints {
+  /** 目前手填時薪 ≠ 本薪 ÷ 除數（議定時薪）：調薪中仍用手填值、完成時不覆蓋。 */
+  hourlyNegotiated: boolean;
+  hourlyWage: number | null;
+  divisor: number;
+  /** 目前勞退月提繳工資手填值；null＝自動算。 */
+  pensionManual: number | null;
+  /** 新本薪對應的建議勞退月提繳工資（分級表）。 */
+  suggestedPensionWage: number | null;
+}
+
+/** 「調薪完成」表單的勞退預設值：原本手填、這筆沒填新值 → 帶入新本薪的建議級距（純函式）。 */
+export function defaultCompletePension(pendingNew: number | null, hints: SalaryRaiseHints | null | undefined): { value: string; suggested: boolean } {
+  if (pendingNew != null) return { value: String(pendingNew), suggested: false };
+  if (hints?.pensionManual != null && hints.suggestedPensionWage != null) return { value: String(hints.suggestedPensionWage), suggested: true };
+  return { value: "", suggested: false };
 }
 
 export function getSalaryRaises(employeeId: string) {

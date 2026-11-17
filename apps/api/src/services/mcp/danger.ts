@@ -198,6 +198,10 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   // 2026-11-10 調薪／投保調整歷程補登（只寫紀錄，不改目前本薪／級距）：中風險；軟刪照 HIGH_RISK_DELETE_PREFIXES（/salary）最高風險。
   { method: "POST", path: "/salary/:employeeId/salary-adjustments", label: "補登調薪紀錄" },
   { method: "POST", path: "/salary/:employeeId/insured-changes", label: "補登投保調整紀錄" },
+  // 2026-11-17 調薪中：開始（新本薪先發）與調薪完成（改薪資結構）會直接改薪資計算 → 最高風險；取消中風險。
+  { method: "POST", path: "/salary/:employeeId/raises", tier: "high", label: "標記調薪中（新本薪先發、勞健保照舊）" },
+  { method: "POST", path: "/salary/:employeeId/raises/:id/complete", tier: "high", label: "調薪完成（改成新本薪／新投保）" },
+  { method: "POST", path: "/salary/:employeeId/raises/:id/cancel", label: "取消調薪中（回到舊薪資）" },
   { method: "PATCH", path: "/festival-bonuses/:id", label: "修改三節獎金" },
   { method: "POST", path: "/bonus-runs", label: "建立獎金批次" },
   { method: "PATCH", path: "/bonus-runs/:id", label: "修改獎金批次" },

@@ -53,18 +53,23 @@ import {
   staleDraftPayslipsSafe,
   type PensionSettingsRow,
 } from "../services/fixed-allowances.js"
-import { salarySelectCols } from "../services/payroll-inputs.js"
+import { effectiveSalaryRowFor, salaryRaiseRefOf, salaryRaiseStale } from "../services/salary-raises.js"
 
-/** 定案檢查用：員工薪資資料目前的勞退兩欄（沒有薪資資料／0086 未套 → null＝沒手填、適用新制）。 */
-async function currentPensionSettings(tenantId: string, employeeId: string): Promise<PensionSettingsRow | null> {
-  const { data, error } = await supabaseAdmin
-    .from("salary_structures")
-    .select(await salarySelectCols())
-    .eq("tenant_id", tenantId)
-    .eq("employee_id", employeeId)
-    .maybeSingle()
-  if (error) throw new Error(`finalize (salary_structures): ${error.message}`)
-  return (data as unknown as PensionSettingsRow | null) ?? null
+/**
+ * 定案檢查用：該員工「該月」計薪實際適用的薪資列（勞退兩欄＋調薪中參照）。沒有薪資資料／0086 未套 → null＝沒手填、適用新制。
+ * 2026-11-17 驗收：要套用 salary_raises 區間（與 loadPayrollInputs 同一路徑）——調薪完成時改了勞退月提繳工資，
+ * 調薪中月份的薪資單算的是舊值，比「目前」值會永遠 409。
+ */
+async function currentPensionSettings(
+  tenantId: string,
+  employeeId: string,
+  period: string,
+): Promise<(PensionSettingsRow & { salary_raise?: unknown }) | null> {
+  try {
+    return (await effectiveSalaryRowFor(tenantId, employeeId, period)) as (PensionSettingsRow & { salary_raise?: unknown }) | null
+  } catch (err) {
+    throw new Error(`finalize (salary_structures): ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 export const payrollRouter = Router()
@@ -415,7 +420,11 @@ payrollRouter.post(
           night_pay: breakdown.nightPay,
           attendance_bonus: breakdown.attendanceBonus,
           gross: breakdown.gross,
-          breakdown,
+          // 調薪中參照（2026-11-17）：定稿時比對該月應適用的調薪中有沒有變。
+          breakdown: (() => {
+            const ref = salaryRaiseRefOf(sal)
+            return ref ? { ...breakdown, salaryRaiseRef: ref } : breakdown
+          })(),
           status: "draft",
           updated_at: now,
         })
@@ -659,7 +668,17 @@ payrollRouter.post(
           return
         }
         // 勞退設定（手填提繳工資、適用新制）在執行薪資之後改過 → 同樣擋（雇主提撥率是規則參數，不比）。
-        if (pensionSettingsStale(existing.breakdown, await currentPensionSettings(tenantId, existing.employee_id))) {
+        const effective = await currentPensionSettings(tenantId, existing.employee_id, existing.period as string)
+        // 調薪中（2026-11-17）：草稿之後才開始／取消／完成調薪 → 擋下來請重跑。
+        if (salaryRaiseStale(existing.breakdown, salaryRaiseRefOf(effective as never))) {
+          res.status(409).json({
+            error: "salary_raise_stale",
+            period: existing.period,
+            message: `${existing.period as string} 之後員工的「調薪中」狀態有異動（開始／取消／完成），薪資單還沒跟上，請先重新執行 ${existing.period as string} 的薪資再定稿`,
+          })
+          return
+        }
+        if (pensionSettingsStale(existing.breakdown, effective)) {
           res.status(409).json({
             error: "pension_settings_stale",
             period: existing.period,
@@ -703,14 +722,15 @@ payrollRouter.post(
             .eq("id", id)
             .eq("status", "finalized")
         // 二次檢查本身失敗（讀不到加減項／固定津貼／勞退設定）：不能確定沒有異動 → 先退回草稿再回 500，不留下沒驗過的定稿。
-        let stale: "adjustments_stale" | "fixed_allowances_stale" | "pension_settings_stale" | null = null
+        let stale: "adjustments_stale" | "fixed_allowances_stale" | "pension_settings_stale" | "salary_raise_stale" | null = null
         try {
           const after = await loadAdjustmentsByEmployee(tenantId, updated.period as string, [empId])
           const afterFixed = await loadFixedAllowancesByEmployee(tenantId, updated.period as string, [empId])
-          const afterPension = await currentPensionSettings(tenantId, empId)
+          const afterPension = await currentPensionSettings(tenantId, empId, updated.period as string)
           if (adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), after.get(empId))) stale = "adjustments_stale"
           else if (fixedAllowancesStale(embeddedFixedAllowancesOf(existing.breakdown), afterFixed.get(empId))) stale = "fixed_allowances_stale"
           else if (pensionSettingsStale(existing.breakdown, afterPension)) stale = "pension_settings_stale"
+          else if (salaryRaiseStale(existing.breakdown, salaryRaiseRefOf(afterPension as never))) stale = "salary_raise_stale"
         } catch (checkErr) {
           const { error: revertErr } = await revertToDraft()
           logger.error(
@@ -736,7 +756,13 @@ payrollRouter.post(
           }
           logger.warn({ tenantId, payslipId: id, stale }, "finalize: inputs changed during finalize, reverted to draft")
           const what =
-            stale === "adjustments_stale" ? "加減項（前期更正）" : stale === "fixed_allowances_stale" ? "固定津貼" : "勞退月提繳工資或「適用勞退新制」"
+            stale === "adjustments_stale"
+              ? "加減項（前期更正）"
+              : stale === "fixed_allowances_stale"
+                ? "固定津貼"
+                : stale === "salary_raise_stale"
+                  ? "「調薪中」狀態"
+                  : "勞退月提繳工資或「適用勞退新制」"
           res.status(409).json({
             error: stale,
             period: updated.period,
