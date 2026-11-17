@@ -10,6 +10,7 @@ import type { Employee } from "@/lib/admin-api";
 import { add, moveDown, moveUp, positionLabel, remove } from "@/lib/manager-order";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { isEmployeeActive } from "@/lib/employee-status";
 export interface ManagerOrderEditorProps {
   /** 有序主管 id（index 0＝小主管）。 */
   value: readonly string[];
@@ -27,7 +28,9 @@ const ICON_BUTTON =
 
 export function ManagerOrderEditor({ value, onChange, employees, employeeName, idPrefix, disabled }: ManagerOrderEditorProps) {
   const selected = new Set(value);
-  const available = employees.filter((employee) => !selected.has(employee.id));
+  // 新增主管只列在職者；已選的離職主管仍留在上方清單（標「已離職」）方便移除。
+  const available = employees.filter((employee) => !selected.has(employee.id) && isEmployeeActive(employee));
+  const leftIds = new Set(employees.filter((employee) => !isEmployeeActive(employee)).map((employee) => employee.id));
   const nameOf = (id: string) => employeeName(id) ?? id.slice(0, 8);
 
   return (
@@ -41,7 +44,10 @@ export function ManagerOrderEditor({ value, onChange, employees, employeeName, i
           {value.map((id, index) => (
             <li key={id} className="flex flex-wrap items-center gap-2 rounded-md border border-gray-100 bg-gray-50 px-2 py-1.5 text-sm">
               <span className="shrink-0 rounded bg-white px-1.5 py-0.5 text-xs text-gray-500">{positionLabel(index)}</span>
-              <span className="min-w-0 flex-1 truncate font-medium text-gray-800">{nameOf(id)}</span>
+              <span className="min-w-0 flex-1 truncate font-medium text-gray-800">
+                {nameOf(id)}
+                {leftIds.has(id) && <span className="ml-1 text-xs font-normal text-gray-400">已離職</span>}
+              </span>
               <span className="flex shrink-0 items-center gap-1">
                 <button
                   type="button"

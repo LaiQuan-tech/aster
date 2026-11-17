@@ -13,6 +13,7 @@ import {
   useToast,
 } from "@/components/admin-ui";
 import { getEmployees, type Employee } from "@/lib/admin-api";
+import { isEmployeeActive, pickableEmployees } from "@/lib/employee-status";
 import {
   DUTY_LABEL,
   deleteDutyRoster,
@@ -79,7 +80,7 @@ export default function DutyRostersPage() {
   const [genReplace, setGenReplace] = useState(false);
 
   const { from, to, days } = useMemo(() => monthRange(month), [month]);
-  const activeEmployees = useMemo(() => employees.filter((e) => e.status === "active"), [employees]);
+  const activeEmployees = useMemo(() => employees.filter((e) => isEmployeeActive(e)), [employees]);
 
   const load = useCallback(async () => {
     setError(null);
@@ -286,9 +287,10 @@ export default function DutyRostersPage() {
             <Field label="指派給">
               <Select value={cellEmpId} onChange={(e) => setCellEmpId(e.target.value)}>
                 <option value="">請選擇</option>
-                {activeEmployees.map((e) => (
+                {pickableEmployees(employees, [cellEmpId]).map((e) => (
                   <option key={e.id} value={e.id}>
                     {e.name}
+                    {isEmployeeActive(e) ? "" : "（已離職）"}
                   </option>
                 ))}
               </Select>
@@ -360,7 +362,7 @@ export default function DutyRostersPage() {
               <option value="">名單第一位</option>
               {genParticipants.map((id) => (
                 <option key={id} value={id}>
-                  {activeEmployees.find((e) => e.id === id)?.name ?? id.slice(0, 8)}
+                  {employees.find((e) => e.id === id)?.name ?? id.slice(0, 8)}
                 </option>
               ))}
             </Select>

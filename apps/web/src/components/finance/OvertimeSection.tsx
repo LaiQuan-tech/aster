@@ -29,6 +29,7 @@ import {
 } from "@/lib/cash-payouts-api";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employedInPeriod, monthRange } from "@/lib/employee-status";
 import { employeeOptionsOf } from "@/lib/employee-combobox";
 /**
  * 加班超額另計（M1，2026-09-22 業主決策 1）。月加班超過上限（預設 40 小時）的分鐘
@@ -228,7 +229,10 @@ export function OvertimeSection({
           <div>
             <label className={labelCls}>員工</label>
             <EmployeeCombobox
-              options={employeeOptionsOf(employees)}
+              // 查歷史：在職者＋該月仍在職的離職者（「全部月份」時全列），離職者標「已離職」。
+              options={employeeOptionsOf(
+                showAllMonths ? employees : employedInPeriod(employees, ...monthRange(period), [filterEmpId]),
+              )}
               value={filterEmpId}
               onChange={(id) => {
                 setFilterEmpId(id);
@@ -339,7 +343,8 @@ export function OvertimeSection({
           <div className="min-w-56">
             <label className={labelCls}>員工</label>
             <EmployeeCombobox
-              options={employeeOptionsOf(employees)}
+              // 補登加班：在職者＋該月仍在職的離職者（離職當月仍要能補）。
+              options={employeeOptionsOf(employedInPeriod(employees, ...monthRange(period), [manualEmpId]))}
               value={manualEmpId}
               onChange={setManualEmpId}
               emptyLabel="請選擇"

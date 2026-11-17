@@ -8,6 +8,7 @@ import { DayView } from "./_views/DayView";
 import { WeekView } from "./_views/WeekView";
 import { LateReportsView } from "./_views/LateReportsView";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { isEmployeeActive } from "@/lib/employee-status";
 
 type Tab = "day" | "week" | "records" | "late";
 
@@ -60,8 +61,8 @@ export default function PunchRecordsPage() {
 
   // 選了單位就只列該單位的員工；原本選的員工不在該單位 → 清掉。
   const empOptions = useMemo(
-    () => employees.filter((e) => e.status === "active" && (!fDept || e.dept_id === fDept)),
-    [employees, fDept],
+    () => employees.filter((e) => (isEmployeeActive(e) || e.id === fEmp) && (!fDept || e.dept_id === fDept)),
+    [employees, fDept, fEmp],
   );
   useEffect(() => {
     if (fEmp && fDept && !empOptions.some((e) => e.id === fEmp)) setFEmp("");

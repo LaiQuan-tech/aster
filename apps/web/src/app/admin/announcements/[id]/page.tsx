@@ -25,6 +25,7 @@ import {
 import { getAnnouncementAckSummary, seedAnnouncementAcks } from "@/lib/people-extras-api";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employedInPeriod, employeeStatusNote } from "@/lib/employee-status";
 const CHANGE_LABEL: Record<AnnouncementVersion["change_type"], string> = {
   initial: "首版",
   amendment: "條款增修",
@@ -427,7 +428,8 @@ function PaperSignatureForm({
             </label>
             <EmployeeCombobox
               id="sig-emp"
-              options={employees.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
+              // 補登簽署：在職者＋實際簽署日當天仍在職的離職者（標「已離職」）。
+              options={employedInPeriod(employees, signedAt, signedAt, [employeeId]).map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}`, note: employeeStatusNote(e) }))}
               value={employeeId}
               onChange={setEmployeeId}
               required

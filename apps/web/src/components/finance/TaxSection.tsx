@@ -21,6 +21,7 @@ import {
 } from "@/lib/admin-api";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employeeStatusNote } from "@/lib/employee-status";
 const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
@@ -162,7 +163,7 @@ export function TaxSection() {
             <label className={labelCls}>員工</label>
             <EmployeeCombobox
               className="w-72 max-w-full"
-              options={employees.map((employee) => ({ id: employee.id, label: empName(employee.id), searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+              options={employees.map((employee) => ({ id: employee.id, label: empName(employee.id), searchText: `${employee.emp_no ?? ""} ${employee.name}`, note: employeeStatusNote(employee) }))}
               value={adjustmentEmployeeId}
               onChange={setAdjustmentEmployeeId}
               emptyLabel="全部員工"

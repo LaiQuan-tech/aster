@@ -6,6 +6,7 @@ import type { ProjectDetail, UpdateProjectExtBody } from "@/lib/projects-ext-api
 import { parentProjectPatch } from "../../_components/project-application-form";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employeeStatusNote } from "@/lib/employee-status";
 interface ProjectSettingsCardProps {
   project: ProjectDetail;
   depts: Department[];
@@ -74,7 +75,7 @@ export function ProjectSettingsCard({ project, depts, emps, parentChoices, canEd
           <label className={labelCls} htmlFor="project-lead">專案負責人</label>
           <EmployeeCombobox
             id="project-lead"
-            options={emps.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
+            options={emps.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}`, note: employeeStatusNote(e) }))}
             value={project.leadEmpId ?? ""}
             disabled={!canEdit}
             title={lockedTitle}

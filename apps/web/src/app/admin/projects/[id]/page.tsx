@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { Button, DetailHeading, ErrorText, Empty } from "@/components/admin-ui";
@@ -14,6 +14,7 @@ import { applicationSheetPlan, reportForProject, resolveSheetClient, type Projec
 import { unsavedChangesMessage } from "@/lib/unsaved-changes";
 import { useUnsavedChangesGuard } from "@/components/useUnsavedChangesGuard";
 import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
+import { pickableEmployees } from "@/lib/employee-status";
 import { isAdminRole } from "@/lib/roles";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
@@ -131,7 +132,12 @@ export default function AdminProjectDetailPage() {
   const [draft, setDraft] = useState<InstallmentInputExt[]>([]);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [depts, setDepts] = useState<Department[]>([]);
-  const [emps, setEmps] = useState<Employee[]>([]);
+  // 全名冊（含離職）；下拉只給在職者＋既有負責人／成員（離職者標「已離職」，不會變空白）。
+  const [allEmps, setEmps] = useState<Employee[]>([]);
+  const emps = useMemo(
+    () => pickableEmployees(allEmps, [project?.leadEmpId, ...members.map((m) => m.employeeId)]),
+    [allEmps, project?.leadEmpId, members],
+  );
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   /**
@@ -331,7 +337,7 @@ export default function AdminProjectDetailPage() {
       setCanSeeContractDocs(docs.canSeeContractDocs);
       setMainProjects(mains.projects);
       setDepts(d.departments);
-      setEmps(e.employees.filter((x) => x.status === "active"));
+      setEmps(e.employees);
       setVendors(ven.vendors);
       setCompanies(comp.companies);
     } catch (err) {

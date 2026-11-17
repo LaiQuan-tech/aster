@@ -23,6 +23,7 @@ import {
 } from "@/lib/kpi-api";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { isEmployeeActive, pickableEmployees } from "@/lib/employee-status";
 /**
  * 績效考核後台（HR）。兩個分頁：
  *   範本 —— 考核項目與權重（權重合計慣例 100，總分即 0–100）
@@ -56,7 +57,7 @@ export default function KpiAdminPage() {
 
   useEffect(() => {
     getEmployees()
-      .then((r) => setEmployees(r.employees.filter((e) => e.status === "active" || !e.status)))
+      .then((r) => setEmployees(r.employees))
       .catch((err) => setError(err instanceof Error ? err.message : "載入員工失敗"));
     void loadTemplates();
   }, [loadTemplates]);
@@ -64,7 +65,10 @@ export default function KpiAdminPage() {
   const empName = useCallback(
     (id: string) => {
       const e = employees.find((x) => x.id === id);
-      return e ? (e.emp_no ? `${e.emp_no} · ${e.name}` : e.name) : id.slice(0, 8);
+      if (!e) return id.slice(0, 8);
+      // 全名冊（含離職）：既有考核上的離職者照常顯示姓名並標「已離職」。
+      const base = e.emp_no ? `${e.emp_no} · ${e.name}` : e.name;
+      return isEmployeeActive(e) ? base : `${base}（已離職）`;
     },
     [employees],
   );
@@ -358,7 +362,7 @@ function ReviewsTab({ employees, templates, empName, onError }: { employees: Emp
               <div>
                 <label className={labelCls}>考核者（評分的人）</label>
                 <EmployeeCombobox
-                  options={employees.map((e) => ({ id: e.id, label: empName(e.id), searchText: `${e.emp_no ?? ""} ${e.name}` }))}
+                  options={pickableEmployees(employees, [aReviewer]).map((e) => ({ id: e.id, label: empName(e.id), searchText: `${e.emp_no ?? ""} ${e.name}` }))}
                   value={aReviewer}
                   onChange={setAReviewer}
                   emptyLabel="選擇"
@@ -368,7 +372,7 @@ function ReviewsTab({ employees, templates, empName, onError }: { employees: Emp
               <div>
                 <label className={labelCls}>受評者（可多選）</label>
                 <select multiple className={`${inputCls} h-32`} value={aEmployees} onChange={(e) => setAEmployees(Array.from(e.target.selectedOptions).map((o) => o.value))}>
-                  {employees.filter((e) => e.id !== aReviewer).map((e) => <option key={e.id} value={e.id}>{empName(e.id)}</option>)}
+                  {pickableEmployees(employees, aEmployees).filter((e) => e.id !== aReviewer).map((e) => <option key={e.id} value={e.id}>{empName(e.id)}</option>)}
                 </select>
               </div>
             </div>

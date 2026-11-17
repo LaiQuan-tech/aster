@@ -58,6 +58,15 @@ import {
   toggleAllVisible,
   toggleSelected,
 } from "@/lib/employee-company";
+import {
+  EMPLOYMENT_STATUS_FILTERS,
+  countTerminated,
+  filterByEmploymentStatus,
+  parseStatusFilter,
+  searchEmployees,
+  terminatedLabel,
+  type EmploymentStatusFilter,
+} from "@/lib/employee-status";
 import { EMPLOYMENT_TYPES as EMPLOYMENT_TYPE_VALUES, EMPLOYMENT_TYPE_LABELS } from "@/lib/ess-tabs";
 import { getBrandingCached, getMeCached, peekMeCached } from "@/lib/ess-state";
 import {
@@ -370,6 +379,9 @@ export default function EmployeesPage() {
   // 員工所屬公司（2026-10-25）：編輯下拉、列表篩選、多選批次指派。
   const [companies, setCompanies] = useState<Company[]>([]);
   const [companyFilter, setCompanyFilter] = useState("");
+  // 在職狀態篩選（2026-11-17 業主：已離職不要出現在列表，但要有地方查）。預設在職；寫入 ?status= 方便分享連結。
+  const [statusFilter, setStatusFilterState] = useState<EmploymentStatusFilter>("active");
+  const [searchText, setSearchText] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [batchCompanyId, setBatchCompanyId] = useState("");
   const [batchBusy, setBatchBusy] = useState(false);
@@ -452,7 +464,25 @@ export default function EmployeesPage() {
       .then((res) => setCompanies(res.companies))
       .catch(() => setCompanies([]));
   }, []);
-  const visibleRows = useMemo(() => filterByCompany(rows, companyFilter), [rows, companyFilter]);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setStatusFilterState(parseStatusFilter(params.get("status")));
+    setSearchText(params.get("q") ?? "");
+  }, []);
+  function setStatusFilter(next: EmploymentStatusFilter) {
+    setStatusFilterState(next);
+    // 換篩選就清勾選：避免批次動作套到畫面上看不到的人。
+    setSelectedIds(new Set());
+    const url = new URL(window.location.href);
+    if (next === "active") url.searchParams.delete("status");
+    else url.searchParams.set("status", next);
+    window.history.replaceState(window.history.state, "", url.toString());
+  }
+  const terminatedCount = useMemo(() => countTerminated(rows), [rows]);
+  const visibleRows = useMemo(
+    () => searchEmployees(filterByEmploymentStatus(filterByCompany(rows, companyFilter), statusFilter), searchText),
+    [rows, companyFilter, statusFilter, searchText],
+  );
   const visibleIds = useMemo(() => visibleRows.map((row) => row.id), [visibleRows]);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
 
@@ -858,6 +888,40 @@ export default function EmployeesPage() {
                 ))}
               </select>
             </div>
+            <div>
+              <label className={labelCls} htmlFor="emp-status-filter">在職狀態</label>
+              <select
+                id="emp-status-filter"
+                className={inputCls}
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(parseStatusFilter(event.target.value))}
+              >
+                {EMPLOYMENT_STATUS_FILTERS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="emp-search">搜尋</label>
+              <input
+                id="emp-search"
+                type="search"
+                className={inputCls}
+                placeholder="姓名、工號、Email"
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+              />
+            </div>
+            <label className="flex cursor-pointer items-center gap-1.5 self-center pb-1 text-sm text-gray-600">
+              <input
+                type="checkbox"
+                checked={statusFilter !== "active"}
+                onChange={(event) => setStatusFilter(event.target.checked ? "all" : "active")}
+                className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+                data-testid="show-terminated-toggle"
+              />
+              顯示已離職員工（{terminatedCount}）
+            </label>
             {canManage && selectedIds.size > 0 && (
               <div className="flex flex-wrap items-end gap-2 rounded-lg bg-slate-50 px-3 py-2" data-testid="batch-company-bar">
                 <span className="self-center text-sm text-gray-700">已選 {selectedIds.size} 人，指派到</span>
@@ -894,7 +958,15 @@ export default function EmployeesPage() {
         ) : rows.length === 0 ? (
           <Empty>尚無員工</Empty>
         ) : visibleRows.length === 0 ? (
-          <Empty>這家公司目前沒有員工</Empty>
+          <Empty>
+            {searchText.trim()
+              ? "找不到符合的員工"
+              : statusFilter === "terminated"
+                ? "沒有已離職員工"
+                : companyFilter
+                  ? "這家公司目前沒有員工"
+                  : "沒有在職員工"}
+          </Empty>
         ) : (
           // 外框：直向超過視窗高度、橫向超過寬度都在框內捲（表頭釘上方）。
           <div className="max-h-[calc(100dvh-12rem)] overflow-auto">
@@ -920,10 +992,13 @@ export default function EmployeesPage() {
                 </tr>
               </thead>
               <tbody>
-                {visibleRows.map((employee) => (
+                {visibleRows.map((employee) => {
+                  const leftLabel = terminatedLabel(employee);
+                  return (
                   <tr
                     key={employee.id}
-                    className="cursor-pointer border-b border-gray-50 align-top hover:bg-gray-50"
+                    className={`cursor-pointer border-b border-gray-50 align-top hover:bg-gray-50 ${leftLabel ? "bg-gray-50/60 text-gray-400 opacity-70" : ""}`}
+                    data-terminated={leftLabel ? "true" : undefined}
                     onClick={(e) => {
                       if (isInteractiveClick(e)) return;
                       // 正在選取文字（複製姓名、Email 等）不換頁。
@@ -989,7 +1064,11 @@ export default function EmployeesPage() {
                         <td className="py-3 pr-3">
                           <div className="flex flex-wrap gap-1">
                             <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">{roleLabel(employee.role)}</span>
-                            {employee.status !== "active" && <span className="rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">{employee.status}</span>}
+                            {leftLabel ? (
+                              <span className="whitespace-nowrap rounded-full bg-gray-200 px-2 py-1 text-xs text-gray-600">{leftLabel}</span>
+                            ) : (
+                              employee.status !== "active" && <span className="rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">{employee.status}</span>
+                            )}
                             {!employee.user_id && <span className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">未開通帳號</span>}
                           </div>
                         </td>
@@ -1017,7 +1096,8 @@ export default function EmployeesPage() {
                         )}
                       </>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

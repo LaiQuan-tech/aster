@@ -16,6 +16,7 @@ import {
 } from "@/lib/admin-api";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employedInPeriod, employeeStatusNote } from "@/lib/employee-status";
 import { useEssState } from "@/lib/ess-state";
 const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -217,9 +218,10 @@ export function RecordsView({
             <div>
               <label className={labelCls}>員工</label>
               <EmployeeCombobox
-                options={employees
+                // 補打卡：在職者＋補登日期當天仍在職的離職者（標「已離職」）。
+                options={employedInPeriod(employees, (mAt || fFrom).slice(0, 10), (mAt || fTo).slice(0, 10), [mEmp])
                   .filter((e) => e.id !== myId)
-                  .map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
+                  .map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}`, note: employeeStatusNote(e) }))}
                 value={mEmp}
                 onChange={setMEmp}
                 emptyLabel="請選擇"
@@ -329,7 +331,8 @@ export function RecordsView({
           <div>
             <label className={labelCls}>員工</label>
             <EmployeeCombobox
-              options={employees.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
+              // 查歷史：在職者＋查詢期間仍在職的離職者（標「已離職」）。
+              options={employedInPeriod(employees, fFrom, fTo, [fEmp]).map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}`, note: employeeStatusNote(e) }))}
               value={fEmp}
               onChange={setFEmp}
               emptyLabel="全部"

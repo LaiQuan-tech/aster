@@ -98,6 +98,7 @@ import {
 } from "@/lib/approval-view";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employedInPeriod, employeeStatusNote } from "@/lib/employee-status";
 import { LeaveBalanceSummaryText, LeaveTypeBalanceList } from "@/components/LeaveBalanceSummary";
 type RequestAttachment = { id: string; fileName: string; sizeBytes: number; contentType: string; url: string };
 
@@ -575,9 +576,11 @@ function ApprovalsView() {
             </label>
             <Select id="approvals-employee" value={employeeId} onChange={(event) => setEmployeeId(event.target.value)}>
               <option value="">全部人員</option>
-              {employees.map((employee) => (
+              {/* 查歷史：在職者＋申請期間仍在職的離職者（沒填起日＝全列），離職者標「已離職」。 */}
+              {employedInPeriod(employees, from, to, [employeeId]).map((employee) => (
                 <option key={employee.id} value={employee.id}>
                   {employeeLabel(employee)}
+                  {employeeStatusNote(employee) ? "（已離職）" : ""}
                 </option>
               ))}
             </Select>

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { apiDownload } from "@/lib/api-client";
 import { getEmployees, getBranding, saveTenantSettings, type Employee, type TenantFeatures } from "@/lib/admin-api";
+import { isEmployeeActive, terminatedLabel } from "@/lib/employee-status";
 import { getMailboxes, putMailbox, MAILBOX_STATUS_LABEL, type Mailbox, type MailboxStatus } from "@/lib/company-api";
 
 /**
@@ -54,18 +55,26 @@ export default function EmployeeMailPage() {
 
   const boxByEmp = useMemo(() => new Map(boxes.map((b) => [b.employeeId, b])), [boxes]);
   const rows = useMemo(
-    () => [...employees].sort((a, b) => (a.emp_no ?? "").localeCompare(b.emp_no ?? "") || a.name.localeCompare(b.name)),
-    [employees],
+    // 已離職：信箱已停用或沒配發的不列；還有未停用信箱的保留（提醒停用）。
+    () =>
+      employees
+        .filter((e) => {
+          if (isEmployeeActive(e)) return true;
+          const b = boxByEmp.get(e.id);
+          return !!b && b.status !== "suspended";
+        })
+        .sort((a, b) => (a.emp_no ?? "").localeCompare(b.emp_no ?? "") || a.name.localeCompare(b.name)),
+    [employees, boxByEmp],
   );
   const stats = useMemo(() => {
     const s = { none: 0, planned: 0, active: 0, suspended: 0 };
-    for (const e of employees) {
+    for (const e of rows) {
       const b = boxByEmp.get(e.id);
       if (!b) s.none += 1;
       else s[b.status] += 1;
     }
     return s;
-  }, [employees, boxByEmp]);
+  }, [rows, boxByEmp]);
 
   async function saveSettings() {
     setBusy("settings");
@@ -118,7 +127,7 @@ export default function EmployeeMailPage() {
   }
 
   async function assignAllMissing() {
-    const targets = rows.filter((e) => !boxByEmp.get(e.id) && e.status === "active" && draftFor(e).trim());
+    const targets = rows.filter((e) => !boxByEmp.get(e.id) && isEmployeeActive(e) && draftFor(e).trim());
     if (targets.length === 0) return;
     if (!confirm(`為 ${targets.length} 位尚未配發的在職員工建立「待建立」的地址？`)) return;
     for (const e of targets) await assign(e, "planned");
@@ -194,7 +203,7 @@ export default function EmployeeMailPage() {
                   return (
                     <tr key={e.id} className="border-b last:border-0">
                       <td className="py-2 pr-3 font-medium text-gray-900">{e.emp_no ? `${e.emp_no} · ` : ""}{e.name}</td>
-                      <td className="py-2 pr-3 text-xs text-gray-500">{e.status === "active" ? "在職" : e.status}</td>
+                      <td className="py-2 pr-3 text-xs text-gray-500">{terminatedLabel(e) ?? "在職"}</td>
                       <td className="py-2 pr-3">
                         <span className="inline-flex items-center gap-1">
                           <input className="w-40 rounded-md border border-gray-300 px-2 py-1 text-sm" value={local}
@@ -220,7 +229,7 @@ export default function EmployeeMailPage() {
                         ) : (
                           <button type="button" onClick={() => void assign(e, "active")} disabled={busy === e.id} className="text-sm text-gray-500 hover:underline">重新啟用</button>
                         )}
-                        {e.status !== "active" && b?.status === "active" && <span className="ml-2 text-xs text-amber-700">離職，建議停用</span>}
+                        {!isEmployeeActive(e) && b?.status === "active" && <span className="ml-2 text-xs text-amber-700">離職，建議停用</span>}
                       </td>
                     </tr>
                   );

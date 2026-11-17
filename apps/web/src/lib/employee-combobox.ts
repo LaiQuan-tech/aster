@@ -7,6 +7,8 @@
  * 清單有最大高度可捲動。
  */
 
+import { employeeStatusNote } from "./employee-status";
+
 export interface EmployeeOption {
   /** 選項值（員工 id）；"" 只用在「全部員工／請選擇」這類空選項。 */
   id: string;
@@ -173,11 +175,23 @@ export function employeeLabel(e: { name?: string | null; emp_no?: string | null;
 
 /** 由員工清單組選項（label＝工號 · 姓名；工號、姓名、員工 ID、extra（例：身分證）都可搜尋）。 */
 export function employeeOptionsOf<
-  E extends { id: string; name?: string | null; emp_no?: string | null; empNo?: string | null },
+  E extends {
+    id: string;
+    name?: string | null;
+    emp_no?: string | null;
+    empNo?: string | null;
+    status?: string | null;
+    terminated_at?: string | null;
+  },
 >(employees: readonly E[], extra?: (e: E) => string | null | undefined, label?: (e: E) => string): EmployeeOption[] {
-  return employees.map((e) => ({
-    id: e.id,
-    label: label ? label(e) : employeeLabel(e),
-    searchText: [e.emp_no ?? e.empNo ?? "", e.name ?? "", extra?.(e) ?? ""].filter(Boolean).join(" "),
-  }));
+  return employees.map((e) => {
+    // 有帶在職欄位的名單：離職者（通常是既有資料保留下來的已選值）右側標「已離職」。
+    const note = "status" in e || "terminated_at" in e ? employeeStatusNote(e) : undefined;
+    return {
+      id: e.id,
+      label: label ? label(e) : employeeLabel(e),
+      searchText: [e.emp_no ?? e.empNo ?? "", e.name ?? "", extra?.(e) ?? ""].filter(Boolean).join(" "),
+      ...(note ? { note } : {}),
+    };
+  });
 }

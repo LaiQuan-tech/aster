@@ -20,6 +20,7 @@ import {
 } from "@/lib/audit-api";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employedInPeriod, employeeStatusNote } from "@/lib/employee-status";
 const PAGE_SIZE = 50;
 
 /** 篩選器預設只展開常用的幾張表；其餘收在「更多」。 */
@@ -149,8 +150,9 @@ export default function AuditLogsPage() {
   }, [tables, showAllTables, selTables]);
 
   const employeeOptions = useMemo(
-    () => [...employees].sort((a, b) => a.name.localeCompare(b.name, "zh-Hant")),
-    [employees],
+    // 查歷史：在職者＋查詢期間仍在職的離職者（沒填起日＝全列），離職者標「已離職」。
+    () => employedInPeriod(employees, from, to, [actorEmpId]).sort((a, b) => a.name.localeCompare(b.name, "zh-Hant")),
+    [employees, from, to, actorEmpId],
   );
 
   return (
@@ -210,7 +212,7 @@ export default function AuditLogsPage() {
               </label>
               <EmployeeCombobox
                 id="audit-actor"
-                options={employeeOptions.map((e) => ({ id: e.id, label: `${e.name}${e.emp_no ? `（${e.emp_no}）` : ""}`, searchText: `${e.emp_no ?? ""} ${e.name}` }))}
+                options={employeeOptions.map((e) => ({ id: e.id, label: `${e.name}${e.emp_no ? `（${e.emp_no}）` : ""}`, searchText: `${e.emp_no ?? ""} ${e.name}`, note: employeeStatusNote(e) }))}
                 value={actorEmpId}
                 onChange={setActorEmpId}
                 emptyLabel="全部"

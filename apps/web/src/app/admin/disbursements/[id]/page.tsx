@@ -39,6 +39,7 @@ import type { ApiError } from "@/lib/api-client";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 import { employeeOptionsOf } from "@/lib/employee-combobox";
+import { isEmployeeActive } from "@/lib/employee-status";
 function fmtMoney(n: number | null | undefined): string {
   return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
@@ -124,7 +125,7 @@ export default function DisbursementDetailPage() {
         setIsHr(hr);
         if (!hr) return;
         const list = await getEmployees();
-        if (active) setEmployees(list.employees.filter((e) => e.status === "active"));
+        if (active) setEmployees(list.employees.filter((e) => isEmployeeActive(e)));
       } catch {
         /* 取不到就當非 HR，畫面少幾顆鈕而已 */
       }

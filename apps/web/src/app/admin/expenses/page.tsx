@@ -46,6 +46,7 @@ import {
   type OvertimeSettlement,
 } from "@/lib/cash-payouts-api";
 import { employeeLabel, employeeOptionsOf } from "@/lib/employee-combobox";
+import { pickableEmployees } from "@/lib/employee-status";
 import { todayKey } from "@/lib/ess-format";
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import {
@@ -372,7 +373,8 @@ export default function FinanceHubPage() {
                 <label className={labelCls}>員工</label>
                 <EmployeeCombobox
                   className="w-full"
-                  options={employeeOptionsOf(employees)}
+                  // 在職者＋待辦清單裡出現的人（離職者的單子仍要能篩到，標「已離職」）。
+                  options={employeeOptionsOf(pickableEmployees(employees, [filter.employeeId, ...queue.map((i) => i.employeeId)]))}
                   value={filter.employeeId}
                   onChange={(id) => setFilter((f) => ({ ...f, employeeId: id }))}
                   emptyLabel="全部員工"

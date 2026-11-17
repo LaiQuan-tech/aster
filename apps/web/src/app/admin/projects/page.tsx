@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card, Empty, ErrorText, useToast } from "@/components/admin-ui";
 import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
+import { isEmployeeActive } from "@/lib/employee-status";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
   getProjectSettings,
@@ -121,7 +122,7 @@ export default function AdminProjectsPage() {
       setClients(cl.clients);
       setCompanies(comp.companies);
       setDepts(d.departments);
-      setEmps(e.employees.filter((x) => x.status === "active"));
+      setEmps(e.employees.filter((x) => isEmployeeActive(x)));
       setVendors(ven.vendors);
       setDisciplines(engineerDisciplinesOf(p3?.settings.disciplines));
       setVatRate(p3?.settings.vatRate ?? 0.05);

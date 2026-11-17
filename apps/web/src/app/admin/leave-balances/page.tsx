@@ -37,6 +37,7 @@ import {
 import { sheet } from "@/lib/sheet-styles";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employedInPeriod, employeeStatusNote, pickableEmployees } from "@/lib/employee-status";
 const yearNow = new Date().getFullYear();
 // 2026-10-27：預設改為「剩餘總覽」（一人一列、欄＝假別）；舊的一桶一列表格保留為「餘額明細」，避免功能消失。
 const tabs = [
@@ -290,7 +291,8 @@ function LeaveBalancesContent() {
               <div className="sm:col-span-2">
                 <label className={labelCls}>工號 / 姓名</label>
                 <EmployeeCombobox
-                  options={employees.map((employee) => ({ id: employee.id, label: names.employeeMap.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+                  // 查歷史：在職者＋該年度仍在職的離職者（標「已離職」）。
+                  options={employedInPeriod(employees, `${year}-01-01`, `${year}-12-31`, [employeeId]).map((employee) => ({ id: employee.id, label: names.employeeMap.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}`, note: employeeStatusNote(employee) }))}
                   value={employeeId}
                   onChange={setEmployeeId}
                   emptyLabel="全部人員"
@@ -597,7 +599,7 @@ function LeaveBalancesContent() {
               <div>
                 <label className={labelCls}>員工</label>
                 <EmployeeCombobox
-                  options={employees.map((employee) => ({ id: employee.id, label: names.employeeMap.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+                  options={pickableEmployees(employees, [editEmployeeId]).map((employee) => ({ id: employee.id, label: names.employeeMap.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}`, note: employeeStatusNote(employee) }))}
                   value={editEmployeeId}
                   onChange={setEditEmployeeId}
                   emptyLabel="請選擇"

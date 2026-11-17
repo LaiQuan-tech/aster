@@ -32,6 +32,7 @@ import {
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 import { employeeOptionsOf } from "@/lib/employee-combobox";
+import { isEmployeeActive, pickableEmployees } from "@/lib/employee-status";
 /**
  * 可設定簽核流程的申請種類。
  *
@@ -303,7 +304,8 @@ export default function LeaveTypesPage() {
   const bossLocked = !canChangeBossSetting(viewer, fallbackSaved || null);
   const bossNote = bossSettingNote(viewer, fallbackSaved || null);
 
-  const activeEmployees = employees.filter((e) => e.status === "active");
+  // 備援簽核人：在職者＋目前已設定的人（離職者標「已離職」，提醒改人）。
+  const activeEmployees = pickableEmployees(employees, [fallbackEmpId]);
 
   return (
     <>
@@ -565,7 +567,8 @@ export default function LeaveTypesPage() {
                   <Empty>尚無員工可指派</Empty>
                 ) : (
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    {employees.map((emp) => (
+                    {/* 固定簽核名單：只列在職者＋已勾選的人（已離職標示，方便取消）。 */}
+                    {pickableEmployees(employees, selected).map((emp) => (
                       <label key={emp.id} className="flex items-center gap-2 text-sm text-gray-700">
                         <input
                           type="checkbox"
@@ -573,6 +576,7 @@ export default function LeaveTypesPage() {
                           onChange={() => toggleApprover(kind, emp.id)}
                         />
                         {emp.name}
+                        {!isEmployeeActive(emp) && <span className="text-xs text-gray-400">已離職</span>}
                       </label>
                     ))}
                   </div>

@@ -31,6 +31,7 @@ import {
 } from "@/lib/admin-api";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employeeStatusNote, pickableEmployees } from "@/lib/employee-status";
 const REQ_STATUS_LABEL: Record<JobRequisition["status"], string> = {
   draft: "草稿",
   pending_approval: "待審核",
@@ -543,7 +544,7 @@ export default function RecruitmentPage() {
           <div>
             <label className={labelCls}>面試官</label>
             <EmployeeCombobox
-              options={employees.map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+              options={pickableEmployees(employees, [interviewerEmpId]).map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}`, note: employeeStatusNote(employee) }))}
               value={interviewerEmpId}
               onChange={setInterviewerEmpId}
               emptyLabel="未指定"
@@ -569,7 +570,8 @@ export default function RecruitmentPage() {
         <div className="mb-4">
           <label className={labelCls}>行事曆篩選：面試官</label>
           <EmployeeCombobox
-            options={employees.map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+            // 篩選既有面試：在職者＋已排過面試的人（離職者標「已離職」）。
+            options={pickableEmployees(employees, [interviewerFilter, ...interviews.map((i) => i.interviewer_emp_id)]).map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}`, note: employeeStatusNote(employee) }))}
             value={interviewerFilter}
             onChange={setInterviewerFilter}
             emptyLabel="公司面試行事曆"

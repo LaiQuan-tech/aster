@@ -32,8 +32,9 @@ import {
 import { fmtMoney, type Setter } from "./shared";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employeeStatusNote } from "@/lib/employee-status";
 /** 員工下拉只需要這三個欄位（ESS 老闆頁沒有完整員工名冊，用成員名單湊）。 */
-type EmployeeOption = Pick<Employee, "id" | "name" | "emp_no">;
+type EmployeeOption = Pick<Employee, "id" | "name" | "emp_no"> & Partial<Pick<Employee, "status" | "terminated_at">>;
 
 interface BonusShareCardProps {
   projectId: string;
@@ -220,7 +221,7 @@ export function BonusShareCard({
                     ariaLabel={`${PROJECT_MEMBER_ROLE_LABELS[row.roleInProject]}員工`}
                     options={emps
                       .filter((emp) => emp.id === row.employeeId || !rows.some((r) => r.employeeId === emp.id))
-                      .map((emp) => ({ id: emp.id, label: `${emp.name}${emp.emp_no ? `（${emp.emp_no}）` : ""}`, searchText: `${emp.emp_no ?? ""} ${emp.name}` }))}
+                      .map((emp) => ({ id: emp.id, label: `${emp.name}${emp.emp_no ? `（${emp.emp_no}）` : ""}`, searchText: `${emp.emp_no ?? ""} ${emp.name}`, note: employeeStatusNote(emp) }))}
                     value={row.employeeId}
                     onChange={(id) => {
                       const emp = emps.find((x) => x.id === id) ?? null;

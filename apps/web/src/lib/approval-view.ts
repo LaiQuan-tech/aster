@@ -19,6 +19,7 @@ import { localDateKey, fmtHm, fmtMoney, fmtDateTime as fmtMdHm } from "./ess-for
 import { summarizeSegment } from "./ess-notifications";
 import { formatLeaveDuration, formatRequestHours } from "./leave-duration";
 import { hasWorkdayGap } from "./leave-gaps";
+import { isEmployeeActive } from "./employee-status";
 
 /** ISO → 當地 `YYYY-MM-DD HH:mm`（CSV 用；原本直接切 ISO 字串會變成 UTC，與畫面差 8 小時）。 */
 function csvLocalDateTime(iso: string): string {
@@ -331,7 +332,7 @@ export function buildApprovalLookup(
   return {
     flowByKind,
     fallbackHrId,
-    approverCandidates: employees.filter((employee) => employee.status === "active"),
+    approverCandidates: employees.filter((employee) => isEmployeeActive(employee)),
     deptIdOf: (employeeId) => employeeById.get(employeeId)?.dept_id,
     employeeName,
     employeeDept,

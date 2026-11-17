@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Field, InlineError, Input, Select, Skeleton, useToast } from "@/components/admin-ui";
 import { getEmployees, getExpenseCategories, type Employee, type ExpenseCategory } from "@/lib/admin-api";
+import { isEmployeeActive } from "@/lib/employee-status";
 import { COST_TYPES, COST_TYPE_LABEL, vehicleErrorMessage } from "@/lib/vehicle-view";
 import { getVehicleSettings, saveVehicleSettings, type CostType, type VehicleSettings } from "@/lib/vehicles-api";
 
@@ -43,7 +44,8 @@ export default function AdminVehicleSettingsPage() {
           maxDaysAhead: String(s.settings.maxDaysAhead ?? 90),
         });
         setCategories(c.categories);
-        setEmployees(e.employees.filter((x) => x.status !== "terminated" && !x.terminated_at));
+        // 全名冊（含離職）：既有提醒對象若已離職仍顯示姓名＋「已離職」；新增候選只列在職者。
+        setEmployees(e.employees);
       })
       .catch((err) => active && setError(vehicleErrorMessage(err, "載入失敗")));
     return () => {
@@ -52,11 +54,14 @@ export default function AdminVehicleSettingsPage() {
   }, []);
 
   const usable = useMemo(() => categories.filter((c) => c.active && !c.requires_trip_approval), [categories]);
-  const empName = useMemo(() => new Map(employees.map((e) => [e.id, e.name] as const)), [employees]);
+  const empName = useMemo(
+    () => new Map(employees.map((e) => [e.id, isEmployeeActive(e) ? e.name : `${e.name}（已離職）`] as const)),
+    [employees],
+  );
   const matches = useMemo(() => {
     const q = empQuery.trim();
     if (!q || !settings) return [];
-    return employees.filter((e) => !settings.reminderEmpIds.includes(e.id) && (e.name.includes(q) || (e.emp_no ?? "").includes(q))).slice(0, 8);
+    return employees.filter((e) => isEmployeeActive(e) && !settings.reminderEmpIds.includes(e.id) && (e.name.includes(q) || (e.emp_no ?? "").includes(q))).slice(0, 8);
   }, [empQuery, employees, settings]);
 
   if (!settings) return error ? <InlineError>{error}</InlineError> : <Skeleton lines={6} />;
@@ -158,7 +163,7 @@ export default function AdminVehicleSettingsPage() {
           {settings.reminderEmpIds.length === 0 && <li className="text-sm text-gray-400">（沒有）</li>}
           {settings.reminderEmpIds.map((eid) => (
             <li key={eid} className="flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1 text-sm">
-              {empName.get(eid) ?? "（已離職或不明）"}
+              {empName.get(eid) ?? "（不明）"}
               <button
                 type="button"
                 aria-label={`移除 ${empName.get(eid) ?? ""}`}
