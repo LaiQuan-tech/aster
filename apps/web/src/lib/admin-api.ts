@@ -35,6 +35,8 @@ export interface Me {
   canGrantGroupFinancials?: boolean;
   /** 看得到首頁集團總覽與本年收入／毛利率（2026-10-27；只有在職 platform_admin）。舊 API 沒有。 */
   canSeeGroupOverview?: boolean;
+  /** 能覆核廠商收款帳戶變更（在職的設定老闆或 platform_admin；2026-11-17）。舊 API 沒有。 */
+  canReviewVendorBankChanges?: boolean;
 }
 
 export function getMe() {

@@ -237,7 +237,13 @@ describe("第六輪第 4 項 F1：副委託改綁另一家登錄廠商", () => {
     expect(no.status).toBe(400)
     expect(no.body).toMatchObject({ error: "rebind_reason_required", id: SA1, oldVendorName: "測試甲工程行", newVendorName: "測試乙工程行" })
     expect(fake.writes).toHaveLength(0)
+    // 2026-11-17 驗收 S2：有未付期款的改綁只限老闆／platform_admin——HR 帶原因也 403；改由 HR 擔任設定老闆再驗原因＋稽核。
     const withReason = { subcontracts: (body.subcontracts as Row[]).map((x) => (x.id === SA1 ? { ...x, rebindReason: "測試：改由乙施作" } : x)) }
+    const hrOnly = await as(request(app).put(`/projects/${P1}/subcontracts`)).send(withReason)
+    expect(hrOnly.status).toBe(403)
+    expect(hrOnly.body.error).toBe("rebind_requires_boss")
+    expect(fake.writes).toHaveLength(0)
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }]
     const ok = await as(request(app).put(`/projects/${P1}/subcontracts`)).send(withReason)
     expect(ok.status, r(ok)).toBe(200)
     const auditIdx = fake.writes.findIndex((w) => w.table === "audit_logs" && (w.payload as Row).record_id === SA1)
@@ -251,6 +257,7 @@ describe("第六輪第 4 項 F1：副委託改綁另一家登錄廠商", () => {
     expect(fake.db.project_subcontracts!.find((s) => s.id === SA1)!.vendor_id).toBe(VB)
   })
   it("稽核寫不進去 → 500、副委託不改", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }] // S2：改綁有未付期款限老闆
     const body = await subsBody(P1, (x) => (x.id === SA1 ? { ...x, vendorId: VB, vendorName: "測試乙工程行", rebindReason: "測試原因" } : x))
     fake.injectError({ table: "audit_logs", action: "insert", error: { message: "測試：稽核寫入失敗" } })
     const res = await as(request(app).put(`/projects/${P1}/subcontracts`)).send(body)

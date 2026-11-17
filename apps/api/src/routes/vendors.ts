@@ -13,7 +13,7 @@ import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
 import { columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
-import { BankChangeError, createBankChangeRequest, vendorHasPendingBankChange, type BankFields } from "../services/vendor-bank-change.js"
+import { BankChangeError, createBankChangeRequest, vendorHasPendingBankChange, vendorsWithPendingBankChange, type BankFields } from "../services/vendor-bank-change.js"
 
 export const vendorsRouter = Router()
 
@@ -242,7 +242,7 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
     const userId = req.auth?.userId
     const self = userId ? await resolveSelf(tenantId, userId) : null
     const canSeeBank = isFinanceRole(self?.role)
-    const vendors: Array<ReturnType<typeof serialize> & { bankVerified?: boolean }> = (data ?? []).map((r) => serialize(r as unknown as Record<string, unknown>))
+    const vendors: Array<ReturnType<typeof serialize> & { bankVerified?: boolean; bankChangePending?: boolean }> = (data ?? []).map((r) => serialize(r as unknown as Record<string, unknown>))
     // 2026-11-17：帳戶是否經第二人確認（0104）；放款建單畫面據此提示「帳戶尚待確認，無法送審」。查不到不擋列表。
     // 只有帶 ?bankVerified=1 才查（放款建單畫面用），一般名冊列表不多打一次查詢。
     if (req.query.bankVerified === "1" && vendors.length > 0 && (await columnsExist("vendors", "bank_verified_at").catch(() => false))) {
@@ -254,6 +254,9 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
         const map = new Map(verified.map((v) => [v.id, v.bank_verified_at]))
         for (const v of vendors) if (map.has(v.id as string)) v.bankVerified = map.get(v.id as string) != null
       }
+      // F7：帳戶變更覆核中（名冊列表／內頁顯示狀態、建單畫面提示）。
+      const pending = await vendorsWithPendingBankChange(tenantId, vendors.map((v) => v.id as string)).catch(() => null)
+      if (pending) for (const v of vendors) v.bankChangePending = pending.has(String(v.id).toLowerCase())
     }
     res.status(200).json({ vendors: canSeeBank ? vendors : vendors.map(maskVendorBank) })
   } catch (err) {
@@ -308,7 +311,7 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
     }
     const present = rosterFieldsPresent(parsed.data)
     // 驗收 H2（2026-11-17）：新建廠商帶的收款帳戶不直接寫進名冊——廠商照建（銀行欄位留空、bank_verified_at 空），
-    // 另建「帳戶登錄待覆核」，老闆／HR（非申請人）核准後才寫入並視為已確認。
+    // 另建「帳戶登錄待覆核」，老闆／平台管理員（非申請人）核准後才寫入並視為已確認。
     const norm = (v: unknown) => {
       const t = typeof v === "string" ? v.trim() : ""
       return t === "" ? null : t
@@ -351,7 +354,7 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async
           vendor: serialize(data as unknown as Record<string, unknown>),
           bankChangeRequested: true,
           bankChangeRequest: { id: created.id, status: "pending" },
-          message: "廠商已建立；收款帳戶已送老闆／HR 覆核，核准後才寫入名冊",
+          message: "廠商已建立；收款帳戶已送老闆／平台管理員 覆核，核准後才寫入名冊",
         })
       } catch (err) {
         // 廠商已建好（沒有帳戶）；帳戶申請失敗 → 回 201 並告知，讓使用者到廠商頁重填帳戶。
@@ -674,7 +677,7 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
     if (bankCheck.needsReason && !changeReason) {
       res.status(400).json({
         error: "change_reason_required",
-        message: "更改收款帳戶請填寫變更原因（會送老闆／HR 覆核）",
+        message: "更改收款帳戶請填寫變更原因（會送老闆／平台管理員 覆核）",
       })
       return
     }
@@ -724,7 +727,7 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
           vendor: serialize(data as unknown as Record<string, unknown>),
           bankChangeRequested: true,
           bankChangeRequest: { id: created.id, status: "pending" },
-          message: "收款帳戶變更已送老闆／HR 覆核，核准後才生效；其他欄位已儲存",
+          message: "收款帳戶變更已送老闆／平台管理員 覆核，核准後才生效；其他欄位已儲存",
         })
       } catch (err) {
         if (err instanceof BankChangeError) {

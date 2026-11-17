@@ -213,7 +213,14 @@ describe("第七輪 H1：既有列解除名冊綁定（A → null）也要原因
     expect(no.body).toMatchObject({ error: "rebind_reason_required", id: SA1, unbind: true, oldVendorName: "測試甲工程行" })
     expect(no.body.message).toContain("解除與名冊廠商「測試甲工程行」的綁定")
     expect(fake.writes).toHaveLength(0)
-    const ok = await putSubs(P1, { subcontracts: (body.subcontracts as Row[]).map((x) => (x.id === SA1 ? { ...x, rebindReason: "測試：改給非登錄下包" } : x)) })
+    // 2026-11-17 驗收 S2：有未付期款的改綁只限老闆／platform_admin——HR 帶原因也 403；改由 HR 擔任設定老闆再驗原因＋稽核。
+    const withReason = { subcontracts: (body.subcontracts as Row[]).map((x) => (x.id === SA1 ? { ...x, rebindReason: "測試：改給非登錄下包" } : x)) }
+    const hrOnly = await putSubs(P1, withReason)
+    expect(hrOnly.status).toBe(403)
+    expect(hrOnly.body.error).toBe("rebind_requires_boss")
+    expect(fake.writes).toHaveLength(0)
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: HR } } }]
+    const ok = await putSubs(P1, withReason)
     expect(ok.status, r(ok)).toBe(200)
     const auditIdx = fake.writes.findIndex((w) => w.table === "audit_logs" && (w.payload as Row).record_id === SA1)
     const updIdx = fake.writes.findIndex((w) => w.table === "project_subcontracts" && w.action === "update")

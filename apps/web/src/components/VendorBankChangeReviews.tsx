@@ -8,19 +8,20 @@ import { taipeiDate } from "@/lib/payee-account";
 /**
  * 「廠商收款帳戶變更待覆核」區塊（2026-11-17 業主決定的雙人覆核）。放在放款簽核頁與廠商名冊頁上方；
  * 沒有待覆核、或沒權限（API 403）時整塊不顯示。
- * 覆核者（老闆／平台管理員／HR，非申請人）看得到完整新舊帳號以便跟廠商核對，可核准／退回（理由必填）；
+ * 覆核者（老闆／平台管理員，非申請人；2026-11-17 驗收 S1 起 HR 不能核准）看得到完整新舊帳號以便跟廠商核對，可核准／退回（理由必填）；
  * 申請人本人或 HR 可取消。核准後才套用到名冊。
  */
 const ERR: Record<string, string> = {
   vendor_bank_change_self_review: "不能覆核自己提出的帳戶變更。",
-  not_bank_change_reviewer: "只有老闆或 HR 可以覆核廠商收款帳戶變更。",
+  not_bank_change_reviewer: "只有老闆或平台管理員 可以覆核廠商收款帳戶變更。",
   vendor_bank_change_stale: "名冊上的收款帳戶在申請後已被改過，這筆申請已過期，請退回後重新申請。",
   vendor_has_open_disbursements: "此廠商仍有未匯款的放款單，請先作廢或匯款後再核准帳戶變更。",
   vendor_bank_change_not_pending: "這筆帳戶變更已處理過。",
   decision_note_required: "退回請填寫理由。",
   vendor_not_found: "找不到這家廠商（可能已刪除）。",
+  no_bank_change_reviewer: "目前沒有可核准的老闆或平台管理員（申請人以外），請先指定老闆或新增平台管理員。",
   vendor_bank_change_not_found: "找不到這筆帳戶變更申請。",
-  vendor_bank_unverified: "此廠商的收款帳戶尚未經老闆／HR 確認。",
+  vendor_bank_unverified: "此廠商的收款帳戶尚未經老闆／平台管理員 確認。",
   forbidden: "沒有權限處理這筆帳戶變更（取消限申請人本人或 HR）。",
 };
 function humanize(err: unknown, fallback: string): string {
@@ -90,7 +91,7 @@ export function VendorBankChangeReviews({ vendorId, onChanged }: { vendorId?: st
   return (
     <Card className="mb-4 border-amber-300">
       <h2 className="mb-2 text-sm font-semibold text-amber-800">廠商收款帳戶變更待覆核（{rows.length}）</h2>
-      <p className="mb-3 text-xs text-gray-500">名冊收款帳戶的新增或變更，需老闆或 HR（不能是申請人本人）核准後才生效；覆核期間與核准前，該廠商的放款單不能送審、核准或付款。</p>
+      <p className="mb-3 text-xs text-gray-500">名冊收款帳戶的新增或變更，需老闆或平台管理員（不能是申請人本人）核准後才生效；覆核期間與核准前，該廠商的放款單不能送審、核准或付款。</p>
       {error && <div className="mb-2"><ErrorText>{error}</ErrorText></div>}
       {msg && <p className="mb-2 text-sm text-green-700">{msg}</p>}
       <ul className="space-y-3">
@@ -115,8 +116,8 @@ export function VendorBankChangeReviews({ vendorId, onChanged }: { vendorId?: st
               {r.canCancel && (
                 <button type="button" disabled={busyId === r.id} onClick={() => void decide(r, "cancel")} className="rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-600 disabled:opacity-50">取消申請</button>
               )}
-              {!r.canDecide && !r.canCancel && <span className="text-xs text-gray-400">等待老闆或 HR 覆核</span>}
-              {!r.canDecide && r.canCancel && <span className="self-center text-xs text-gray-400">（申請人本人不能核准，需另一位老闆／HR 覆核）</span>}
+              {!r.canDecide && !r.canCancel && <span className="text-xs text-gray-400">等待老闆或平台管理員 覆核</span>}
+              {!r.canDecide && r.canCancel && <span className="self-center text-xs text-gray-400">（申請人本人不能核准，需另一位老闆／平台管理員 覆核）</span>}
             </div>
           </li>
         ))}

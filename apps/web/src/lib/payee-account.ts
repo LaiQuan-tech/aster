@@ -8,7 +8,7 @@ import type { Disbursement } from "./disbursements-api";
  * 帳號一律優先用後端遮好的 payeeAccountMasked；舊 API 沒帶時才從手上有的完整帳號自己遮（財務頁面）。
  */
 export type PayeeAccountFields = Pick<Disbursement, "payeeName" | "payeeBankName" | "payeeBankCode" | "payeeBankAccount" | "payeeKind" | "vendorId"> &
-  Partial<Pick<Disbursement, "payeeAccountMasked" | "payeeAccountSource" | "payeeBankChangedAt" | "vendorBankChangePending" | "payeeAccountHolder" | "vendorBankVerified">>;
+  Partial<Pick<Disbursement, "payeeAccountMasked" | "payeeAccountSource" | "payeeBankChangedAt" | "vendorBankChangePending" | "payeeAccountHolder" | "vendorBankVerified" | "payeeRebindWarning" | "method">>;
 
 export interface PayeeAccountSummary {
   /** 帳戶戶名（後端 payeeAccountHolder；沒有才退回收款名稱）。 */
@@ -24,17 +24,34 @@ export interface PayeeAccountSummary {
   changedText: string | null;
   /** 待覆核或未確認的警示，或 null。 */
   pendingText: string | null;
+  /** 驗收 S2：手動收款分攤到曾解除／改綁名冊廠商的副委託 → 紅框文字，或 null。 */
+  rebindText: string | null;
 }
 
-/** 快照「帳號 戶名」的帳號段：知道戶名且以「 戶名」結尾就去掉戶名，否則取第一個空白前那一段（戶名開頭數字不算進帳號）。 */
-export function accountSegment(account: string | null | undefined, holder?: string | null): string {
+const ACCOUNT_TOKEN = /^[\d\-－‐–—]+$/;
+
+/**
+ * 快照「帳號 戶名」拆成帳號段與戶名段（與 API services/vendor-bank-change.ts splitAccountSnapshot 同一套，驗收 A／F2）：
+ * 知道戶名且以「空白＋戶名」結尾 → 精確去掉戶名；否則帳號段＝開頭連續的「純數字／連字號」token（帳號可含空白，
+ * 最後一段純數字不當戶名），第一個含其他字元的 token 起是戶名（「0001234567890 104人力銀行」的 104 不算帳號）。
+ */
+export function splitAccountSnapshot(account: string | null | undefined, holder?: string | null): { account: string; holder: string | null } {
   const raw = (account ?? "").trim();
-  if (!raw) return "";
+  if (!raw) return { account: "", holder: null };
   const h = (holder ?? "").trim();
   if (h && raw.length > h.length && raw.endsWith(h) && /\s/.test(raw.charAt(raw.length - h.length - 1))) {
-    return raw.slice(0, raw.length - h.length).trim();
+    return { account: raw.slice(0, raw.length - h.length).trim(), holder: h };
   }
-  return raw.split(/\s+/)[0] ?? "";
+  const tokens = raw.split(/\s+/);
+  let n = 0;
+  while (n < tokens.length && ACCOUNT_TOKEN.test(tokens[n]!)) n++;
+  if (n === 0) n = 1;
+  const rest = tokens.slice(n).join(" ");
+  return { account: tokens.slice(0, n).join(" "), holder: rest || null };
+}
+
+export function accountSegment(account: string | null | undefined, holder?: string | null): string {
+  return splitAccountSnapshot(account, holder).account;
 }
 
 export function maskAccountTail(account: string | null | undefined, holder?: string | null): string | null {
@@ -66,8 +83,19 @@ export function payeeAccountSummary(d: PayeeAccountFields): PayeeAccountSummary 
     changedText: d.payeeBankChangedAt ? `此廠商收款帳戶於 ${taipeiDate(d.payeeBankChangedAt)} 變更或確認過` : null,
     pendingText: d.vendorBankChangePending
       ? "此廠商收款帳戶變更待覆核中，覆核完成前不能核准或付款"
-      : d.vendorBankVerified === false
-        ? "此廠商收款帳戶尚未經老闆／HR 確認，確認前不能核准或付款"
+      : d.vendorBankVerified === false && !(d.method && d.method !== "transfer" && !d.payeeBankAccount && !d.payeeAccountMasked)
+        ? "此廠商收款帳戶尚未經老闆／平台管理員確認，確認前不能核准或付款"
         : null,
+    rebindText: d.payeeRebindWarning?.message ?? null,
   };
+}
+
+/**
+ * 名冊列表／內頁的收款帳戶狀態（F7）：變更覆核中＞已確認＞待確認（有帳號或有申請但未核准）；沒查到狀態或沒帳號回 null。
+ */
+export function vendorBankStatus(v: { bankVerified?: boolean; bankChangePending?: boolean; bankAccount?: string | null }): { label: string; tone: "amber" | "green" | "gray" } | null {
+  if (v.bankChangePending) return { label: "帳戶變更覆核中", tone: "amber" };
+  if (v.bankVerified === true) return { label: "帳戶已確認", tone: "green" };
+  if (v.bankVerified === false && (v.bankAccount ?? "").trim()) return { label: "帳戶待確認", tone: "amber" };
+  return null;
 }

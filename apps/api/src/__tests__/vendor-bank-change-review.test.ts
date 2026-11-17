@@ -7,7 +7,7 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 
 import { vendorsRouter } from "../routes/vendors.js"
 import { vendorBankChangesRouter } from "../routes/vendor-bank-changes.js"
-import { maskBankAccount, vendorHasPendingBankChange } from "../services/vendor-bank-change.js"
+import { maskBankAccount, normalizeAccountSnapshot, splitAccountSnapshot, vendorHasPendingBankChange } from "../services/vendor-bank-change.js"
 import { assertPayeeBankStillMatchesVendor, DisbursementError, serializeMany, type DisbursementRow } from "../services/disbursements.js"
 import { isBlockedPath } from "../services/mcp/catalog.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
@@ -36,6 +36,7 @@ const EMP = {
   manager: "bbbbbbbb-0000-4000-8000-0000000000a4",
   boss: "bbbbbbbb-0000-4000-8000-0000000000a5",
   hrInactive: "bbbbbbbb-0000-4000-8000-0000000000a6",
+  pa: "bbbbbbbb-0000-4000-8000-0000000000a7",
 }
 const unpaid = () => [{ id: "pay1", tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, amount: "1000", override_amount: null, paid_on: null }]
 
@@ -80,6 +81,7 @@ beforeEach(() => {
     { id: EMP.manager, tenant_id: TENANT_ID, user_id: "mgr-user", role: "manager", status: "active", name: "測試主管" },
     { id: EMP.boss, tenant_id: TENANT_ID, user_id: "boss-user", role: "employee", status: "active", name: "測試老闆" },
     { id: EMP.hrInactive, tenant_id: TENANT_ID, user_id: "hr-off-user", role: "hr_admin", status: "terminated", name: "測試離職HR" },
+    { id: EMP.pa, tenant_id: TENANT_ID, user_id: "pa-user", role: "platform_admin", status: "active", name: "測試平台管理員" },
   ]
   fake.db.vendors = [{
     id: VENDOR, tenant_id: TENANT_ID, name: "測試丙廠商", short_name: null, category: null, contact_name: null, tax_id: null,
@@ -101,13 +103,19 @@ async function requestChange(token = "hr1-user", account = "0000000000002") {
 }
 
 describe("末 4 碼遮罩", () => {
-  it("maskBankAccount：只露末 4 碼、戶名裡的數字不混入（驗收 A：戶名開頭是數字）", () => {
+  it("maskBankAccount／splitAccountSnapshot：只露末 4 碼、戶名裡的數字不混入、帳號含空白不拆錯（驗收 A／F2）", () => {
     expect(maskBankAccount("0000-0000-1234 測試戶名2號")).toBe("****1234")
+    expect(maskBankAccount("0000000005678")).toBe("****5678")
     expect(maskBankAccount("0001234567890 104人力銀行")).toBe("****7890")
     expect(maskBankAccount("0001234567890 104人力銀行", "104人力銀行")).toBe("****7890")
-    expect(maskBankAccount("0000 1111 2222 3M台灣", "3M台灣")).toBe("****2222")
-    expect(maskBankAccount("0000111222 3M台灣")).toBe("****1222")
-    expect(maskBankAccount("0000000005678")).toBe("****5678")
+    expect(maskBankAccount("0001234567890 3M台灣")).toBe("****7890")
+    expect(maskBankAccount("0123 4567 8901")).toBe("****8901")
+    expect(splitAccountSnapshot("0123 4567 8901")).toEqual({ account: "0123 4567 8901", holder: null })
+    expect(splitAccountSnapshot("0123 4567 8901 王小明")).toEqual({ account: "0123 4567 8901", holder: "王小明" })
+    expect(maskBankAccount("012-345 678")).toBe("****5678")
+    expect(splitAccountSnapshot("0001234567890 104人力銀行")).toEqual({ account: "0001234567890", holder: "104人力銀行" })
+    expect(normalizeAccountSnapshot("0123 4567 8901 王小明")).toBe("012345678901 王小明")
+    expect(normalizeAccountSnapshot("012-345 678")).toBe("012345678")
     expect(maskBankAccount("")).toBeNull()
     expect(maskBankAccount(null)).toBeNull()
   })
@@ -138,7 +146,7 @@ describe("末 4 碼遮罩", () => {
 })
 
 describe("名冊改帳戶：有未付期款 → 送覆核", () => {
-  it("有未付 → 202、建 pending、名冊不改；通知覆核者（不含申請人、不含離職 HR）", async () => {
+  it("有未付 → 202、建 pending、名冊不改；通知覆核者（老闆／platform_admin，不含申請人、不含 HR）", async () => {
     fake.db.project_subcontract_payments = unpaid()
     const res = await requestChange()
     expect(res.status).toBe(202)
@@ -149,9 +157,11 @@ describe("名冊改帳戶：有未付期款 → 送覆核", () => {
     const notified = (fake.db.notifications ?? []).map((n) => n.employee_id)
     // 驗收 C：非後台角色的設定老闆收到的連結是 ESS（recipientRole ess），HR 是後台（admin）。
     expect((fake.db.notifications ?? []).find((n) => n.employee_id === EMP.boss.toLowerCase())!.payload).toMatchObject({ recipientRole: "ess", event: "submitted" })
-    expect((fake.db.notifications ?? []).find((n) => n.employee_id === EMP.hr2.toLowerCase())!.payload).toMatchObject({ recipientRole: "admin" })
-    expect(notified).toEqual(expect.arrayContaining([EMP.boss.toLowerCase(), EMP.hr2.toLowerCase()]))
+    expect((fake.db.notifications ?? []).find((n) => n.employee_id === EMP.pa.toLowerCase())!.payload).toMatchObject({ recipientRole: "admin" })
+    // S1：通知只發給能覆核的人（設定老闆＋在職 platform_admin），HR 不再收。
+    expect(notified).toEqual(expect.arrayContaining([EMP.boss.toLowerCase(), EMP.pa.toLowerCase()]))
     expect(notified).not.toContain(EMP.hr1.toLowerCase())
+    expect(notified).not.toContain(EMP.hr2.toLowerCase())
     expect(notified).not.toContain(EMP.hrInactive.toLowerCase())
     expect(JSON.stringify(fake.db.notifications)).not.toContain("0000000000002")
   })
@@ -186,9 +196,9 @@ describe("名冊改帳戶：有未付期款 → 送覆核", () => {
     expect(created.bank_code ?? null).toBeNull()
     expect(created.bank_verified_at).toBeNull()
     expect(requests().find((r) => r.vendor_id === created.id)).toMatchObject({ status: "pending", old_bank_account: null, new_bank_account: "0000000000055" })
-    const approve = await as("hr2-user", request(app).post(`/vendor-bank-changes/${res.body.bankChangeRequest.id}/approve`)).send({})
+    const approve = await as("boss-user", request(app).post(`/vendor-bank-changes/${res.body.bankChangeRequest.id}/approve`)).send({})
     expect(approve.status).toBe(200)
-    expect(fake.db.vendors!.find((v) => v.id === created.id)).toMatchObject({ bank_account: "0000000000055", bank_verified_by: EMP.hr2 })
+    expect(fake.db.vendors!.find((v) => v.id === created.id)).toMatchObject({ bank_account: "0000000000055", bank_verified_by: EMP.boss })
   })
 
   it("同廠商第二筆 pending → 409 vendor_bank_change_pending", async () => {
@@ -231,18 +241,23 @@ describe("覆核：誰能核准、核准套用、stale、退回", () => {
     return res.body.bankChangeRequest.id as string
   }
 
-  it("申請人本人（HR）不能核准 → 403、不改", async () => {
-    const id = await pendingId()
-    const res = await as("hr1-user", request(app).post(`/vendor-bank-changes/${id}/approve`)).send({})
+  it("申請人本人（platform_admin）不能核准 → 403、不改", async () => {
+    fake.db.project_subcontract_payments = unpaid()
+    const created = await requestChange("pa-user")
+    expect(created.status).toBe(202)
+    const id = created.body.bankChangeRequest.id as string
+    const res = await as("pa-user", request(app).post(`/vendor-bank-changes/${id}/approve`)).send({})
     expect(res.status).toBe(403)
     expect(res.body.error).toBe("vendor_bank_change_self_review")
     expect(vendor().bank_account).toBe("0000000000001")
     expect(fake.rpcCalls).toHaveLength(0)
   })
 
-  it("非老闆／HR（會計、主管、離職 HR）不能核准 → 403", async () => {
+  it("S1：HR（含非申請人的 HR）、會計、主管、離職 HR 都不能核准或退回 → 403", async () => {
     const id = await pendingId()
-    for (const token of ["acct-user", "mgr-user", "hr-off-user"]) {
+    for (const token of ["hr2-user", "acct-user", "mgr-user", "hr-off-user"]) {
+      const rej = await as(token, request(app).post(`/vendor-bank-changes/${id}/reject`)).send({ note: "x" })
+      expect(rej.status, token).toBe(403)
       const res = await as(token, request(app).post(`/vendor-bank-changes/${id}/approve`)).send({})
       expect(res.status, token).toBe(403)
     }
@@ -250,18 +265,18 @@ describe("覆核：誰能核准、核准套用、stale、退回", () => {
     expect(requests()[0]!.status).toBe("pending")
   })
 
-  it("另一位 HR 核准 → 套用到名冊、記 bank_changed_at／bank_verified_at／by、狀態 approved；列表給覆核者完整新舊帳號", async () => {
+  it("platform_admin 核准 → 套用到名冊、記 bank_changed_at／bank_verified_at／by、狀態 approved；列表給覆核者完整新舊帳號", async () => {
     const id = await pendingId()
-    const list = await as("hr2-user", request(app).get("/vendor-bank-changes"))
+    const list = await as("pa-user", request(app).get("/vendor-bank-changes"))
     expect(list.status).toBe(200)
     expect(list.body.requests[0]).toMatchObject({ id, canDecide: true, old: { bankAccount: "0000000000001" }, new: { bankAccount: "0000000000002" }, requestedByName: "測試HR一", reason: "測試：廠商換銀行" })
-    const res = await as("hr2-user", request(app).post(`/vendor-bank-changes/${id}/approve`)).send({})
+    const res = await as("pa-user", request(app).post(`/vendor-bank-changes/${id}/approve`)).send({})
     expect(res.status).toBe(200)
     expect(res.body.status).toBe("approved")
     expect(vendor()).toMatchObject({ bank_account: "0000000000002" })
     expect(vendor().bank_changed_at).toBeTruthy()
-    expect(vendor()).toMatchObject({ bank_verified_by: EMP.hr2 })
-    expect(requests()[0]).toMatchObject({ status: "approved", decided_by_emp_id: EMP.hr2 })
+    expect(vendor()).toMatchObject({ bank_verified_by: EMP.pa })
+    expect(requests()[0]).toMatchObject({ status: "approved", decided_by_emp_id: EMP.pa })
   })
 
   it("設定的老闆（非 HR 角色）可以核准", async () => {
@@ -274,7 +289,7 @@ describe("覆核：誰能核准、核准套用、stale、退回", () => {
   it("申請後名冊帳戶被改過 → 409 vendor_bank_change_stale、不套用", async () => {
     const id = await pendingId()
     vendor().bank_account = "0000000000077"
-    const res = await as("hr2-user", request(app).post(`/vendor-bank-changes/${id}/approve`)).send({})
+    const res = await as("boss-user", request(app).post(`/vendor-bank-changes/${id}/approve`)).send({})
     expect(res.status).toBe(409)
     expect(res.body.error).toBe("vendor_bank_change_stale")
     expect(vendor().bank_account).toBe("0000000000077")
@@ -283,9 +298,9 @@ describe("覆核：誰能核准、核准套用、stale、退回", () => {
 
   it("退回：理由必填；退回後名冊不變、可再申請", async () => {
     const id = await pendingId()
-    const noNote = await as("hr2-user", request(app).post(`/vendor-bank-changes/${id}/reject`)).send({})
+    const noNote = await as("boss-user", request(app).post(`/vendor-bank-changes/${id}/reject`)).send({})
     expect(noNote.status).toBe(400)
-    const res = await as("hr2-user", request(app).post(`/vendor-bank-changes/${id}/reject`)).send({ note: "測試：與廠商電話核對不符" })
+    const res = await as("boss-user", request(app).post(`/vendor-bank-changes/${id}/reject`)).send({ note: "測試：與廠商電話核對不符" })
     expect(res.status).toBe(200)
     expect(res.body.status).toBe("rejected")
     expect(vendor().bank_account).toBe("0000000000001")
@@ -298,6 +313,16 @@ describe("覆核：誰能核准、核准套用、stale、退回", () => {
     const res = await as("hr1-user", request(app).post(`/vendor-bank-changes/${id}/cancel`)).send({})
     expect(res.status).toBe(200)
     expect(res.body.status).toBe("cancelled")
+    expect(vendor().bank_account).toBe("0000000000001")
+  })
+
+  it("S1：租戶沒有申請人以外的老闆／platform_admin → 409 no_bank_change_reviewer，不建申請、名冊不改", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: {} }]
+    fake.db.employees = fake.db.employees!.filter((e) => e.role !== "platform_admin")
+    const res = await requestChange()
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("no_bank_change_reviewer")
+    expect(requests()).toHaveLength(0)
     expect(vendor().bank_account).toBe("0000000000001")
   })
 

@@ -511,7 +511,8 @@ describe("M2 放款草稿編輯人算「自己的單」＋update 條件寫入", 
   it("PoC 反例：HR 改了員工建的草稿（收款帳號）→ 送簽後 HR 代簽 → 403 own_request；改派也 own_request；其他 HR 照常", async () => {
     fake.db.disbursements = [draft(STAFF_ID)]
     await updateDisbursement(TENANT_ID, { empId: HR_ID, role: "hr_admin" }, DISB, { payeeBankAccount: "999-888" })
-    expect(header()).toMatchObject({ payee_bank_account: "999-888", edited_by_emp_ids: [HR_ID] })
+    // 2026-11-17 驗收 F2：快照帳號段存檔時正規化（去連字號）。
+    expect(header()).toMatchObject({ payee_bank_account: "999888", edited_by_emp_ids: [HR_ID] })
     await submitDisbursement(TENANT_ID, { empId: STAFF_ID, role: "employee" }, DISB)
     expect(code(await decide(HR_ID, "hr_admin"))).toBe("own_request")
     expect(code(await change(HR_ID, "hr_admin", HR2_ID))).toBe("own_request")

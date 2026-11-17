@@ -1,4 +1,5 @@
 import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
+import { isBossOrPlatformAdmin } from "../lib/boss.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
@@ -197,6 +198,8 @@ meRouter.get(
         canSeeGroupFinancials: bossLookupOk && canSeeGroupFinancials(self, bossEmpId, features),
         canGrantGroupFinancials: bossLookupOk && canGrantGroupFinancials(self, bossEmpId),
         canSeeGroupOverview: canSeeGroupOverview({ role: data.role as string, status: data.status as string | null }),
+        // 2026-11-17 驗收 S1／F5：能不能覆核廠商收款帳戶變更（在職的設定老闆或 platform_admin）；前端據此才顯示覆核區塊。
+        canReviewVendorBankChanges: bossLookupOk && isBossOrPlatformAdmin(bossEmpId, self),
       })
     } catch (err) {
       next(err)

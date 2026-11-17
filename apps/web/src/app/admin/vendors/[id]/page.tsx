@@ -13,6 +13,7 @@
  * 關係企業標記只有 HR／平台管理員能勾；刪除只有 HR／平台管理員看得到（API requireHrAdmin）。
  * 存檔：修改後留在內頁並顯示「已儲存」（比照員工內頁）；新增成功後換到這家廠商的內頁。
  */
+import { vendorBankStatus } from "@/lib/payee-account";
 import { VendorBankChangeReviews } from "@/components/VendorBankChangeReviews";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -80,7 +81,7 @@ export default function VendorDetailPage() {
   }, [isNew]);
 
   const fetchVendor = useCallback(async () => {
-    const r = await listVendors();
+    const r = await listVendors(undefined, { bankVerified: true });
     const found = r.vendors.find((v) => v.id === id) ?? null;
     setVendor(found);
     setNotFound(!found);
@@ -184,12 +185,15 @@ export default function VendorDetailPage() {
       const extra: { changeReason?: string; confirmDistinctReason?: string } = {};
       let createdId: string | null = null;
       let bankChangeQueued = false;
+      let bankChangeFailed: string | null = null;
       for (let attempt = 0; ; attempt++) {
         try {
           if (isNew) {
             const r = await createVendor({ ...body, ...extra });
             createdId = r.vendor.id;
             bankChangeQueued = r.bankChangeRequested === true;
+            // 驗收 F3：廠商建好了但帳戶沒送出覆核 → 不能只顯示成功。
+            if (r.bankChangeRequested === false) bankChangeFailed = r.message ?? "廠商已建立，但收款帳戶沒有送出覆核，請到廠商頁重新填寫帳戶";
           }
           else bankChangeQueued = (await updateVendor(id, { ...body, ...extra })).bankChangeRequested === true;
           break;
@@ -206,7 +210,7 @@ export default function VendorDetailPage() {
             continue;
           }
           if (!isNew && !extra.changeReason && err instanceof Error && isChangeReasonRequired(err.message)) {
-            const reason = window.prompt("更改收款帳戶請填寫變更原因（會留稽核紀錄，並送老闆／HR 覆核後才生效）：")?.trim();
+            const reason = window.prompt("更改收款帳戶請填寫變更原因（會留稽核紀錄，並送老闆／平台管理員 覆核後才生效）：")?.trim();
             if (!reason) {
               setSaveError("未填寫變更原因，收款帳戶沒有更改。");
               return;
@@ -218,14 +222,19 @@ export default function VendorDetailPage() {
         }
       }
       if (isNew && createdId) {
-        toast.show(bankChangeQueued ? "已新增廠商；收款帳戶已送老闆／HR 覆核，核准後才寫入名冊" : "已新增廠商", "success");
+        if (bankChangeFailed) {
+          toast.show(bankChangeFailed, "error");
+          window.alert(bankChangeFailed);
+        } else {
+          toast.show(bankChangeQueued ? "已新增廠商；收款帳戶已送老闆／平台管理員覆核，核准後才寫入名冊" : "已新增廠商", "success");
+        }
         leave(rosterDetailHref("vendors", createdId));
         return;
       }
       if (bankChangeQueued) {
         setReviewsKey((k) => k + 1);
         // 2026-11-17 雙人覆核：有未付期款 → 收款帳戶變更已送覆核（尚未生效），其他欄位已存。
-        toast.show("已送覆核：收款帳戶變更需老闆／HR 核准後才生效（其他欄位已儲存）", "success");
+        toast.show("已送覆核：收款帳戶變更需老闆／平台管理員核准後才生效（其他欄位已儲存）", "success");
         setBankInfo("收款帳戶變更已送覆核，核准前名冊仍是原帳戶；覆核進度見本頁上方或「放款簽核」頁。");
       } else {
         toast.show("已儲存", "success");
@@ -239,6 +248,12 @@ export default function VendorDetailPage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "儲存失敗";
       const server = (err as { serverMessage?: string } | null)?.serverMessage;
+      // 驗收 F4：其他欄位已存、只有帳戶變更沒送出 → 重新載入並說清楚。
+      if ((err as { body?: { otherFieldsSaved?: unknown } } | null)?.body?.otherFieldsSaved === true) {
+        setSaveError(`其他欄位已儲存，帳戶變更未送出：${server || humanizeVendorIdentityError(msg, server)}`);
+        try { await fetchVendor(); } catch { /* 錯誤訊息已顯示 */ }
+        return;
+      }
       setSaveError(msg.includes("migration_required") && server?.includes("0103") ? server : msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : humanizeVendorIdentityError(humanizeAffiliateError(msg), server));
     } finally {
       setSaving(false);
@@ -311,7 +326,7 @@ export default function VendorDetailPage() {
 
   return (
     <>
-      {/* 2026-11-17：這家廠商的收款帳戶變更待覆核（老闆／HR 可在此核准）。 */}
+      {/* 2026-11-17：這家廠商的收款帳戶變更待覆核（老闆／平台管理員 可在此核准）。 */}
       {!isNew && (
         <VendorBankChangeReviews
           key={reviewsKey}
@@ -337,6 +352,10 @@ export default function VendorDetailPage() {
           isNew ? undefined : (
             <>
               <Pill tone="gray">{VENDOR_ROSTER_KIND_LABELS[vendorRosterKind(vendor!)]}</Pill>
+              {(() => {
+                const st = vendorBankStatus(vendor!);
+                return st ? <Pill tone={st.tone}>{st.label}</Pill> : null;
+              })()}
               {vendor!.isAffiliate === true && <Pill tone="blue">關係企業</Pill>}
               {vendor!.taxIdValid === false && <Pill tone="amber">統編檢查碼不符</Pill>}
               {readOnly && <Pill tone="blue">唯讀</Pill>}

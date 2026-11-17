@@ -743,6 +743,7 @@ export const SUBCONTRACT_ERRORS: Record<string, string> = {
   vendor_name_similar: "此名稱與名冊廠商相近；若是同一家請在下拉選擇該廠商，若是不同公司請填寫說明。",
   invalid_subcontract_vendor_name: "副委託廠商名稱含有不可見字元或西里爾／希臘字母，請改用中文或英文字母重新輸入。",
   rebind_reason_required: "副委託改綁另一家名冊廠商（或解除名冊綁定），請填寫原因。",
+  rebind_requires_boss: "這筆副委託還有未付期款，解除或改綁名冊廠商（改變收款對象）只限老闆或平台管理員操作。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_contract: "選到的合約不屬於本專案或已作廢。",
   invalid_company: "選到的公司主體不存在。",

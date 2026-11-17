@@ -72,6 +72,7 @@ export function humanizeVendorIdentityError(message: string, serverMessage?: str
   if (message.includes("change_reason_required")) return VENDOR_CHANGE_REASON_REQUIRED_TEXT;
   // 2026-11-17 雙人覆核：同廠商已有一筆帳戶變更待覆核。
   if (message.includes("vendor_bank_change_pending")) return server || "此廠商已有一筆收款帳戶變更待覆核，請等覆核完成或取消後再改";
+  if (message.includes("no_bank_change_reviewer")) return server || "目前沒有可核准的老闆或平台管理員（申請人以外），收款帳戶無法送出覆核";
   if (message.includes("invalid_vendor_name")) return INVALID_VENDOR_NAME_TEXT;
   return message;
 }

@@ -1,4 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
+import { subcontractsWithUnpaidInstallments } from "../services/vendor-unpaid.js"
+import { isBossOrPlatformAdmin, loadConfiguredBossEmpId } from "../lib/boss.js"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
@@ -683,6 +685,19 @@ subcontractsRouter.put(
             message: unbind
               ? `副委託「${prev.vendor_name ?? ""}」解除與名冊廠商「${oldVendorName}」的綁定（改為非登錄廠商）請填寫原因`
               : `副委託「${prev.vendor_name ?? ""}」從「${oldVendorName}」改綁「${newVendorName}」請填寫改綁原因`,
+          })
+          return
+        }
+        // 驗收 S2（2026-11-17）：副委託仍有未付期款時，解除綁定或改綁另一家＝改變期款的收款對象（可改用「其他」手動帳戶繞過名冊帳戶確認）
+        // → 只限在職的設定老闆或 platform_admin 操作；其他人（含 HR、會計）帶 rebindReason 也 403 rebind_requires_boss。
+        const unpaidSubs = await subcontractsWithUnpaidInstallments(tenantId, rebinds.map((p) => p.id!), `PUT /projects/${projectId}/subcontracts (rebind)`)
+        if (unpaidSubs.size > 0 && !isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), scope.self)) {
+          const blocked = rebinds.find((p) => unpaidSubs.has(p.id!))!
+          res.status(403).json({
+            error: "rebind_requires_boss",
+            id: blocked.id,
+            index: payload.indexOf(blocked),
+            message: "這筆副委託還有未付期款，解除或改綁名冊廠商（改變收款對象）只限老闆或平台管理員操作",
           })
           return
         }

@@ -33,6 +33,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 const HR = "bbbbbbbb-0000-4000-8000-000000000001"
 const HR2 = "bbbbbbbb-0000-4000-8000-000000000002"
 const ACCT = "bbbbbbbb-0000-4000-8000-000000000003"
+const BOSS = "bbbbbbbb-0000-4000-8000-000000000009"
 const COMPANY = "cccccccc-0000-4000-8000-000000000001"
 const PROJECT = "dddddddd-0000-4000-8000-000000000001"
 const VENDOR_A = "aaaaaaaa-0000-4000-8000-00000000000a"
@@ -46,11 +47,12 @@ beforeEach(() => {
   fake.reset()
   resetColumnProbeCache()
   resetDisbursementApprovalProbe()
-  fake.db.tenants = [{ id: TENANT_ID, features: {} }]
+  fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: BOSS } } }]
   fake.db.employees = [
     { id: HR, tenant_id: TENANT_ID, user_id: "hr-user", role: "hr_admin", dept_id: null, name: "測試人資", status: "active" },
     { id: HR2, tenant_id: TENANT_ID, user_id: "hr2-user", role: "hr_admin", dept_id: null, name: "測試人資二", status: "active" },
     { id: ACCT, tenant_id: TENANT_ID, user_id: "acct-user", role: "accountant", dept_id: null, name: "測試會計", status: "active" },
+    { id: BOSS, tenant_id: TENANT_ID, user_id: "boss-user", role: "employee", dept_id: null, name: "測試老闆", status: "active" },
   ]
   fake.db.companies = [{ id: COMPANY, tenant_id: TENANT_ID, name: "測試付款公司", bank_name: null, bank_account: null, is_active: true, is_default: true }]
   fake.db.projects = [{ id: PROJECT, tenant_id: TENANT_ID, code: "ZZ-001", name: "測試專案", lead_emp_id: null, archived_at: null, reserved_at: null, client_id: null, deleted_at: null }]
@@ -110,13 +112,13 @@ describe("H1：先標已付讓廠商「無未付」再改帳號", () => {
     fake.db.disbursements = [header(VENDOR_A, { status: "draft", approved_at: null })]
     fake.db.disbursement_allocations = [alloc()]
     await expect(submitDisbursement(TENANT_ID, actor, DISB)).rejects.toMatchObject(unverified)
-    const BOSS = "bbbbbbbb-0000-4000-8000-000000000008"
-    fake.db.employees!.push({ id: BOSS, tenant_id: TENANT_ID, user_id: "boss-user", role: "platform_admin", dept_id: null, name: "測試老闆", status: "active" })
+    const PA = "bbbbbbbb-0000-4000-8000-000000000008"
+    fake.db.employees!.push({ id: PA, tenant_id: TENANT_ID, user_id: "pa-user", role: "platform_admin", dept_id: null, name: "測試平台管理員", status: "active" })
     const step = {
       id: "99999999-0000-4000-8000-000000000001", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: HR,
       candidate_emp_ids: [HR], step_kind: "manager", decision: "pending", comment: null, acted_at: null, acted_by_emp_id: null, created_at: "2026-11-01T00:00:00.000Z",
     }
-    fake.db.disbursement_approval_steps = [step, { ...step, id: "99999999-0000-4000-8000-000000000002", step_order: 2, approver_emp_id: BOSS, candidate_emp_ids: [BOSS], step_kind: "boss" }]
+    fake.db.disbursement_approval_steps = [step, { ...step, id: "99999999-0000-4000-8000-000000000002", step_order: 2, approver_emp_id: PA, candidate_emp_ids: [PA], step_kind: "boss" }]
     fake.db.disbursements = [header(VENDOR_A, { status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT, submitted_by_emp_id: ACCT, submitted_at: "2026-11-01T00:00:00.000Z" })]
     await expect(decideDisbursement({ action: "approve", tenantId: TENANT_ID, id: DISB, actor: { ...actor, active: true } })).rejects.toMatchObject(unverified)
     fake.db.disbursements = [header(VENDOR_A)]
@@ -149,7 +151,8 @@ describe("H2：新建廠商帶帳號、改綁副委託", () => {
     fake.db.disbursements = []
     const again = await as("acct-user", request(app).patch(`/vendors/${B}`)).send({ bankCode: "999", bankName: "測試銀行", bankAccount: "0000777", accountHolder: "測試乙新廠商" })
     expect(again.status).toBe(202)
-    expect((await as("hr2-user", request(app).post(`/vendor-bank-changes/${again.body.bankChangeRequest.id}/approve`)).send({})).status).toBe(200)
+    expect((await as("hr2-user", request(app).post(`/vendor-bank-changes/${again.body.bankChangeRequest.id}/approve`)).send({})).status).toBe(403) // S1：HR 不能核准
+    expect((await as("boss-user", request(app).post(`/vendor-bank-changes/${again.body.bankChangeRequest.id}/approve`)).send({})).status).toBe(200)
     fake.db.disbursements = [header(B, { ...snap, payee_bank_account: "0000777 測試乙新廠商", payee_bank_code: "999", payee_bank_name: "測試銀行（999）" })]
     const paid = await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })
     expect(paid?.status).toBe("paid")
@@ -195,5 +198,107 @@ describe("核准畫面：真正戶名", () => {
     expect(res.status).toBe(200)
     expect(res.body.disbursements[0]).toMatchObject({ payeeName: "測試甲工程行", payeeAccountHolder: "測試甲工程行王小明", payeeAccountMasked: "****0111", payeeBankAccount: null, vendorBankVerified: true })
     expect(JSON.stringify(res.body)).not.toContain("0000111 ")
+  })
+})
+
+describe("F1：登錄廠商付現金／支票（名冊與單上都沒帳號）不需帳戶確認；轉帳仍要", () => {
+  const noAccount = () => Object.assign(fake.db.vendors![0]!, { bank_name: null, bank_code: null, bank_account: null, account_holder: null, bank_verified_at: null })
+  const snap = { payee_bank_account: null, payee_bank_code: null, payee_bank_name: null }
+  it.each(["cash", "check"])("%s：送審過帳戶防線、付款成功、直接建成已匯款成功", async (method) => {
+    noAccount()
+    fake.db.disbursements = [header(VENDOR_A, { ...snap, method, status: "draft", approved_at: null })]
+    fake.db.disbursement_allocations = [alloc()]
+    // 帳戶防線通過 → 送審成功（老闆關）。
+    expect((await submitDisbursement(TENANT_ID, actor, DISB))?.disbursement?.status ?? "pending_approval").toBe("pending_approval")
+    expect(fake.db.disbursements![0]!.status).toBe("pending_approval")
+    fake.db.disbursements = [header(VENDOR_A, { ...snap, method })]
+    expect((await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" }))?.status).toBe("paid")
+    fake.db.disbursements = []
+    fake.db.disbursement_allocations = []
+    fake.db.project_subcontract_payments![0]!.paid_on = null
+    fake.db.project_subcontract_payments![0]!.disbursement_id = null
+    const res = await as("hr-user", request(app).post("/disbursements")).send({
+      payeeKind: "vendor", vendorId: VENDOR_A, payingCompanyId: COMPANY, method, amount: 1000, status: "paid", paidOn: "2026-11-16", forceReason: "測試",
+      allocations: [{ projectId: PROJECT, subcontractId: SUB_A, subcontractPaymentId: PAY_A, amount: 1000 }],
+    })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+  })
+  it("transfer：無帳號且未確認 → 409 vendor_bank_unverified", async () => {
+    noAccount()
+    fake.db.disbursements = [header(VENDOR_A, { ...snap, method: "transfer" })]
+    fake.db.disbursement_allocations = [alloc()]
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject(unverified)
+  })
+  it("現金但名冊有未確認帳號 → 仍擋（只有兩邊都沒帳號才放）", async () => {
+    fake.db.vendors![0]!.bank_verified_at = null
+    fake.db.disbursements = [header(VENDOR_A, { method: "cash" })]
+    fake.db.disbursement_allocations = [alloc()]
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject(unverified)
+  })
+})
+
+describe("S3：已刪除的廠商不算", () => {
+  it("收款廠商已軟刪 → 付款 409 payee_bank_changed", async () => {
+    fake.db.vendors![0]!.deleted_at = "2026-11-10T00:00:00.000Z"
+    fake.db.disbursements = [header(VENDOR_A)]
+    fake.db.disbursement_allocations = [alloc()]
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject({ code: "payee_bank_changed" })
+  })
+})
+
+describe("F2：帳號含空白／連字號的快照與遮罩", () => {
+  it("名冊帳號「0123 4567 8901」建單 → 快照正規化成「012345678901 戶名」，付款比對通過，核准畫面 ****8901、戶名不露帳號", async () => {
+    Object.assign(fake.db.vendors![0]!, { bank_account: "0123 4567 8901", account_holder: "王小明" })
+    const res = await as("hr-user", request(app).post("/disbursements")).send({
+      payeeKind: "vendor", vendorId: VENDOR_A, payingCompanyId: COMPANY, method: "transfer", amount: 1000, status: "draft",
+      allocations: [{ projectId: PROJECT, subcontractId: SUB_A, subcontractPaymentId: PAY_A, amount: 1000 }],
+    })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    const row = fake.db.disbursements![0]!
+    expect(row.payee_bank_account).toBe("012345678901 王小明")
+    expect(res.body.disbursement).toMatchObject({ payeeAccountMasked: "****8901", payeeAccountHolder: "王小明" })
+    // 舊存法（未正規化）也照認。
+    fake.db.disbursements = [header(VENDOR_A, { payee_bank_account: "0123 4567 8901 王小明", payee_name: "測試甲工程行" })]
+    fake.db.disbursement_allocations = [alloc()]
+    expect((await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" }))?.status).toBe("paid")
+  })
+})
+
+describe("S2：解除綁定後改用「其他」收款 → 核准頁紅框", () => {
+  it("分攤到有 rebind 稽核的副委託、收款為手動 → payeeRebindWarning", async () => {
+    fake.db.project_subcontracts![0]!.vendor_id = null
+    fake.db.audit_logs = [{ id: "a1", tenant_id: TENANT_ID, table_name: "project_subcontracts", record_id: SUB_A, action: "UPDATE", old_row: { vendor_id: VENDOR_A }, new_row: { vendor_id: null, unbind: true, rebindReason: "測試" } }]
+    fake.db.disbursement_approval_steps = [{
+      id: "99999999-0000-4000-8000-000000000001", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: HR,
+      candidate_emp_ids: [HR], step_kind: "manager", decision: "pending", comment: null, acted_at: null, acted_by_emp_id: null, created_at: "2026-11-01T00:00:00.000Z",
+    }]
+    fake.db.disbursements = [header("", { payee_kind: "other", vendor_id: null, payee_name: "測試某人", payee_bank_account: "0009999 測試某人", status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT })]
+    fake.db.disbursement_allocations = [alloc()]
+    const res = await as("hr-user", request(app).get("/disbursements/pending-approvals"))
+    expect(res.status).toBe(200)
+    expect(res.body.disbursements[0].payeeRebindWarning).toMatchObject({ subcontractIds: [SUB_A] })
+    // 對照：沒有 rebind 稽核 → 不標。
+    fake.db.audit_logs = []
+    const res2 = await as("hr-user", request(app).get("/disbursements/pending-approvals"))
+    expect(res2.body.disbursements[0].payeeRebindWarning).toBeUndefined()
+  })
+})
+
+describe("F8：0104 回填的既有確認不算近期確認", () => {
+  it("bank_verified_by 空（回填）→ 不出黃警示；有確認人且在 30 天內 → 出", async () => {
+    const recent = new Date(Date.now() - 2 * 86_400_000).toISOString()
+    Object.assign(fake.db.vendors![0]!, { bank_verified_at: recent, bank_verified_by: null, bank_changed_at: null })
+    fake.db.disbursement_approval_steps = [{
+      id: "99999999-0000-4000-8000-000000000001", tenant_id: TENANT_ID, disbursement_id: DISB, round: 1, step_order: 1, approver_emp_id: HR,
+      candidate_emp_ids: [HR], step_kind: "manager", decision: "pending", comment: null, acted_at: null, acted_by_emp_id: null, created_at: "2026-11-01T00:00:00.000Z",
+    }]
+    fake.db.disbursements = [header(VENDOR_A, { status: "pending_approval", current_step: 1, approved_at: null, created_by_emp_id: ACCT })]
+    fake.db.disbursement_allocations = [alloc()]
+    const a = await as("hr-user", request(app).get("/disbursements/pending-approvals"))
+    expect(a.body.disbursements[0].payeeBankChangedAt).toBeNull()
+    fake.db.vendors![0]!.bank_verified_by = BOSS
+    resetColumnProbeCache()
+    const b = await as("hr-user", request(app).get("/disbursements/pending-approvals"))
+    expect(b.body.disbursements[0].payeeBankChangedAt).toBe(recent)
   })
 })

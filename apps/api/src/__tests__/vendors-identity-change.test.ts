@@ -28,7 +28,11 @@ const SUB_DELETED = "ffffffff-0000-4000-8000-0000000000c2"
 
 beforeEach(() => {
   fake.reset()
-  fake.db.employees = [{ id: "bbbbbbbb-0000-4000-8000-000000000001", tenant_id: TENANT_ID, user_id: USER_TOKEN, role: "accountant", dept_id: null }]
+  fake.db.employees = [
+    { id: "bbbbbbbb-0000-4000-8000-000000000001", tenant_id: TENANT_ID, user_id: USER_TOKEN, role: "accountant", dept_id: null },
+    // 2026-11-17 S1：帳戶變更要有「申請人以外」的在職老闆／platform_admin 才能送覆核。
+    { id: "bbbbbbbb-0000-4000-8000-0000000000ff", tenant_id: TENANT_ID, user_id: "vendor-pa", role: "platform_admin", dept_id: null, status: "active" },
+  ]
   fake.db.vendors = [{
     id: VENDOR, tenant_id: TENANT_ID, name: "測試甲廠商", short_name: null, category: null, contact_name: null, tax_id: null,
     phone: null, mobile: null, source: "manual", deleted_at: null,

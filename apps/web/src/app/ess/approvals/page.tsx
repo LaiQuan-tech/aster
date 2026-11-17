@@ -1,5 +1,6 @@
 "use client";
 
+import { getMeCached } from "@/lib/ess-state";
 import { VendorBankChangeReviews } from "@/components/VendorBankChangeReviews";
 import { PayeeAccountInfo } from "@/components/PayeeAccountInfo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -149,6 +150,14 @@ function rowLabel(row: PendingApproval): string {
 }
 
 export default function ApprovalsPage() {
+  // 驗收 F5：只有能覆核廠商收款帳戶變更的人才渲染覆核區塊（不打多餘的 403）。
+  const [canReviewBank, setCanReviewBank] = useState(false);
+  useEffect(() => {
+    getMeCached()
+      // /me 新欄位（舊 API 沒有＝不顯示）；不改 ess-api 的 Me 型別，免得與其他功能的改動衝突。
+      .then((me) => setCanReviewBank((me as { canReviewVendorBankChanges?: boolean }).canReviewVendorBankChanges === true))
+      .catch(() => setCanReviewBank(false));
+  }, []);
   const toast = useToast();
   const [rows, setRows] = useState<PendingApproval[]>([]);
   const [disbursements, setDisbursements] = useState<PendingDisbursementApproval[]>([]);
@@ -870,8 +879,8 @@ export default function ApprovalsPage() {
 
       {/* 遲到說明（2026-10-11）：主管看部屬的（唯讀）、老闆直接按「影響／不影響全勤」；沒有就不顯示 */}
       {!loading && <BonusRunApprovalsSection />}
-      {/* 2026-11-17 驗收 C：廠商收款帳戶變更待覆核——非後台角色的設定老闆也在這裡覆核（API 判權限；沒有／沒權限不顯示） */}
-      {!loading && <VendorBankChangeReviews />}
+      {/* 2026-11-17 驗收 C／F5：廠商收款帳戶變更待覆核——只對能覆核的人（設定老闆／platform_admin，/me.canReviewVendorBankChanges）渲染 */}
+      {!loading && canReviewBank && <VendorBankChangeReviews />}
       {!loading && <LateReportsSection />}
 
       {/* 多選批次簽核：底部固定列（手機浮在底部分頁列之上，桌機貼底）＋預留空間，最後一張卡不會被蓋住 */}

@@ -169,7 +169,8 @@ describe("正常業務回歸 N1–N8", () => {
     expect(pa.status, r(pa)).toBe(200)
     expect(await approveFlow(id)).toBe("submit 200 approve approved")
     expect((await pay(id)).status).toBe(200)
-    expect(disb(id).payee_bank_account).toBe("5555-666 測試甲王小明")
+    // 驗收 F2：快照帳號段正規化（去連字號）。
+    expect(disb(id).payee_bank_account).toBe("5555666 測試甲王小明")
     expect(disb(id).payee_bank_code).toBe("777")
   })
   it("N4 非登錄手打付款（非登錄副委託同名／零分攤一般對象）", async () => {

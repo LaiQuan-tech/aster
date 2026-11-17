@@ -19,6 +19,9 @@ export function PayeeAccountInfo({ d, className = "" }: { d: PayeeAccountFields;
       >
         {s.sourceLabel}
       </span>
+      {s.rebindText && (
+        <p role="alert" className="mt-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 font-medium text-red-700">⚠ {s.rebindText}</p>
+      )}
       {s.holderMismatchText && (
         <div role="note" className="mt-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-amber-800">⚠ {s.holderMismatchText}</div>
       )}

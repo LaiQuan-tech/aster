@@ -14,7 +14,8 @@ import { enqueue } from "./notify.js"
  *   改建一筆 vendor_bank_change_requests（status pending）；同一廠商同時只能一筆（partial unique index）。
  *   核准後才寫入名冊並設 bank_verified_at／by；放款收款對象是登錄廠商時，帳戶未確認 → 409 vendor_bank_unverified。
  *   未匯款放款單照舊硬擋改帳戶（routes/vendors.ts）；核准時只擋送簽中／已核准的單（草稿送審時會被要求重新帶入名冊帳戶）。
- * - 覆核者：在職的老闆（lib/boss.ts isBossOrPlatformAdmin：設定的老闆或 platform_admin）或 HR（isHrRole），且不是申請人本人。
+ * - 覆核者：在職的老闆（lib/boss.ts isBossOrPlatformAdmin：設定的老闆或 platform_admin），且不是申請人本人。
+ *   驗收 S1（2026-11-17）：HR 不再能核准（HR 可自建 HR 分身）；DB 函式（0105）同樣檢查。
  * - 核准／退回／取消一律走 DB 函式 decide_vendor_bank_change（同一交易：鎖列、舊值樂觀檢查、套用、寫稽核）。
  * - 廠商有 pending 變更時，該廠商的放款單送審／核准／付款 409 vendor_bank_change_pending（services/disbursements.ts）。
  * - 0103 尚未套用（表不存在）：pending 查詢一律當「沒有」、建立申請回 409 migration_required（不會默默直接改帳戶）。
@@ -67,27 +68,37 @@ export class BankChangeError extends Error {
   }
 }
 
+const ACCOUNT_TOKEN = /^[\d\-－‐–—]+$/
+
 /**
- * 放款單快照「帳號 戶名」拆出帳號段：知道戶名且快照以「 戶名」結尾 → 去掉戶名；否則取第一個空白前的那一段
- * （驗收 A：戶名開頭是數字時——「0001234567890 104人力銀行」——不可把 104 當成帳號）。
+ * 放款單快照「帳號 戶名」拆成帳號段與戶名段（驗收 A／F2）：
+ * - 知道戶名（登錄廠商＝名冊 account_holder）且快照以「空白＋戶名」結尾 → 精確去掉戶名；
+ * - 否則帳號段＝開頭連續的「純數字／連字號」token（帳號可含空白：「0123 4567 8901」整串都是帳號，
+ *   最後一段純數字不當戶名）；第一個含其他字元的 token 起是戶名（「0001234567890 104人力銀行」的 104 不算帳號）。
  */
-export function accountSegment(account: string | null | undefined, holder?: string | null): string {
+export function splitAccountSnapshot(account: string | null | undefined, holder?: string | null): { account: string; holder: string | null } {
   const raw = String(account ?? "").trim()
-  if (!raw) return ""
+  if (!raw) return { account: "", holder: null }
   const h = (holder ?? "").trim()
   if (h && raw.length > h.length && raw.endsWith(h) && /\s/.test(raw.charAt(raw.length - h.length - 1))) {
-    return raw.slice(0, raw.length - h.length).trim()
+    return { account: raw.slice(0, raw.length - h.length).trim(), holder: h }
   }
-  return raw.split(/\s+/)[0] ?? ""
+  const tokens = raw.split(/\s+/)
+  let n = 0
+  while (n < tokens.length && ACCOUNT_TOKEN.test(tokens[n]!)) n++
+  if (n === 0) n = 1 // 帳號段本身含其他字元（例：「A-123 某某」）→ 第一段當帳號
+  const rest = tokens.slice(n).join(" ")
+  return { account: tokens.slice(0, n).join(" "), holder: rest || null }
 }
 
-/** 快照的戶名段（第一個空白之後）；沒有回 null。 */
-export function holderSegment(account: string | null | undefined): string | null {
-  const raw = String(account ?? "").trim()
-  const i = raw.search(/\s/)
-  if (i < 0) return null
-  const rest = raw.slice(i).trim()
-  return rest || null
+/** 帳號段（見 splitAccountSnapshot）。 */
+export function accountSegment(account: string | null | undefined, holder?: string | null): string {
+  return splitAccountSnapshot(account, holder).account
+}
+
+/** 快照的戶名段；沒有回 null。 */
+export function holderSegment(account: string | null | undefined, holder?: string | null): string | null {
+  return splitAccountSnapshot(account, holder).holder
 }
 
 /** 帳號只露末 4 碼（帳號段的數字；沒有數字回「****」；空值回 null）。核准放款的畫面一律用這個，完整帳號不送到核准者前端。 */
@@ -95,6 +106,17 @@ export function maskBankAccount(account: string | null | undefined, holder?: str
   const seg = accountSegment(account, holder)
   if (!seg) return null
   return `****${seg.replace(/\D/g, "").slice(-4)}`
+}
+
+/**
+ * 放款建立／更新時存的快照正規化（F2）：帳號段去空白與連字號，戶名段原樣，中間一個空白。
+ * 「0123 4567 8901 王小明」→「012345678901 王小明」。空值回 null。
+ */
+export function normalizeAccountSnapshot(account: string | null | undefined, holder?: string | null): string | null {
+  const { account: acct, holder: h } = splitAccountSnapshot(account, holder)
+  const a = acct.replace(/[\s\-－‐–—]/g, "")
+  const out = [a, h].filter((x) => !!x).join(" ")
+  return out || null
 }
 
 /** 表不存在（0103 未套）→ true 並記一次 log。 */
@@ -138,24 +160,20 @@ export async function canReviewBankChange(
   self: { id?: string | null; role?: string | null; active?: boolean | null } | null | undefined,
 ): Promise<boolean> {
   if (!self?.id || actorIsInactive(self)) return false
-  if (isHrRole(self.role)) return true
+  // 驗收 S1：HR 能自己新增 HR 分身或重設員工密碼後升 HR → 帳戶覆核只限在職的設定老闆或 platform_admin（HR 仍可申請）。
   const boss = await loadConfiguredBossEmpId(tenantId)
   return isBossOrPlatformAdmin(boss, self)
 }
 
-/** 覆核通知收件人：老闆＋在職 platform_admin＋在職 hr_admin，排除申請人。 */
+/** 能覆核的人：在職的設定老闆＋在職 platform_admin，排除申請人（小寫 id）。 */
+async function eligibleReviewers(tenantId: string, requesterEmpId: string | null): Promise<string[]> {
+  const boss = await loadConfiguredBossEmpId(tenantId)
+  return bossNotificationRecipients(tenantId, boss, [requesterEmpId])
+}
+
+/** 覆核通知收件人（＝能覆核的人），依角色分後台／ESS 連結。 */
 async function reviewerRecipients(tenantId: string, requesterEmpId: string | null): Promise<{ admin: string[]; ess: string[] }> {
-  const boss = await loadConfiguredBossEmpId(tenantId).catch(() => null)
-  const bossAndAdmins = await bossNotificationRecipients(tenantId, boss, [requesterEmpId])
-  const { data, error } = await supabaseAdmin
-    .from("employees")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("role", "hr_admin")
-    .eq("status", "active")
-  const hr = error ? [] : ((data ?? []) as Array<{ id: string }>).map((r) => r.id.toLowerCase())
-  const skip = requesterEmpId?.toLowerCase()
-  const all = [...new Set([...bossAndAdmins, ...hr])].filter((id) => id !== skip)
+  const all = await eligibleReviewers(tenantId, requesterEmpId)
   if (all.length === 0) return { admin: [], ess: [] }
   // 驗收 C：收件人是後台角色（HR／平台管理員）→ 連到後台放款簽核頁；其他（例如非後台角色的設定老闆）→ ESS 簽核頁。
   const { data: roles } = await supabaseAdmin.from("employees").select("id, role").eq("tenant_id", tenantId).in("id", all)
@@ -184,6 +202,12 @@ export async function createBankChangeRequest(params: {
   const { tenantId, vendorId } = params
   if (await vendorHasPendingBankChange(tenantId, vendorId)) {
     throw new BankChangeError(409, "vendor_bank_change_pending", { message: "此廠商已有一筆收款帳戶變更待覆核，請等覆核完成或取消後再改" })
+  }
+  // S1：租戶沒有「申請人以外」的在職老闆／platform_admin → 沒人能核准，直接回清楚的錯誤（不建一筆永遠卡住的申請）。
+  if ((await eligibleReviewers(tenantId, params.requestedByEmpId)).length === 0) {
+    throw new BankChangeError(409, "no_bank_change_reviewer", {
+      message: "收款帳戶需由老闆或平台管理員（申請人以外）核准，但目前沒有可核准的人；請先到設定指定老闆或新增平台管理員",
+    })
   }
   const id = crypto.randomUUID()
   const row = {
@@ -321,6 +345,7 @@ const RPC_ERRORS: Array<[string, number, string]> = [
   ["vendor_bank_change_self_review", 403, "不能覆核自己提出的帳戶變更"],
   ["vendor_not_found", 404, "找不到這家廠商（可能已刪除）"],
   ["vendor_has_open_disbursements", 409, "此廠商仍有未匯款的放款單，請先作廢或匯款後再核准帳戶變更"],
+  ["not_bank_change_reviewer", 403, "只有老闆或平台管理員可以覆核廠商收款帳戶變更"],
   ["vendor_bank_change_stale", 409, "名冊上的收款帳戶在申請後已被改過，這筆申請已過期，請退回後重新申請"],
 ]
 
@@ -357,7 +382,7 @@ export async function decideBankChange(params: {
     }
   } else {
     if (!(await canReviewBankChange(tenantId, actor))) {
-      throw new BankChangeError(403, "not_bank_change_reviewer", { message: "只有老闆或 HR 可以覆核廠商收款帳戶變更" })
+      throw new BankChangeError(403, "not_bank_change_reviewer", { message: "只有老闆或平台管理員可以覆核廠商收款帳戶變更" })
     }
     if (mine) throw new BankChangeError(403, "vendor_bank_change_self_review", { message: "不能覆核自己提出的帳戶變更" })
   }

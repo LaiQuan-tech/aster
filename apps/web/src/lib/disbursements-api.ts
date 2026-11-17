@@ -80,8 +80,10 @@ export interface Disbursement {
   vendorBankChangePending?: boolean
   /** 真正的帳戶戶名（登錄廠商＝名冊戶名；手動＝快照戶名段）。 */
   payeeAccountHolder?: string | null
-  /** 登錄廠商的名冊帳戶是否經老闆／HR 確認（未確認＝送審／核准／付款會被擋）。 */
+  /** 登錄廠商的名冊帳戶是否經老闆／platform_admin 確認（未確認＝送審／核准／付款會被擋）。 */
   vendorBankVerified?: boolean
+  /** 驗收 S2：手動收款分攤到曾解除／改綁名冊廠商的副委託 → 紅框。 */
+  payeeRebindWarning?: { message: string; subcontractIds: string[] }
   payingCompanyId: string | null
   payingCompanyName: string | null
   payingBankAccount: string | null
@@ -623,8 +625,8 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   vendor_bank_missing: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶。",
   payee_is_registered_vendor: "收款對象與名冊廠商名稱相同，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
   payee_name_similar: "收款名稱與名冊廠商相近；若是同一家請改選登錄廠商，若確為不同公司請填寫說明。",
-  vendor_bank_unverified: "此廠商的收款帳戶尚未經老闆／HR 確認，確認前不能送審、核准或付款（到廠商名冊送出帳戶並請老闆／HR 核准）。",
-  vendor_bank_change_pending: "此廠商的收款帳戶變更正在等待覆核（老闆／HR），覆核完成前不能送審、核准或付款。",
+  vendor_bank_unverified: "此廠商的收款帳戶尚未經老闆／平台管理員確認，確認前不能送審、核准或付款（到廠商名冊送出帳戶並請老闆／HR 核准）。",
+  vendor_bank_change_pending: "此廠商的收款帳戶變更正在等待覆核（老闆／平台管理員），覆核完成前不能送審、核准或付款。",
   payee_bank_changed: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出；已核准的單請先撤回簽核再編輯。",
   invalid_payee_name: "名稱含有不可見字元或西里爾／希臘字母，請重新輸入。",
   vendor_has_unpaid_installments: "此廠商仍有未付期款，若要付期款請改用分攤；確定為非期款支出請勾選確認。",

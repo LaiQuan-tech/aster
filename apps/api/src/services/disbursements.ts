@@ -39,7 +39,7 @@ import { writeAuditLog, writeAuditLogStrict } from "./audit.js"
 import { firstNewlyPickedInactive } from "./company-lifecycle.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { isHrRole } from "../middleware/scope.js"
-import { holderSegment, maskBankAccount, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
+import { accountSegment, holderSegment, maskBankAccount, normalizeAccountSnapshot, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
 
 /**
  * 放款專區——匯款紀錄（disbursements）× 分攤（disbursement_allocations）×
@@ -559,6 +559,8 @@ export type SerializedDisbursement = {
   payeeAccountHolder?: string | null
   /** 登錄廠商的名冊收款帳戶是否經第二人確認（0104 bank_verified_at）；未確認時送審／核准／付款 409 vendor_bank_unverified。 */
   vendorBankVerified?: boolean
+  /** 驗收 S2：收款為手動（其他）且分攤到曾解除／改綁名冊廠商的副委託（有 rebind 稽核）→ 核准頁紅框。 */
+  payeeRebindWarning?: { message: string; subcontractIds: string[] }
   /** 登錄廠商的名冊收款帳戶 30 天內變更或確認過 → 該時間（vendors.bank_changed_at／bank_verified_at 取較晚者）；否則 null。 */
   payeeBankChangedAt?: string | null
   /** 登錄廠商有「帳戶變更待覆核」→ true（送審／核准／付款會被擋）。 */
@@ -812,7 +814,45 @@ export async function serializeMany(tenantId: string, rows: DisbursementRow[]): 
   const allocBy = groupBy(allocations, (a) => a.disbursement_id)
   const out = rows.map((r) => serializeDisbursement(r, allocBy.get(r.id) ?? [], ctx, companies))
   await attachVendorBankStatus(tenantId, out)
+  await attachRebindWarning(tenantId, out)
   return out
+}
+
+/**
+ * 驗收 S2：「其他」（手動帳戶）收款單分攤到的副委託曾經解除或改綁名冊廠商（project_subcontracts 稽核帶 rebindReason）→ 紅框：
+ * 這是「解除綁定後改用其他收款繞過名冊帳戶確認」的樣態，請核准人確認收款對象。查詢失敗不擋顯示（記 log）。
+ */
+async function attachRebindWarning(tenantId: string, items: SerializedDisbursement[]): Promise<void> {
+  const targets = items.filter((d) => d.payeeKind === "other" && d.allocations.some((a) => !!a.subcontractId))
+  if (targets.length === 0) return
+  const subIds = [...new Set(targets.flatMap((d) => d.allocations.map((a) => a.subcontractId).filter((v): v is string => !!v)))]
+  try {
+    const rebound = new Set<string>()
+    for (let i = 0; i < subIds.length; i += 100) {
+      const { data, error } = await supabaseAdmin
+        .from("audit_logs")
+        .select("record_id, new_row")
+        .eq("tenant_id", tenantId)
+        .eq("table_name", "project_subcontracts")
+        .in("record_id", subIds.slice(i, i + 100))
+      if (error) throw new Error(error.message)
+      for (const r of (data ?? []) as Array<{ record_id: string | null; new_row: Record<string, unknown> | null }>) {
+        const reason = r.new_row?.rebindReason
+        if (r.record_id && typeof reason === "string" && reason.trim()) rebound.add(r.record_id.toLowerCase())
+      }
+    }
+    for (const d of targets) {
+      const hit = d.allocations.map((a) => a.subcontractId).filter((v): v is string => !!v && rebound.has(v.toLowerCase()))
+      if (hit.length > 0) {
+        d.payeeRebindWarning = {
+          message: "分攤的副委託曾解除或改綁名冊廠商，這張單改用手動輸入的帳戶收款，請確認收款對象與帳號",
+          subcontractIds: [...new Set(hit)],
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "attachRebindWarning: lookup failed")
+  }
 }
 
 /** 名冊帳戶「最近變更」的警示天數（業主：30 天）。 */
@@ -831,8 +871,8 @@ async function attachVendorBankStatus(tenantId: string, items: SerializedDisburs
     const holders = new Map<string, string | null>()
     const changedCol = await columnsExist("vendors", "bank_changed_at")
     const verifiedCol = changedCol && (await columnsExist("vendors", "bank_verified_at"))
-    const cols = `id, account_holder${changedCol ? ", bank_changed_at" : ""}${verifiedCol ? ", bank_verified_at" : ""}`
-    const rows = await batch<{ id: string; account_holder: string | null; bank_changed_at?: string | null; bank_verified_at?: string | null }>(
+    const cols = `id, account_holder${changedCol ? ", bank_changed_at" : ""}${verifiedCol ? ", bank_verified_at, bank_verified_by" : ""}`
+    const rows = await batch<{ id: string; account_holder: string | null; bank_changed_at?: string | null; bank_verified_at?: string | null; bank_verified_by?: string | null }>(
       "vendors", cols, tenantId, vendorIds, "id", false,
     )
     const cutoff = Date.now() - BANK_CHANGED_WARN_DAYS * 86_400_000
@@ -840,7 +880,9 @@ async function attachVendorBankStatus(tenantId: string, items: SerializedDisburs
       const key = r.id.toLowerCase()
       holders.set(key, r.account_holder ?? null)
       if (verifiedCol && r.bank_verified_at !== undefined) verified.set(key, r.bank_verified_at !== null)
-      const latest = [r.bank_changed_at, r.bank_verified_at].filter((v): v is string => !!v).sort().pop()
+      // 驗收 F8：0104 回填的「既有已確認」（bank_verified_by 為空）不算近期確認，只看真正的變更時間與有確認人的確認時間。
+      const verifiedAtByPerson = r.bank_verified_by ? r.bank_verified_at : null
+      const latest = [r.bank_changed_at, verifiedAtByPerson].filter((v): v is string => !!v).sort().pop()
       if (latest && Date.parse(latest) >= cutoff) changedAt.set(key, latest)
     }
     const pending = await vendorsWithPendingBankChange(tenantId, vendorIds)
@@ -1532,7 +1574,22 @@ function vendorBankRawMatches(v: VendorLite, field: PayeeBankField, sent: unknow
 function vendorBankDefault(v: VendorLite, field: PayeeBankField): string | null {
   if (field === "payeeBankCode") return v.bank_code ?? null
   if (field === "payeeBankName") return vendorBankName(v)
-  return [v.bank_account, v.account_holder].filter(Boolean).join(" ") || null
+  // 驗收 F2：快照的帳號段正規化（去空白與連字號）——「0123 4567 8901」存成「012345678901 戶名」，之後拆帳號／戶名不會拆錯。
+  return [normBankAccount(v.bank_account), v.account_holder].filter(Boolean).join(" ") || null
+}
+
+/**
+ * 快照是否就是這家廠商名冊的帳號快照（F2）：帳號段（依名冊戶名精確拆）去空白／連字號後等於名冊帳號，且戶名段等於名冊戶名
+ * （或沒有戶名段）。新舊兩種存法（正規化前「0123 4567 8901 戶名」／正規化後「012345678901 戶名」）都認。
+ */
+function accountSnapshotMatchesVendor(v: VendorLite, snapshot: unknown): boolean {
+  const raw = normBankText(snapshot)
+  if (!raw) return normBankText(v.bank_account) === "" 
+  if (normBankAccount(v.bank_account) === "") return false
+  const holder = (v.account_holder ?? "").trim()
+  const acct = accountSegment(raw, holder || null)
+  const rest = raw.slice(raw.indexOf(acct) + acct.length).trim()
+  return normBankAccount(acct) === normBankAccount(v.bank_account) && (rest === "" || rest === holder)
 }
 
 /**
@@ -1578,7 +1635,9 @@ export function assertPayeeBankMatchesVendor(
     const unchangedSnapshot =
       storedVal != null &&
       normBankText(sent) === normBankText(storedVal) &&
-      normBankText(storedVal) === normBankText(vendorBankDefault(vendor, field))
+      (field === "payeeBankAccount"
+        ? accountSnapshotMatchesVendor(vendor, storedVal)
+        : normBankText(storedVal) === normBankText(vendorBankDefault(vendor, field)))
     if (!unchangedSnapshot) {
       throw new DisbursementError(400, "payee_bank_mismatch", {
         field,
@@ -1899,6 +1958,7 @@ function assertVendorPurpose(header: Pick<ResolvedHeader, "payee_kind" | "purpos
 /** 單上的銀行快照（原始值或系統快照格式皆可）是否等於名冊現值。 */
 function bankSnapshotMatchesVendor(v: VendorLite, field: PayeeBankField, snapshot: string | null): boolean {
   if (vendorBankRawMatches(v, field, snapshot)) return true
+  if (field === "payeeBankAccount") return accountSnapshotMatchesVendor(v, snapshot)
   return normBankText(snapshot) === normBankText(vendorBankDefault(v, field))
 }
 
@@ -1921,7 +1981,7 @@ function bankNameSnapshotMatchesVendor(v: VendorLite, snapshot: string | null | 
  */
 export async function assertPayeeBankStillMatchesVendor(
   tenantId: string,
-  current: Pick<DisbursementRow, "payee_kind" | "vendor_id" | "payee_bank_account" | "payee_bank_code" | "payee_bank_name">,
+  current: Pick<DisbursementRow, "payee_kind" | "vendor_id" | "payee_bank_account" | "payee_bank_code" | "payee_bank_name"> & { method?: DisbursementMethod | null },
 ): Promise<void> {
   if (current.payee_kind !== "vendor" || !current.vendor_id) return
   // 2026-11-17 雙人覆核：廠商帳戶變更待覆核期間，這家廠商的單不能送審／核准／付款（避免覆核期間把錢匯出去）。
@@ -1936,14 +1996,18 @@ export async function assertPayeeBankStillMatchesVendor(
     .select(verifiedCol ? `${VENDOR_LITE_COLS}, bank_verified_at` : VENDOR_LITE_COLS)
     .eq("tenant_id", tenantId)
     .eq("id", current.vendor_id)
+    .is("deleted_at", null) // 驗收 S3：已刪除的廠商不算（→ 下面 payee_bank_changed）
     .maybeSingle()
   if (error) throw new Error(`assertPayeeBankStillMatchesVendor: ${error.message}`)
   const vendor = (data ?? null) as unknown as (VendorLite & { bank_verified_at?: string | null }) | null
-  // 驗收 H1／H2（0104）：名冊帳戶要經第二人（老闆／HR）確認過才能收款。PostgREST 對存在的欄位一定回該鍵（未確認＝null）；
+  // 驗收 H1／H2（0104）：名冊帳戶要經第二人（老闆／platform_admin）確認過才能收款。PostgREST 對存在的欄位一定回該鍵（未確認＝null）；
   // 鍵不存在（undefined）只會是欄位尚未套用或測試假資料，視為未知、不擋（schema-compat 慣例）。
-  if (vendor && vendor.bank_verified_at === null) {
+  // 驗收 F1：現金／支票付款、名冊與單上都沒有帳號 → 不需要帳戶，不檢查確認（轉帳仍一律要求已確認帳戶）。
+  const noAccountAtAll = !!vendor && normBankAccount(vendor.bank_account) === "" && normBankText(current.payee_bank_account) === ""
+  const accountNotNeeded = noAccountAtAll && !!current.method && current.method !== "transfer"
+  if (vendor && vendor.bank_verified_at === null && !accountNotNeeded) {
     throw new DisbursementError(409, "vendor_bank_unverified", {
-      message: "此廠商的收款帳戶尚未經老闆／HR 確認，確認前不能送審、核准或付款",
+      message: "此廠商的收款帳戶尚未經老闆／平台管理員 確認，確認前不能送審、核准或付款",
     })
   }
   const ok =
@@ -2084,8 +2148,11 @@ async function resolveHeader(
     vendor_id: vendor?.id ?? null,
     payee_name: payeeName,
     payee_bank_name: input.payeeBankName !== undefined ? (input.payeeBankName ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankName") : null,
-    payee_bank_account:
+    // 驗收 F2：存快照前把帳號段正規化（去空白與連字號；登錄廠商依名冊戶名精確拆）。
+    payee_bank_account: normalizeAccountSnapshot(
       input.payeeBankAccount !== undefined ? (input.payeeBankAccount ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankAccount") : null,
+      vendor?.account_holder ?? null,
+    ),
     payee_bank_code: input.payeeBankCode !== undefined ? (input.payeeBankCode ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankCode") : null,
     paying_company_id: paying.id,
     paying_company_name: paying.name,

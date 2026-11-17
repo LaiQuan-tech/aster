@@ -736,6 +736,13 @@
       "when": 1795400000000,
       "tag": "0104_vendor_bank_verified",
       "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1795500000000,
+      "tag": "0105_vendor_bank_reviewer_boss_only",
+      "breakpoints": true
     }
   ]
 }

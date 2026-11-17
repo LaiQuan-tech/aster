@@ -1,4 +1,5 @@
 "use client";
+import { vendorBankStatus } from "@/lib/payee-account";
 import { VendorBankChangeReviews } from "@/components/VendorBankChangeReviews";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -59,7 +60,7 @@ export default function VendorsPage() {
 
   const load = useCallback(async () => {
     try {
-      const r = await listVendors(q.trim() || undefined);
+      const r = await listVendors(q.trim() || undefined, { bankVerified: true });
       setVendors(r.vendors);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
@@ -95,7 +96,7 @@ export default function VendorsPage() {
   return (
     <>
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
-      {/* 2026-11-17：廠商收款帳戶變更待覆核（老闆／HR）；沒有待覆核或沒權限時不顯示。 */}
+      {/* 2026-11-17：廠商收款帳戶變更待覆核（老闆／平台管理員）；沒有待覆核或沒權限時不顯示。 */}
       <VendorBankChangeReviews onChanged={() => void load()} />
 
       <Card>
@@ -161,6 +162,10 @@ export default function VendorsPage() {
                               <Link href={href} className="hover:text-[var(--brand)] hover:underline">{value}</Link>
                               {v.hasCard && <span className="ml-1 text-xs text-gray-400" title="有名片影像">🪪</span>}
                               {v.isAffiliate === true && <Pill tone="blue" className="ml-1.5 align-middle">關係企業</Pill>}
+                              {canSeeBank && (() => {
+                                const st = vendorBankStatus(v);
+                                return st ? <Pill tone={st.tone} className="ml-1.5 align-middle">{st.label}</Pill> : null;
+                              })()}
                               {kind === "all" && vendorRosterKind(v) !== "supplier" && (
                                 <Pill tone="gray" className="ml-1.5 align-middle">{VENDOR_ROSTER_KIND_LABELS[vendorRosterKind(v)]}</Pill>
                               )}

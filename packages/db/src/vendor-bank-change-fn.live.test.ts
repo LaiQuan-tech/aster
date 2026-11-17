@@ -13,12 +13,16 @@ const URL = process.env.VBC_PG_URL
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const M0103 = readFileSync(resolve(root, "migrations/0103_vendor_bank_change_review.sql"), "utf8")
 const M0104 = readFileSync(resolve(root, "migrations/0104_vendor_bank_verified.sql"), "utf8")
+const M0105 = readFileSync(resolve(root, "migrations/0105_vendor_bank_reviewer_boss_only.sql"), "utf8")
 
 const T = "11111111-1111-4111-8111-111111111111"
 const V = "a0000000-0000-4000-8000-000000000001"
 const V2 = "a0000000-0000-4000-8000-000000000002"
 const E1 = "e0000000-0000-4000-8000-000000000001"
-const E2 = "e0000000-0000-4000-8000-000000000002"
+const E2 = "e0000000-0000-4000-8000-000000000002" // platform_admin（覆核者）
+const E3 = "e0000000-0000-4000-8000-000000000003" // hr_admin（不能覆核）
+const E4 = "e0000000-0000-4000-8000-000000000004" // 設定的老闆（role employee）
+const E5 = "e0000000-0000-4000-8000-000000000005" // 離職的 platform_admin
 const R = "b0000000-0000-4000-8000-000000000001"
 
 const BASE = `
@@ -26,13 +30,14 @@ DROP SCHEMA public CASCADE; CREATE SCHEMA public;
 DO $$ BEGIN CREATE ROLE anon; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE service_role; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-CREATE TABLE public.tenants(id uuid PRIMARY KEY);
-CREATE TABLE public.employees(id uuid PRIMARY KEY, tenant_id uuid);
+CREATE TABLE public.tenants(id uuid PRIMARY KEY, features jsonb);
+CREATE TABLE public.employees(id uuid PRIMARY KEY, tenant_id uuid, role text, status text);
 CREATE TABLE public.vendors(id uuid PRIMARY KEY, tenant_id uuid, name text, bank_code text, bank_name text, bank_account text, account_holder text, deleted_at timestamptz, updated_at timestamptz);
 CREATE TABLE public.disbursements(id uuid PRIMARY KEY, tenant_id uuid, vendor_id uuid, status text);
 CREATE TABLE public.audit_logs(id bigserial PRIMARY KEY, tenant_id uuid, table_name text, record_id uuid, action text, old_row jsonb, new_row jsonb, db_user text, actor_emp_id uuid, context text);
-INSERT INTO public.tenants VALUES ('${T}');
-INSERT INTO public.employees VALUES ('${E1}', '${T}'), ('${E2}', '${T}');
+INSERT INTO public.tenants VALUES ('${T}', '{"approval": {"fallbackApproverEmpId": "${E4.toUpperCase()}"}}');
+INSERT INTO public.employees VALUES ('${E1}', '${T}', 'accountant', 'active'), ('${E2}', '${T}', 'platform_admin', 'active'),
+  ('${E3}', '${T}', 'hr_admin', 'active'), ('${E4}', '${T}', 'employee', 'active'), ('${E5}', '${T}', 'platform_admin', 'terminated');
 INSERT INTO public.vendors VALUES ('${V}', '${T}', '測試甲', '000', '測試銀行', '0000000000001', '測試甲', NULL, now());
 INSERT INTO public.vendors VALUES ('${V2}', '${T}', '測試乙', NULL, NULL, NULL, NULL, NULL, now());
 `
@@ -56,6 +61,8 @@ describe.skipIf(!URL)("decide_vendor_bank_change（真 PostgreSQL）", () => {
     await sql.unsafe(M0103)
     await sql.unsafe(M0104)
     await sql.unsafe(M0104) // 可重跑
+    await sql.unsafe(M0105)
+    await sql.unsafe(M0105)
     await sql`insert into public.vendor_bank_change_requests
       (id, tenant_id, vendor_id, requested_by_emp_id, old_bank_code, old_bank_name, old_bank_account, old_account_holder,
        new_bank_code, new_bank_name, new_bank_account, new_account_holder, reason)
@@ -71,8 +78,22 @@ describe.skipIf(!URL)("decide_vendor_bank_change（真 PostgreSQL）", () => {
     expect((await vendor(V2)).bank_verified_at).toBeNull()
   })
 
-  it("申請人本人核准 → self_review；名冊不變", async () => {
-    expect(await errOf(decide(E1, "approve"))).toContain("vendor_bank_change_self_review")
+  it("S1：HR、離職的 platform_admin、會計不能核准／退回；設定老闆（非後台角色）可以", async () => {
+    for (const who of [E3, E5, E1]) {
+      expect(await errOf(decide(who, "approve"))).toContain("not_bank_change_reviewer")
+      expect(await errOf(decide(who, "reject", "x"))).toContain("not_bank_change_reviewer")
+    }
+    expect((await vendor()).bank_account).toBe("0000000000001")
+    expect((await decide(E4, "approve")).status).toBe("approved")
+  })
+
+  it("取消不限覆核者（API 判斷申請人／HR）", async () => {
+    expect((await decide(E3, "cancel")).status).toBe("cancelled")
+  })
+
+  it("申請人本人（platform_admin）核准 → self_review；名冊不變", async () => {
+    await sql`update public.vendor_bank_change_requests set requested_by_emp_id = ${E2} where id = ${R}`
+    expect(await errOf(decide(E2, "approve"))).toContain("vendor_bank_change_self_review")
     expect((await vendor()).bank_account).toBe("0000000000001")
   })
 

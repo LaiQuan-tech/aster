@@ -94,6 +94,8 @@ export interface Vendor {
   accountHolder: string | null
   /** 收款帳戶是否經老闆／HR 確認（0104）；只有 listVendors(…, { bankVerified: true }) 才帶。 */
   bankVerified?: boolean
+  /** 帳戶變更覆核中（同上，只有 bankVerified: true 查詢才帶）。 */
+  bankChangePending?: boolean
   hasCard: boolean
   source: "manual" | "card_ocr"
   createdAt: string
