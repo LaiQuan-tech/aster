@@ -92,7 +92,7 @@ export interface Vendor {
   bankCode: string | null
   bankAccount: string | null
   accountHolder: string | null
-  /** 收款帳戶是否經老闆／HR 確認（0104）；只有 listVendors(…, { bankVerified: true }) 才帶。 */
+  /** 收款帳戶是否經老闆／平台管理員確認（0104）；只有 listVendors(…, { bankVerified: true }) 才帶。 */
   bankVerified?: boolean
   /** 帳戶變更覆核中（同上，只有 bankVerified: true 查詢才帶）。 */
   bankChangePending?: boolean
@@ -121,12 +121,12 @@ export function listVendors(q?: string, opts: { bankVerified?: boolean } = {}) {
 }
 /** `confirmDistinctReason`：名稱與名冊廠商相近（409 vendor_name_similar）但確為不同公司的說明（第八輪，寫嚴格稽核）。 */
 export function createVendor(body: VendorInput & { confirmDistinctReason?: string }) {
-  // 2026-11-17：帶收款帳戶新建 → 廠商照建，帳戶送老闆／HR 覆核（bankChangeRequested）。
+  // 2026-11-17：帶收款帳戶新建 → 廠商照建，帳戶送老闆／平台管理員覆核（bankChangeRequested）。
   return apiFetch<{ vendor: Vendor; bankChangeRequested?: boolean; bankChangeError?: string; message?: string }>("/vendors", { method: "POST", body: JSON.stringify(body) })
 }
 /** `changeReason`：只有未付期款時改收款帳戶必填（後端寫稽核，2026-11-16 R2）。 */
 export function updateVendor(id: string, body: Partial<VendorInput> & { changeReason?: string; confirmDistinctReason?: string }) {
-  // 2026-11-17：改收款帳戶一律 202＋bankChangeRequested（送老闆／HR 覆核，帳戶尚未生效；其他欄位已存）。
+  // 2026-11-17：改收款帳戶一律 202＋bankChangeRequested（送老闆／平台管理員覆核，帳戶尚未生效；其他欄位已存）。
   return apiFetch<{ vendor: Vendor; bankChangeRequested?: boolean; bankChangeRequest?: { id: string; status: string }; message?: string }>(
     `/vendors/${id}`,
     { method: "PATCH", body: JSON.stringify(body) },

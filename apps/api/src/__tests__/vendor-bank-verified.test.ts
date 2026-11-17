@@ -302,3 +302,53 @@ describe("F8：0104 回填的既有確認不算近期確認", () => {
     expect(b.body.disbursements[0].payeeBankChangedAt).toBe(recent)
   })
 })
+
+describe("驗收第三輪：「其他」收款分欄、NFKC、草稿不改寫既有快照", () => {
+  const otherBody = (over: Row = {}): Row => ({
+    payeeKind: "other", payeeName: "測試某人", payingCompanyId: COMPANY, method: "transfer", amount: 100, status: "draft", allocations: [], ...over,
+  })
+  it.each([
+    ["12345678", "7-11", "12345678 7-11", "****5678"],
+    ["0001234567890", "104 人力銀行", "0001234567890 104 人力銀行", "****7890"],
+    ["０１２３　４５６７－８９０１", "王小明", "012345678901 王小明", "****8901"],
+    ["0123  4567   8901", "3M台灣", "012345678901 3M台灣", "****8901"],
+  ])("帳號「%s」＋戶名「%s」→ 快照「%s」、末 4 碼 %s", async (number, holder, snap, masked) => {
+    const res = await as("hr-user", request(app).post("/disbursements")).send(otherBody({ payeeBankAccountNumber: number, payeeAccountHolder: holder }))
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(fake.db.disbursements!.at(-1)!.payee_bank_account).toBe(snap)
+    expect(res.body.disbursement.payeeAccountMasked).toBe(masked)
+  })
+  it("舊的單一字串仍相容；草稿 PATCH 原樣回送既有快照 → 不改寫（舊快照「12345678 7-11」的戶名不會被併進帳號）", async () => {
+    const created = await as("hr-user", request(app).post("/disbursements")).send(otherBody({ payeeBankAccount: "0123 4567 8901 王小明" }))
+    expect(created.status).toBe(201)
+    expect(fake.db.disbursements![0]!.payee_bank_account).toBe("012345678901 王小明")
+    const id = created.body.disbursement.id as string
+    fake.db.disbursements![0]!.payee_bank_account = "12345678 7-11" // 舊單快照
+    const patched = await as("hr-user", request(app).patch(`/disbursements/${id}`)).send({ payeeBankAccount: "12345678 7-11", note: "改備註" })
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200)
+    expect(fake.db.disbursements![0]!.payee_bank_account).toBe("12345678 7-11")
+    const split = await as("hr-user", request(app).patch(`/disbursements/${id}`)).send({ payeeBankAccountNumber: "12345678", payeeAccountHolder: "7-11" })
+    expect(split.status).toBe(200)
+    expect(fake.db.disbursements![0]!.payee_bank_account).toBe("12345678 7-11")
+  })
+  it("登錄廠商：全形／連續空白的名冊帳號照樣比對通過（用 splitAccountSnapshot 的戶名段）", async () => {
+    Object.assign(fake.db.vendors![0]!, { bank_account: "０１２３　４５６７", account_holder: "王　小明" })
+    fake.db.disbursements = [header(VENDOR_A, { payee_bank_account: "01234567 王 小明" })]
+    fake.db.disbursement_allocations = [alloc()]
+    expect((await payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" }))?.status).toBe("paid")
+    fake.db.disbursements = [header(VENDOR_A, { payee_bank_account: "01234567 別人" })]
+    await expect(payDisbursement(TENANT_ID, actor, DISB, { paidOn: "2026-11-16" })).rejects.toMatchObject({ code: "payee_bank_changed" })
+  })
+})
+
+describe("驗收第三輪：名冊帳戶狀態只給會計與 HR", () => {
+  it("主管讀名冊（?bankVerified=1）不帶 bankVerified／bankChangePending；HR 帶", async () => {
+    fake.db.employees!.push({ id: "bbbbbbbb-0000-4000-8000-0000000000m1", tenant_id: TENANT_ID, user_id: "mgr-user", role: "manager", dept_id: null, name: "測試主管", status: "active" })
+    const mgr = await as("mgr-user", request(app).get("/vendors?bankVerified=1"))
+    expect(mgr.status).toBe(200)
+    expect(mgr.body.vendors[0]).not.toHaveProperty("bankVerified")
+    expect(mgr.body.vendors[0]).not.toHaveProperty("bankChangePending")
+    const hr = await as("hr-user", request(app).get("/vendors?bankVerified=1"))
+    expect(hr.body.vendors[0]).toMatchObject({ bankVerified: true, bankChangePending: false })
+  })
+})

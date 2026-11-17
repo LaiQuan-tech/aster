@@ -13,7 +13,7 @@ import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
 import { columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
-import { BankChangeError, createBankChangeRequest, vendorHasPendingBankChange, vendorsWithPendingBankChange, type BankFields } from "../services/vendor-bank-change.js"
+import { allVendorsWithPendingBankChange, BankChangeError, createBankChangeRequest, vendorHasPendingBankChange, type BankFields } from "../services/vendor-bank-change.js"
 
 export const vendorsRouter = Router()
 
@@ -218,7 +218,9 @@ function toRow(b: z.infer<typeof vendorBody>, roster = true): Record<string, unk
  * 寫入端點本來就限 requireFinance，回應不用遮。
  */
 export function maskVendorBank<T extends Record<string, unknown>>(v: T): T {
-  return { ...v, bankName: null, bankCode: null, bankAccount: null, accountHolder: null }
+  // 驗收第三輪：帳戶狀態（已確認／覆核中）也只給會計與 HR。
+  const { bankVerified: _v, bankChangePending: _p, ...rest } = v as T & { bankVerified?: unknown; bankChangePending?: unknown }
+  return { ...(rest as T), bankName: null, bankCode: null, bankAccount: null, accountHolder: null }
 }
 
 // ── GET /vendors?q= ────────────────────────────────────────────────────
@@ -255,7 +257,8 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
         for (const v of vendors) if (map.has(v.id as string)) v.bankVerified = map.get(v.id as string) != null
       }
       // F7：帳戶變更覆核中（名冊列表／內頁顯示狀態、建單畫面提示）。
-      const pending = await vendorsWithPendingBankChange(tenantId, vendors.map((v) => v.id as string)).catch(() => null)
+      // 驗收第三輪效能：一次撈本租戶所有 pending，再在記憶體比對（不按廠商 id 分批 in()）。
+      const pending = await allVendorsWithPendingBankChange(tenantId).catch(() => null)
       if (pending) for (const v of vendors) v.bankChangePending = pending.has(String(v.id).toLowerCase())
     }
     res.status(200).json({ vendors: canSeeBank ? vendors : vendors.map(maskVendorBank) })
@@ -734,7 +737,13 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, 
           res.status(err.httpStatus).json({ error: err.code, ...(err.details ?? {}), otherFieldsSaved: true })
           return
         }
-        throw err
+        // 驗收第三輪 F4：其他錯誤（查覆核者失敗、稽核失敗…）發生在其他欄位已存之後 → 也明確告知。
+        res.status(500).json({
+          error: "bank_change_request_failed",
+          message: "其他欄位已儲存，但收款帳戶變更沒有送出覆核，請稍後再試",
+          otherFieldsSaved: true,
+        })
+        return
       }
       return
     }

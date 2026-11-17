@@ -208,6 +208,8 @@ describe("第五輪（2026-11-17）：嚴格稽核、刪廠商擋、名稱不可
     const res = await authed(request(app).patch(`/vendors/${VENDOR}`)).send({ bankAccount: "0000000000002", changeReason: "測試原因" })
     // 驗收 D：申請 insert 成功後才寫稽核；稽核失敗 → 刪掉申請、500；名冊帳戶不動、不留待覆核。
     expect(res.status).toBe(500)
+    // 驗收第三輪 F4：其他欄位已存後的一般錯誤也回 otherFieldsSaved。
+    expect(res.body).toMatchObject({ error: "bank_change_request_failed", otherFieldsSaved: true })
     expect(fake.db.vendors[0]).toMatchObject({ bank_account: "0000000000001" })
     expect(fake.db.vendor_bank_change_requests ?? []).toHaveLength(0)
     fake.writes.length = 0

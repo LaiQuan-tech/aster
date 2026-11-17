@@ -56,3 +56,19 @@ describe("F2：帳號含空白／連字號、戶名開頭數字", () => {
     expect(vendorBankStatus({ bankVerified: false, bankAccount: null })).toBeNull();
   });
 });
+
+describe("驗收第三輪：與 API 同一套拆法（完整帳號後一律戶名、NFKC、連續空白）", () => {
+  it.each([
+    ["12345678 7-11", "12345678", "7-11"],
+    ["0001234567890 104 人力銀行", "0001234567890", "104 人力銀行"],
+    ["０１２３　４５６７　８９０１　王小明", "0123 4567 8901", "王小明"],
+    ["0123   4567  8901", "0123 4567 8901", null],
+    ["012-345 678", "012-345 678", null],
+  ])("%s", (raw, account, holder) => {
+    expect(splitAccountSnapshot(raw)).toEqual({ account, holder });
+  });
+  it("末 4 碼", () => {
+    expect(maskAccountTail("12345678 7-11")).toBe("****5678");
+    expect(maskAccountTail("０００１２３４５６７８９０ 104 人力銀行")).toBe("****7890");
+  });
+});

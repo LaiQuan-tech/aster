@@ -123,7 +123,7 @@ export default function DisbursementApprovalsPage() {
 
   return (
     <>
-      {/* 2026-11-17：廠商收款帳戶變更待覆核（老闆／HR）；沒有待覆核或沒權限時不顯示。 */}
+      {/* 2026-11-17：廠商收款帳戶變更待覆核（老闆／平台管理員）；沒有待覆核或沒權限時不顯示。 */}
       <VendorBankChangeReviews onChanged={() => void load()} />
       <Card>
         <div className="flex flex-wrap items-center gap-2">

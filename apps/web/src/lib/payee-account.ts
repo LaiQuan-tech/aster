@@ -36,15 +36,20 @@ const ACCOUNT_TOKEN = /^[\d\-－‐–—]+$/;
  * 最後一段純數字不當戶名），第一個含其他字元的 token 起是戶名（「0001234567890 104人力銀行」的 104 不算帳號）。
  */
 export function splitAccountSnapshot(account: string | null | undefined, holder?: string | null): { account: string; holder: string | null } {
-  const raw = (account ?? "").trim();
+  // 先做 NFKC（全形數字／空白／連字號 → 半形），連續空白當一個（與 API 同一套）。
+  const raw = (account ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
   if (!raw) return { account: "", holder: null };
-  const h = (holder ?? "").trim();
+  const h = (holder ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
   if (h && raw.length > h.length && raw.endsWith(h) && /\s/.test(raw.charAt(raw.length - h.length - 1))) {
     return { account: raw.slice(0, raw.length - h.length).trim(), holder: h };
   }
   const tokens = raw.split(/\s+/);
   let n = 0;
-  while (n < tokens.length && ACCOUNT_TOKEN.test(tokens[n]!)) n++;
+  // 第一段本身已是完整帳號（≥ 8 碼數字）→ 帳號就是第一段，後面一律是戶名（「12345678 7-11」「0001234567890 104 人力銀行」）；
+  // 第一段很短（分組寫法「0123 4567 8901」「012-345 678」）才往後接續純數字／連字號段。
+  const digitsOf = (t: string) => t.replace(/\D/g, "").length;
+  if (tokens.length > 0 && ACCOUNT_TOKEN.test(tokens[0]!) && digitsOf(tokens[0]!) >= 8) n = 1;
+  else while (n < tokens.length && ACCOUNT_TOKEN.test(tokens[n]!)) n++;
   if (n === 0) n = 1;
   const rest = tokens.slice(n).join(" ");
   return { account: tokens.slice(0, n).join(" "), holder: rest || null };

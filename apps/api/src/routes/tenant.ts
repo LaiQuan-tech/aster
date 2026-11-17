@@ -319,9 +319,8 @@ tenantRouter.put(
       const before = unlockPolicyOf(currentFeatures)
       const after = unlockPolicyOf(features)
 
-      // 更換老闆設定（2026-10-11 業主拍板）：誰是老闆就是誰能重新開放已結算的月份，所以不能讓 HR 自己指定。
-      // 目前有老闆 → 只有老闆本人（可以交棒）或 platform_admin；還沒有老闆 → 有在職 platform_admin 時只限 platform_admin，
-      // 沒有才允許 HR 做第一次設定；HR 不能把自己設成老闆。否則 403 not_boss。
+      // 更換老闆設定（2026-10-11 業主拍板；2026-11-17 收緊）：設定／更換／清除老闆一律只限在職 platform_admin
+      // （services/privileged-accounts.ts canChangeBoss）。否則 403 not_boss。
       const bossIsChanging = bossChanged(before, after)
       let bossActorId: string | null = null
       if (bossIsChanging) {

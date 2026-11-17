@@ -77,15 +77,20 @@ const ACCOUNT_TOKEN = /^[\d\-－‐–—]+$/
  *   最後一段純數字不當戶名）；第一個含其他字元的 token 起是戶名（「0001234567890 104人力銀行」的 104 不算帳號）。
  */
 export function splitAccountSnapshot(account: string | null | undefined, holder?: string | null): { account: string; holder: string | null } {
-  const raw = String(account ?? "").trim()
+  // 驗收第三輪：先做 NFKC（全形數字、全形空白、全形連字號 → 半形），連續空白當一個。
+  const raw = String(account ?? "").normalize("NFKC").replace(/\s+/g, " ").trim()
   if (!raw) return { account: "", holder: null }
-  const h = (holder ?? "").trim()
+  const h = (holder ?? "").normalize("NFKC").replace(/\s+/g, " ").trim()
   if (h && raw.length > h.length && raw.endsWith(h) && /\s/.test(raw.charAt(raw.length - h.length - 1))) {
     return { account: raw.slice(0, raw.length - h.length).trim(), holder: h }
   }
   const tokens = raw.split(/\s+/)
   let n = 0
-  while (n < tokens.length && ACCOUNT_TOKEN.test(tokens[n]!)) n++
+  // 第一段本身已是完整帳號（≥ 8 碼數字）→ 帳號就是第一段，後面一律是戶名（「12345678 7-11」「0001234567890 104 人力銀行」）；
+  // 第一段很短（分組寫法「0123 4567 8901」「012-345 678」）才往後接續純數字／連字號段。
+  const digitsOf = (t: string) => t.replace(/\D/g, "").length
+  if (tokens.length > 0 && ACCOUNT_TOKEN.test(tokens[0]!) && digitsOf(tokens[0]!) >= 8) n = 1
+  else while (n < tokens.length && ACCOUNT_TOKEN.test(tokens[n]!)) n++
   if (n === 0) n = 1 // 帳號段本身含其他字元（例：「A-123 某某」）→ 第一段當帳號
   const rest = tokens.slice(n).join(" ")
   return { account: tokens.slice(0, n).join(" "), holder: rest || null }
@@ -112,9 +117,25 @@ export function maskBankAccount(account: string | null | undefined, holder?: str
  * 放款建立／更新時存的快照正規化（F2）：帳號段去空白與連字號，戶名段原樣，中間一個空白。
  * 「0123 4567 8901 王小明」→「012345678901 王小明」。空值回 null。
  */
+/** 帳號本身正規化（NFKC、去空白與連字號）。 */
+export function normalizeAccountNumber(account: string | null | undefined): string {
+  return String(account ?? "").normalize("NFKC").replace(/[\s\-－‐–—]/g, "")
+}
+
+/**
+ * 「其他」收款分欄送出（驗收第三輪）：帳號正規化、戶名原樣（trim），組成快照「帳號 戶名」。不再拆字串，
+ * 所以「12345678」＋「7-11」、「0001234567890」＋「104 人力銀行」都不會被併進帳號。兩邊都空回 null。
+ */
+export function composeAccountSnapshot(number: string | null | undefined, holder: string | null | undefined): string | null {
+  const a = normalizeAccountNumber(number)
+  const h = String(holder ?? "").trim()
+  const out = [a, h].filter((x) => !!x).join(" ")
+  return out || null
+}
+
 export function normalizeAccountSnapshot(account: string | null | undefined, holder?: string | null): string | null {
   const { account: acct, holder: h } = splitAccountSnapshot(account, holder)
-  const a = acct.replace(/[\s\-－‐–—]/g, "")
+  const a = normalizeAccountNumber(acct)
   const out = [a, h].filter((x) => !!x).join(" ")
   return out || null
 }
@@ -147,6 +168,18 @@ export async function vendorsWithPendingBankChange(tenantId: string, vendorIds: 
     }
     for (const r of (data ?? []) as Array<{ vendor_id: string }>) out.add(String(r.vendor_id).toLowerCase())
   }
+  return out
+}
+
+/** 本租戶所有待覆核的廠商（小寫 id，一次查完；名冊列表用）。表未套用 → 空集合。 */
+export async function allVendorsWithPendingBankChange(tenantId: string): Promise<Set<string>> {
+  const out = new Set<string>()
+  const { data, error } = await supabaseAdmin.from(BANK_CHANGE_TABLE).select("vendor_id").eq("tenant_id", tenantId).eq("status", "pending")
+  if (error) {
+    if (tableMissing(error)) return out
+    throw new Error(`allVendorsWithPendingBankChange: ${error.message}`)
+  }
+  for (const r of (data ?? []) as Array<{ vendor_id: string }>) out.add(String(r.vendor_id).toLowerCase())
   return out
 }
 
@@ -206,7 +239,7 @@ export async function createBankChangeRequest(params: {
   // S1：租戶沒有「申請人以外」的在職老闆／platform_admin → 沒人能核准，直接回清楚的錯誤（不建一筆永遠卡住的申請）。
   if ((await eligibleReviewers(tenantId, params.requestedByEmpId)).length === 0) {
     throw new BankChangeError(409, "no_bank_change_reviewer", {
-      message: "收款帳戶需由老闆或平台管理員（申請人以外）核准，但目前沒有可核准的人；請先到設定指定老闆或新增平台管理員",
+      message: "收款帳戶需由老闆或平台管理員（申請人以外）核准，但目前沒有可核准的人；請聯絡平台管理員設定老闆",
     })
   }
   const id = crypto.randomUUID()

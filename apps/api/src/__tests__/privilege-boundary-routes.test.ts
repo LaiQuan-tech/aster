@@ -31,7 +31,7 @@ import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
  * 特權帳號的權限邊界（2026-10-11 業主拍板；services/privileged-accounts.ts）——HR 繞過發薪解鎖的三條路：
- *   ① 換老闆設定（PUT /api/tenant/settings）：有老闆時只有老闆本人（可交棒）或 platform_admin；沒老闆時 HR 可做第一次設定
+ *   ① 換老闆設定（PUT /api/tenant/settings）：2026-11-17 起一律只限在職 platform_admin（老闆交棒、HR 第一次設定都不行）
  *   ② 指派 platform_admin 角色（POST /employees、PATCH /employees/:id）：只有 platform_admin；只擋「變成」
  *   ③ 重設／接管受保護帳號（老闆、老闆指定的解鎖人、hr_admin、platform_admin）的密碼或連結：只有老闆或 platform_admin
  * HR 重設一般員工照舊；HR 對自己不受影響。
@@ -156,46 +156,36 @@ describe("① PUT /api/tenant/settings — 換老闆設定", () => {
     expect(tenantFeatures().adminModules).toEqual({ payroll: true })
   })
 
-  it("老闆本人可以交棒給別人 → 200，寫 audit（誰、換成誰）；交棒後原老闆就不能再改回來", async () => {
+  it("2026-11-17：老闆本人（非 platform_admin）不能交棒或清除 → 403 not_boss，老闆不變", async () => {
     const res = await as(T.boss).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("not_boss")
+    const clear = await as(T.boss).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: null } } })
+    expect(clear.status).toBe(403)
+    expect(bossNow()).toBe(BOSS)
+  })
+
+  it("platform_admin 換老闆 → 200，寫 audit（誰、換成誰）；清除後 HR 不能自封或設定別人，platform_admin 可首次設定", async () => {
+    const res = await as(T.pa).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
     expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body.features.approval.fallbackApproverEmpId).toBe(HR)
     expect(bossNow()).toBe(HR)
     const audits = (fake.db.audit_logs ?? []).filter((a) => a.table_name === "tenants" && String(a.context).includes("老闆"))
     expect(audits).toHaveLength(1)
-    expect(audits[0]).toMatchObject({
-      actor_emp_id: BOSS,
-      old_row: { approval: { fallbackApproverEmpId: BOSS } },
-      new_row: { approval: { fallbackApproverEmpId: HR } },
-    })
+    expect(audits[0]).toMatchObject({ old_row: { approval: { fallbackApproverEmpId: BOSS } }, new_row: { approval: { fallbackApproverEmpId: HR } } })
     expect(String(audits[0].context)).toContain("更換老闆")
 
-    const back = await as(T.boss).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: BOSS } } })
-    expect(back.status).toBe(403)
-    expect(back.body.error).toBe("not_boss")
-    expect(bossNow()).toBe(HR)
-  })
-
-  it("老闆本人可以清除老闆設定 → 200；清除後租戶有在職 platform_admin → 第一次設定只限 platform_admin（第二輪 M3），HR 不能自封老闆", async () => {
-    const clear = await as(T.boss).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: null } } })
-    expect(clear.status, JSON.stringify(clear.body)).toBe(200)
+    const clear = await as(T.pa).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: null } } })
+    expect(clear.status).toBe(200)
     expect(bossNow()).toBeNull()
-
-    // PoC 反例：老闆未設定時 HR 把自己設成老闆 → 之後就能簽自己需要老闆關的單。現在 → 403，設定不變。
     const selfCrown = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
     expect(selfCrown.status).toBe(403)
-    expect(selfCrown.body.error).toBe("not_boss")
-    expect(bossNow()).toBeNull()
-    // 有在職 platform_admin 時，HR 連設定別人也不行。
     const hrOther = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: BOSS } } })
     expect(hrOther.status).toBe(403)
     expect(bossNow()).toBeNull()
-
-    const bootstrap = await as(T.pa).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
+    const bootstrap = await as(T.pa).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: BOSS } } })
     expect(bootstrap.status, JSON.stringify(bootstrap.body)).toBe(200)
-    expect(bossNow()).toBe(HR)
-    const audits = (fake.db.audit_logs ?? []).filter((a) => a.table_name === "tenants" && String(a.context).includes("老闆"))
-    expect(audits.map((a) => a.context).join("|")).toContain("首次設定老闆")
+    const all = (fake.db.audit_logs ?? []).filter((a) => a.table_name === "tenants" && String(a.context).includes("老闆"))
+    expect(all.map((a) => a.context).join("|")).toContain("首次設定老闆")
   })
 
   it("platform_admin 可以換、可以清除（不必是老闆）", async () => {
@@ -209,7 +199,7 @@ describe("① PUT /api/tenant/settings — 換老闆設定", () => {
 
   it("新老闆必須是本租戶員工：不存在或別租戶的 id → 400 invalid_employee（初始設定與交棒都一樣），設定不變", async () => {
     const ghost = "ffffffff-ffff-4fff-8fff-ffffffffffff"
-    const handOver = await as(T.boss).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: ghost } } })
+    const handOver = await as(T.pa).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: ghost } } })
     expect(handOver.status).toBe(400)
     expect(handOver.body).toMatchObject({ error: "invalid_employee", employeeIds: [ghost] })
     expect(bossNow()).toBe(BOSS)
@@ -224,18 +214,15 @@ describe("① PUT /api/tenant/settings — 換老闆設定", () => {
     expect(otherTenant.status).toBe(400)
   })
 
-  it("沒有老闆、也沒有在職 platform_admin 時 HR 才能做第一次設定（但不能設自己）→ 200；設定之後 HR 自己（不是那位老闆）就不能再換了", async () => {
+  it("2026-11-17：沒有老闆、也沒有在職 platform_admin 時 HR 也不能做第一次設定（設自己或別人都 403）——HR 不能藉此造出覆核帳戶的「老闆」", async () => {
     seed({})
     for (const e of fake.db.employees) if (e.role === "platform_admin") e.status = "inactive"
     const selfCrown = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
     expect(selfCrown.status).toBe(403)
-    expect(bossNow()).toBeNull()
     const first = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: BOSS } } })
-    expect(first.status, JSON.stringify(first.body)).toBe(200)
-    expect(bossNow()).toBe(BOSS)
-    const again = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
-    expect(again.status).toBe(403)
-    expect(bossNow()).toBe(BOSS)
+    expect(first.status).toBe(403)
+    expect(first.body.error).toBe("not_boss")
+    expect(bossNow()).toBeNull()
   })
 
   it("同一個請求一邊換老闆一邊改解鎖名單：HR 先被老闆檢查擋下（403），兩邊都沒動", async () => {

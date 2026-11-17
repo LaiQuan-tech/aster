@@ -81,6 +81,9 @@ const createBody = z.object({
   payeeName: z.string().trim().max(200).nullish(),
   payeeBankName: z.string().trim().max(160).nullish(),
   payeeBankAccount: z.string().trim().max(160).nullish(),
+  /** 驗收第三輪：「其他」收款分欄送帳號與戶名（取代單一字串；舊的 payeeBankAccount 仍相容）。 */
+  payeeBankAccountNumber: z.string().trim().max(80).nullish(),
+  payeeAccountHolder: z.string().trim().max(120).nullish(),
   /** 收款方銀行代碼；未給且 payeeKind='vendor' 時服務層從 vendors 快照。 */
   payeeBankCode: z.string().trim().max(20).nullish(),
   payingCompanyId: z.string().uuid(),

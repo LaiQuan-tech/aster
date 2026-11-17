@@ -190,6 +190,9 @@ export interface DisbursementInput {
   payeeName?: string
   payeeBankName?: string | null
   payeeBankAccount?: string | null
+  /** 驗收第三輪：「其他」收款分欄送帳號與戶名（API 組快照：帳號正規化、戶名原樣）。 */
+  payeeBankAccountNumber?: string | null
+  payeeAccountHolder?: string | null
   payeeBankCode?: string | null
   payingCompanyId: string
   method: DisbursementMethod
@@ -625,7 +628,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   vendor_bank_missing: "名冊尚未登錄此廠商的收款帳戶，請先到廠商名冊補上帳戶。",
   payee_is_registered_vendor: "收款對象與名冊廠商名稱相同，請改選登錄廠商；若專案副委託尚未綁定，請先在副委託下拉選擇該廠商。",
   payee_name_similar: "收款名稱與名冊廠商相近；若是同一家請改選登錄廠商，若確為不同公司請填寫說明。",
-  vendor_bank_unverified: "此廠商的收款帳戶尚未經老闆／平台管理員確認，確認前不能送審、核准或付款（到廠商名冊送出帳戶並請老闆／HR 核准）。",
+  vendor_bank_unverified: "此廠商的收款帳戶尚未確認，請老闆或平台管理員確認（在廠商名冊核准收款帳戶）後再送審、核准或付款。",
   vendor_bank_change_pending: "此廠商的收款帳戶變更正在等待覆核（老闆／平台管理員），覆核完成前不能送審、核准或付款。",
   payee_bank_changed: "廠商名冊的收款帳戶已變更，請編輯放款單按『重新帶入名冊帳戶』後再送出；已核准的單請先撤回簽核再編輯。",
   invalid_payee_name: "名稱含有不可見字元或西里爾／希臘字母，請重新輸入。",

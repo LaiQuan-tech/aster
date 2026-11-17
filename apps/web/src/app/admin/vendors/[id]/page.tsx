@@ -352,7 +352,8 @@ export default function VendorDetailPage() {
           isNew ? undefined : (
             <>
               <Pill tone="gray">{VENDOR_ROSTER_KIND_LABELS[vendorRosterKind(vendor!)]}</Pill>
-              {(() => {
+              {canEdit && (() => {
+                // 驗收第三輪：帳戶狀態只給會計與 HR（與列表一致；API 對其他人也不回這兩欄）。
                 const st = vendorBankStatus(vendor!);
                 return st ? <Pill tone={st.tone}>{st.label}</Pill> : null;
               })()}

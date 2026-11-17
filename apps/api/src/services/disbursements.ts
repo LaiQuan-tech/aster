@@ -39,7 +39,7 @@ import { writeAuditLog, writeAuditLogStrict } from "./audit.js"
 import { firstNewlyPickedInactive } from "./company-lifecycle.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { isHrRole } from "../middleware/scope.js"
-import { accountSegment, holderSegment, maskBankAccount, normalizeAccountSnapshot, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
+import { composeAccountSnapshot, holderSegment, maskBankAccount, normalizeAccountNumber, normalizeAccountSnapshot, splitAccountSnapshot, vendorHasPendingBankChange, vendorsWithPendingBankChange } from "./vendor-bank-change.js"
 
 /**
  * 放款專區——匯款紀錄（disbursements）× 分攤（disbursement_allocations）×
@@ -261,6 +261,9 @@ export type DisbursementInput = {
   payeeName?: string | null
   payeeBankName?: string | null
   payeeBankAccount?: string | null
+  /** 驗收第三輪：「其他」收款分欄送帳號與戶名（有送就以這兩欄組快照，取代 payeeBankAccount 單一字串）。 */
+  payeeBankAccountNumber?: string | null
+  payeeAccountHolder?: string | null
   /** 收款方銀行代碼，與 payeeBankName／payeeBankAccount 同組快照。 */
   payeeBankCode?: string | null
   payingCompanyId: string
@@ -835,6 +838,7 @@ async function attachRebindWarning(tenantId: string, items: SerializedDisburseme
         .eq("tenant_id", tenantId)
         .eq("table_name", "project_subcontracts")
         .in("record_id", subIds.slice(i, i + 100))
+        .not("new_row->>rebindReason", "is", null) // 驗收第三輪效能：只撈有改綁原因的稽核列
       if (error) throw new Error(error.message)
       for (const r of (data ?? []) as Array<{ record_id: string | null; new_row: Record<string, unknown> | null }>) {
         const reason = r.new_row?.rebindReason
@@ -1584,12 +1588,12 @@ function vendorBankDefault(v: VendorLite, field: PayeeBankField): string | null 
  */
 function accountSnapshotMatchesVendor(v: VendorLite, snapshot: unknown): boolean {
   const raw = normBankText(snapshot)
-  if (!raw) return normBankText(v.bank_account) === "" 
-  if (normBankAccount(v.bank_account) === "") return false
-  const holder = (v.account_holder ?? "").trim()
-  const acct = accountSegment(raw, holder || null)
-  const rest = raw.slice(raw.indexOf(acct) + acct.length).trim()
-  return normBankAccount(acct) === normBankAccount(v.bank_account) && (rest === "" || rest === holder)
+  if (!raw) return normBankText(v.bank_account) === ""
+  if (normalizeAccountNumber(v.bank_account) === "") return false
+  const holder = (v.account_holder ?? "").normalize("NFKC").replace(/\s+/g, " ").trim()
+  // 驗收第三輪：用 splitAccountSnapshot 的戶名段比對（不用 indexOf）。
+  const parts = splitAccountSnapshot(raw, holder || null)
+  return normalizeAccountNumber(parts.account) === normalizeAccountNumber(v.bank_account) && (parts.holder === null || parts.holder === holder)
 }
 
 /**
@@ -2112,7 +2116,10 @@ async function resolveHeader(
   if (!payeeName) throw new DisbursementError(400, "payee_name_required")
   if (vendor && opts.checkPayeeName !== false) assertPayeeNameMatchesVendor(payeeName, vendor)
   if (vendor) {
-    const bankTouched = opts.bankTouched ?? PAYEE_BANK_FIELDS.some((f) => input[f] !== undefined)
+    const bankTouched =
+      opts.bankTouched ?? (PAYEE_BANK_FIELDS.some((f) => input[f] !== undefined) || input.payeeBankAccountNumber !== undefined || input.payeeAccountHolder !== undefined)
+    // 登錄廠商的帳戶一律照名冊；分欄欄位不採用。
+    input = { ...input, payeeBankAccountNumber: undefined, payeeAccountHolder: undefined }
     input = dropBlankBankFieldsForVendor(vendor, input)
     assertPayeeBankMatchesVendor(vendor, input, opts.checkBankFields ?? PAYEE_BANK_FIELDS, opts.storedBank)
     // 銀行三欄一致（2026-11-16 第四輪）：有送／改到任一欄 → 代碼、銀行名、帳號整組照名冊帶入，不留新舊混搭。
@@ -2148,11 +2155,20 @@ async function resolveHeader(
     vendor_id: vendor?.id ?? null,
     payee_name: payeeName,
     payee_bank_name: input.payeeBankName !== undefined ? (input.payeeBankName ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankName") : null,
-    // 驗收 F2：存快照前把帳號段正規化（去空白與連字號；登錄廠商依名冊戶名精確拆）。
-    payee_bank_account: normalizeAccountSnapshot(
-      input.payeeBankAccount !== undefined ? (input.payeeBankAccount ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankAccount") : null,
-      vendor?.account_holder ?? null,
-    ),
+    // 驗收 F2／第三輪：
+    // - 分欄送（payeeBankAccountNumber／payeeAccountHolder）→ 帳號正規化、戶名原樣組快照，不再拆字串；
+    // - 單一字串且與 DB 現有快照相同（草稿整份回送）→ 原樣保留，不改寫既有快照（避免舊快照的戶名被併進帳號）；
+    // - 其他單一字串 → 拆開後帳號段正規化（登錄廠商依名冊戶名精確拆）。
+    payee_bank_account:
+      !vendor && (input.payeeBankAccountNumber !== undefined || input.payeeAccountHolder !== undefined)
+        ? composeAccountSnapshot(input.payeeBankAccountNumber, input.payeeAccountHolder)
+        : input.payeeBankAccount !== undefined && opts.storedBank?.payeeBankAccount != null &&
+            (input.payeeBankAccount ?? "").trim() === (opts.storedBank.payeeBankAccount ?? "").trim()
+          ? opts.storedBank.payeeBankAccount
+          : normalizeAccountSnapshot(
+              input.payeeBankAccount !== undefined ? (input.payeeBankAccount ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankAccount") : null,
+              vendor?.account_holder ?? null,
+            ),
     payee_bank_code: input.payeeBankCode !== undefined ? (input.payeeBankCode ?? null) : vendor ? vendorBankDefault(vendor, "payeeBankCode") : null,
     paying_company_id: paying.id,
     paying_company_name: paying.name,

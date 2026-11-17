@@ -317,7 +317,15 @@ export function createFakeSupabase() {
       is: (column: string, value: unknown) => (predicates.push((row) => (row[column] ?? null) === (value ?? null)), builder),
       not: (column: string, op: string, value: unknown) => {
         if (op !== "is" && op !== "eq") throw new Error(`fake-supabase: not() 不支援的運算子 ${op}`)
-        predicates.push((row) => (row[column] ?? null) !== (value ?? null))
+        // jsonb 路徑 `col->>key`（只支援一層，取文字值）。
+        const at = (row: Row): unknown => {
+          const m = /^(\w+)->>(\w+)$/.exec(column)
+          if (!m) return row[column]
+          const obj = row[m[1]!]
+          const v = obj && typeof obj === "object" ? (obj as Row)[m[2]!] : undefined
+          return v === undefined || v === null ? null : String(v)
+        }
+        predicates.push((row) => (at(row) ?? null) !== (value ?? null))
         return builder
       },
       // jsonb 包含（`@>`）的淺層子集：value 的每個鍵都要與列上該 jsonb 欄位同鍵的值相等。

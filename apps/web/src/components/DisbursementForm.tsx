@@ -1,5 +1,6 @@
 "use client";
 
+import { splitAccountSnapshot } from "@/lib/payee-account";
 import { useState } from "react";
 import { formatMoney } from "@/lib/money";
 import { MoneyInput } from "@/components/MoneyInput";
@@ -119,6 +120,8 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
   payeeName: string;
   payeeBankName: string;
   payeeBankAccount: string;
+  /** 手動（其他）收款的帳戶戶名（分欄，驗收第三輪）。 */
+  payeeAccountHolder: string;
   payeeBankCode: string;
   payingCompanyId: string;
   method: DisbursementMethod;
@@ -142,7 +145,9 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
     vendorId: d?.vendorId ?? "",
     payeeName: d?.payeeName ?? "",
     payeeBankName: d?.payeeBankName ?? "",
-    payeeBankAccount: d?.payeeBankAccount ?? "",
+    // 手動收款：既有快照「帳號 戶名」拆成兩欄顯示（沒改就原樣回送，不改寫既有快照）。
+    payeeBankAccount: d?.payeeKind === "other" ? splitAccountSnapshot(d?.payeeBankAccount).account : (d?.payeeBankAccount ?? ""),
+    payeeAccountHolder: d?.payeeKind === "other" ? (splitAccountSnapshot(d?.payeeBankAccount).holder ?? "") : "",
     payeeBankCode: d?.payeeBankCode ?? "",
     payingCompanyId: d?.payingCompanyId ?? "",
     method: d?.method ?? "transfer",
@@ -216,6 +221,8 @@ export default function DisbursementForm({
   const [confirmNonInstallment, setConfirmNonInstallment] = useState(false);
 
   const set = <K extends keyof typeof state>(k: K, v: (typeof state)[K]) => setState((s) => ({ ...s, [k]: v }));
+  /** 手動收款的帳號／戶名有沒有被改過（沒改就原樣回送既有快照，驗收第三輪）。 */
+  const [manualAccountDirty, setManualAccountDirty] = useState(false);
 
   function handleAmountChange(v: string) {
     setState((s) => ({ ...s, amount: v, grossAmount: String(toNum(v) + toNum(s.withheldAmount)) }));
@@ -342,7 +349,11 @@ export default function DisbursementForm({
       vendorId: state.payeeKind === "vendor" ? state.vendorId || null : null,
       payeeName: state.payeeName.trim(),
       payeeBankName: state.payeeBankName.trim() || null,
-      payeeBankAccount: state.payeeBankAccount.trim() || null,
+      ...(state.payeeKind === "other"
+        ? initial?.id && !manualAccountDirty && initial.payeeKind === "other"
+          ? { payeeBankAccount: initial.payeeBankAccount ?? null } // 沒動帳號／戶名 → 原樣回送既有快照
+          : { payeeBankAccountNumber: state.payeeBankAccount.trim() || null, payeeAccountHolder: state.payeeAccountHolder.trim() || null }
+        : { payeeBankAccount: state.payeeBankAccount.trim() || null }),
       payeeBankCode: state.payeeBankCode.trim() || null,
       payingCompanyId: state.payingCompanyId,
       method: state.method,
@@ -507,8 +518,19 @@ export default function DisbursementForm({
         </div>
         <div>
           <label className={labelCls}>收款帳號</label>
-          <input className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`} value={state.payeeBankAccount} onChange={(e) => set("payeeBankAccount", e.target.value)} readOnly={state.payeeKind === "vendor"} />
+          <input className={`${inputCls} ${state.payeeKind === "vendor" ? "bg-gray-50" : ""}`} value={state.payeeBankAccount} onChange={(e) => { setManualAccountDirty(true); set("payeeBankAccount", e.target.value); }} readOnly={state.payeeKind === "vendor"} />
         </div>
+        {state.payeeKind === "other" && (
+          <div>
+            <label className={labelCls}>帳戶戶名</label>
+            <input
+              className={inputCls}
+              value={state.payeeAccountHolder}
+              onChange={(e) => { setManualAccountDirty(true); set("payeeAccountHolder", e.target.value); }}
+              placeholder="存摺上的戶名（與帳號分開填）"
+            />
+          </div>
+        )}
         {/* 2026-11-17：名冊帳戶尚未經老闆／平台管理員 確認（或變更待覆核）→ 可以存草稿，但送審／核准／付款會被擋。 */}
         {selectedVendor && selectedVendor.bankChangePending === true && (
           <div className="col-span-full rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800" role="alert">

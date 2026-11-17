@@ -7,7 +7,7 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 
 import { vendorsRouter } from "../routes/vendors.js"
 import { vendorBankChangesRouter } from "../routes/vendor-bank-changes.js"
-import { maskBankAccount, normalizeAccountSnapshot, splitAccountSnapshot, vendorHasPendingBankChange } from "../services/vendor-bank-change.js"
+import { composeAccountSnapshot, maskBankAccount, normalizeAccountSnapshot, splitAccountSnapshot, vendorHasPendingBankChange } from "../services/vendor-bank-change.js"
 import { assertPayeeBankStillMatchesVendor, DisbursementError, serializeMany, type DisbursementRow } from "../services/disbursements.js"
 import { isBlockedPath } from "../services/mcp/catalog.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
@@ -118,6 +118,13 @@ describe("末 4 碼遮罩", () => {
     expect(normalizeAccountSnapshot("012-345 678")).toBe("012345678")
     expect(maskBankAccount("")).toBeNull()
     expect(maskBankAccount(null)).toBeNull()
+    // 驗收第三輪：第一段已是完整帳號（≥ 8 碼）後面一律戶名；NFKC；連續空白。
+    expect(splitAccountSnapshot("12345678 7-11")).toEqual({ account: "12345678", holder: "7-11" })
+    expect(splitAccountSnapshot("0001234567890 104 人力銀行")).toEqual({ account: "0001234567890", holder: "104 人力銀行" })
+    expect(splitAccountSnapshot("０１２３　４５６７　８９０１　王小明")).toEqual({ account: "0123 4567 8901", holder: "王小明" })
+    expect(splitAccountSnapshot("0123   4567  8901")).toEqual({ account: "0123 4567 8901", holder: null })
+    expect(composeAccountSnapshot("０１２３－４５６７ ８９０１", " 7-11 ")).toBe("012345678901 7-11")
+    expect(composeAccountSnapshot("", "")).toBeNull()
   })
 
   it("放款單序列化：masked、帳戶來源、30 天內變更時間、待覆核旗標", async () => {
@@ -322,6 +329,7 @@ describe("覆核：誰能核准、核准套用、stale、退回", () => {
     const res = await requestChange()
     expect(res.status).toBe(409)
     expect(res.body.error).toBe("no_bank_change_reviewer")
+    expect(res.body.message).toContain("請聯絡平台管理員設定老闆")
     expect(requests()).toHaveLength(0)
     expect(vendor().bank_account).toBe("0000000000001")
   })
