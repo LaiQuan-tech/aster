@@ -16,12 +16,15 @@ import {
 } from "../services/stamp-duty.js"
 import { recomputeBillings } from "../services/billing-store.js"
 import {
+  ackCovers,
   invoicedAckOf,
-  invoicedAmountChanges,
   invoicedChangeConflictBody,
+  invoicedRaceBody,
+  planInvoicedChanges,
   predictContractTotal,
   recordInvoicedChanges,
-  type InvoicedAmountChange,
+  verifyInvoicedAfterWrite,
+  type InvoicedPlan,
 } from "../services/invoiced-guard.js"
 import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
 import {
@@ -243,28 +246,44 @@ contractsRouter.get(
 
 /**
  * 合約金額變動前的「已開票期別」守門（2026-11-18）：預測新分母下已開票未請款期別的有效金額，會變 → 409
- * invoiced_amount_would_change（帶 acknowledgeInvoicedChange＋invoicedChangeReason 才放行，寫入後記備註與稽核）。
- * 回傳 null＝已回應（呼叫端直接 return）；否則回傳要在寫入後記錄的變動（ack 時才有內容）。
+ * invoiced_amount_would_change；帶 acknowledgeInvoicedChange＋invoicedChangeReason＋acknowledgedChanges（與重新試算一致）才放行。
+ * 回傳 null＝已回應（呼叫端直接 return）；否則回傳寫入後要用的守門結果（見 afterInvoicedWrite）。
  */
+type ContractGuard = { projectId: string; plan: InvoicedPlan; reason: string | null }
 async function guardInvoicedByContract(
   req: Request,
   res: Response,
   tenantId: string,
   projectId: string,
   mutate: Parameters<typeof predictContractTotal>[2],
-): Promise<{ changes: InvoicedAmountChange[]; reason: string } | null> {
+): Promise<ContractGuard | null> {
   const ack = invoicedAckOf(req.body)
   if ("error" in ack) {
     res.status(400).json({ error: ack.error })
     return null
   }
   const total = await predictContractTotal(tenantId, projectId, mutate)
-  const changes = await invoicedAmountChanges(tenantId, projectId, { total })
-  if (changes.length > 0 && !ack.ack) {
-    res.status(409).json(invoicedChangeConflictBody(changes))
+  const plan = await planInvoicedChanges(tenantId, projectId, { total })
+  if (plan.changes.length > 0 && !ackCovers(ack, plan.changes)) {
+    res.status(409).json(invoicedChangeConflictBody(plan.changes))
     return null
   }
-  return { changes: ack.ack ? changes : [], reason: ack.ack ? ack.reason : "" }
+  return { projectId, plan, reason: plan.changes.length > 0 && ackCovers(ack, plan.changes) ? ack.reason : null }
+}
+
+/**
+ * 寫入＋重算之後：確認放行的變動記備註與稽核；再檢查競態（預測之後有人開票或改期程）。
+ * 有競態 → 已回 409 conflict_retry（committed: true），回傳 false，呼叫端直接 return。
+ */
+async function afterInvoicedWrite(res: Response, tenantId: string, guard: ContractGuard, actorEmpId: string, context: string): Promise<boolean> {
+  const allowed = guard.reason ? guard.plan.changes : []
+  if (guard.reason) await recordInvoicedChanges(tenantId, allowed, guard.reason, actorEmpId, `${context}（確認已開票期別金額變動）`)
+  const raced = await verifyInvoicedAfterWrite(tenantId, guard.projectId, guard.plan, allowed, actorEmpId, context)
+  if (raced.length > 0) {
+    res.status(409).json(invoicedRaceBody(raced))
+    return false
+  }
+  return true
 }
 
 contractsRouter.put(
@@ -306,9 +325,7 @@ contractsRouter.put(
         }
         throw err
       }
-      if (guard.changes.length > 0) {
-        await recordInvoicedChanges(tenantId, guard.changes, guard.reason, scope.self.id, "PUT /projects/:id/main-contract（確認已開票期別金額變動）")
-      }
+      if (!(await afterInvoicedWrite(res, tenantId, guard, scope.self.id, "PUT /projects/:id/main-contract"))) return
       // 分潤改版 #3：合約額變動 → 草稿獎金批次重算（best-effort）。
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/main-contract")
       res.status(200).json({ contract: serializeMainContract(contract), applicationVersion: versioning })
@@ -417,9 +434,7 @@ contractsRouter.post(
         return
       }
       const data = inserted.data
-      if (guard.changes.length > 0) {
-        await recordInvoicedChanges(tenantId, guard.changes, guard.reason, scope.self.id, "POST /projects/:id/contracts（確認已開票期別金額變動）")
-      }
+      if (!(await afterInvoicedWrite(res, tenantId, guard, scope.self.id, "POST /projects/:id/contracts"))) return
       // 分潤改版 #3：新增合約／追加減（change_order）→ 草稿獎金批次重算（best-effort）。
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "POST /projects/:id/contracts")
       res.status(201).json({ contract: serialize(data as ContractRow, canSeeContent), applicationVersion: versioning })
@@ -556,8 +571,8 @@ contractsRouter.patch(
                 : r,
             ),
           )
-        : { changes: [], reason: "" }
-      if (!guard) return
+        : null
+      if (amountTouched && !guard) return
       const write = async () => {
         const { data, error } = await supabaseAdmin
           .from("contracts")
@@ -590,9 +605,6 @@ contractsRouter.patch(
         return
       }
       const data = written.data
-      if (guard.changes.length > 0) {
-        await recordInvoicedChanges(tenantId, guard.changes, guard.reason, scope.self.id, "PATCH /contracts/:id（確認已開票期別金額變動）")
-      }
       if (amountTouched) {
         // 分潤改版 #3：合約額（或是否算我方營收）變動 → 草稿獎金批次重算（best-effort）。
         await recomputeDraftRunsAfterWrite(tenantId, [row.project_id], "PATCH /contracts/:id")
@@ -609,6 +621,7 @@ contractsRouter.patch(
         newRow: patch,
         context: "PATCH /contracts/:id — 修改合約",
       })
+      if (guard && !(await afterInvoicedWrite(res, tenantId, guard, scope.self.id, "PATCH /contracts/:id"))) return
       res.status(200).json({ contract: serialize(data as ContractRow, canSeeContent), applicationVersion: versioning })
     } catch (err) {
       next(err)
@@ -692,9 +705,7 @@ contractsRouter.delete(
         next(deleteError)
         return
       }
-      if (guard.changes.length > 0) {
-        await recordInvoicedChanges(tenantId, guard.changes, guard.reason, scope.self.id, "DELETE /contracts/:id（確認已開票期別金額變動）")
-      }
+      if (!(await afterInvoicedWrite(res, tenantId, guard, scope.self.id, "DELETE /contracts/:id"))) return
       await recomputeDraftRunsAfterWrite(tenantId, [current.project_id as string], "DELETE /contracts/:id")
       res.status(200).json({ id: req.params.id, applicationVersion: versioning })
     } catch (err) {

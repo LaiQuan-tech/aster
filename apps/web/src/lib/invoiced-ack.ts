@@ -9,7 +9,12 @@ export interface InvoicedAmountChange {
   after: number | null;
 }
 
-export type InvoicedAckBody = { acknowledgeInvoicedChange: true; invoicedChangeReason: string };
+/** acknowledgedChanges：使用者在視窗裡確認的 [{ billingId, after }]，後端重新試算不一致就要求重新確認。 */
+export type InvoicedAckBody = {
+  acknowledgeInvoicedChange: true;
+  invoicedChangeReason: string;
+  acknowledgedChanges: Array<{ billingId: string; after: number | null }>;
+};
 
 /** 這個錯誤是不是「已開票期別金額會變動」：是 → 回變動清單；否 → null。 */
 export function invoicedChangesOf(err: unknown): InvoicedAmountChange[] | null {
@@ -34,7 +39,13 @@ export function invoicedChangeLines(changes: readonly InvoicedAmountChange[]): s
   return changes.map((c) => `第 ${c.installmentNo} 期（已開發票）：${money(c.before)} → ${money(c.after)}`);
 }
 
-export function invoicedAckBodyOf(reason: string): InvoicedAckBody | null {
+export function invoicedAckBodyOf(reason: string, changes: readonly InvoicedAmountChange[] = []): InvoicedAckBody | null {
   const r = reason.trim();
-  return r ? { acknowledgeInvoicedChange: true, invoicedChangeReason: r.slice(0, 500) } : null;
+  return r
+    ? {
+        acknowledgeInvoicedChange: true,
+        invoicedChangeReason: r.slice(0, 500),
+        acknowledgedChanges: changes.map((c) => ({ billingId: c.billingId, after: c.after })),
+      }
+    : null;
 }

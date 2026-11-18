@@ -18,12 +18,16 @@ import { BILLING_KINDS, computeSchedule, effectiveBillingAmount } from "../servi
 import { serializeBilling } from "../services/project-application-store.js"
 import { writeAuditLog } from "../services/audit.js"
 import {
+  ackCovers,
   diffInvoicedAmounts,
   invoicedAckOf,
-  invoicedAmountChanges,
   invoicedChangeConflictBody,
+  invoicedRaceBody,
   isInvoicedBilling,
+  planInvoicedChanges,
   recordInvoicedChanges,
+  storedEffectiveAmount,
+  verifyInvoicedAfterWrite,
 } from "../services/invoiced-guard.js"
 import { billingScheduleVersion } from "../lib/billing-version.js"
 import { scheduleBonusRecompute } from "../services/bonus-run-store.js"
@@ -91,6 +95,8 @@ const reasonSchema = z.object({
 const invoiceSchema = z.object({
   invoiceNo: z.string().trim().min(1).max(40),
   invoicedOn: z.string().regex(dateRe).optional(),
+  /** 樂觀鎖（2026-11-18）：開票時看到的期程版本；不符（期程剛被改過、金額可能不同）→ 409 conflict_retry。省略＝不檢查。 */
+  expectedVersion: z.string().max(40).optional(),
 })
 
 const INVOICED_FROZEN_MESSAGE = "這一期已開發票，百分比與金額不能改；要改請先撤銷開票或用「修正」換發票。"
@@ -100,7 +106,16 @@ const reinvoiceSchema = z.object({
   invoiceNo: z.string().trim().min(1).max(40),
   invoicedOn: z.string().regex(dateRe),
   reason: z.string().trim().min(1).max(500),
+  expectedVersion: z.string().max(40).optional(),
 })
+
+/** 開票／修正開票的期程版本檢查：帶了版本且跟目前期程不符 → true（呼叫端回 409 conflict_retry）。 */
+async function scheduleVersionStale(tenantId: string, projectId: string, expected: string | undefined): Promise<boolean> {
+  if (expected === undefined) return false
+  const rows = await loadBillings(tenantId, projectId)
+  return billingScheduleVersion(rows.map(serializeBilling)) !== expected
+}
+const SCHEDULE_STALE_BODY = { error: "conflict_retry", message: "期程已被其他人更新（金額可能已變），請重新整理後再登記發票。" } as const
 
 /** 已開票判斷移到 services/invoiced-guard.ts（號碼或日期任一有值）；保留匯出相容。 */
 export { isInvoicedBilling }
@@ -401,11 +416,10 @@ billingsRouter.put(
         return
       }
       let invoicedChanges: ReturnType<typeof diffInvoicedAmounts> = []
-      if (existing.some((r) => isInvoicedBilling(r) && r.billed_on === null)) {
+      if (existing.some((r) => isInvoicedBilling(r))) {
         const { total } = await contractTotal(tenantId, projectId)
         invoicedChanges = diffInvoicedAmounts(
           existing,
-          total,
           payload.map((item) => {
             const saved = item.id ? byId.get(item.id) : undefined
             return {
@@ -420,7 +434,7 @@ billingsRouter.put(
           total,
           (r) => (keepIds.has(r.id.toLowerCase()) ? (payload.find((item) => item.id === r.id.toLowerCase())?.installmentNo ?? null) : null),
         )
-        if (invoicedChanges.length > 0 && !ack.ack) {
+        if (invoicedChanges.length > 0 && !ackCovers(ack, invoicedChanges)) {
           res.status(409).json(invoicedChangeConflictBody(invoicedChanges))
           return
         }
@@ -557,8 +571,14 @@ billingsRouter.put(
         }
       }
       await recomputeBillings(tenantId, projectId)
-      if (invoicedChanges.length > 0 && ack.ack) {
+      if (invoicedChanges.length > 0 && ackCovers(ack, invoicedChanges)) {
         await recordInvoicedChanges(tenantId, invoicedChanges, ack.reason, scope.self.id, "PUT /projects/:id/billings（確認已開票期別金額變動）")
+      }
+      // 競態：預測之後有人開票或改期程 → 已開票期別金額未經確認變動（已寫入無法回滾：記備註與稽核，回 409 conflict_retry）。
+      const raced = await verifyInvoicedAfterWrite(tenantId, projectId, { rows: existing, changes: invoicedChanges }, invoicedChanges, scope.self.id, "PUT /projects/:id/billings")
+      if (raced.length > 0) {
+        res.status(409).json(invoicedRaceBody(raced))
+        return
       }
       // 期別金額變小 → 已設定的每期分潤可能超額：不擋（分潤只是紀錄），回 warnings 讓前端顯示黃色提示。
       const over = await billingsOverShareLimit(tenantId, projectId)
@@ -617,10 +637,20 @@ billingsRouter.post(
         res.status(400).json({ error: ack.error })
         return
       }
-      const invoicedChanges = await invoicedAmountChanges(tenantId, row.project_id, {
+      const plan = await planInvoicedChanges(tenantId, row.project_id, {
         rows: (rows) => rows.map((r) => (r.id === row.id ? { ...toScheduleInput(r), billed: true, billedAmount } : toScheduleInput(r))),
+        // 這一期自己已開票、請款金額卻跟發票時的有效金額不同 → 也要確認（發票金額與請款金額會對不上）。
+        extra: (rows) => {
+          const self = rows.find((r) => r.id === row.id)
+          if (!self || !isInvoicedBilling(self)) return []
+          const before = storedEffectiveAmount(self)
+          return before !== null && Math.round(before) === Math.round(billedAmount)
+            ? []
+            : [{ billingId: self.id, installmentNo: self.installment_no, before, after: billedAmount }]
+        },
       })
-      if (invoicedChanges.length > 0 && !ack.ack) {
+      const invoicedChanges = plan.changes
+      if (invoicedChanges.length > 0 && !ackCovers(ack, invoicedChanges)) {
         res.status(409).json(invoicedChangeConflictBody(invoicedChanges))
         return
       }
@@ -647,8 +677,13 @@ billingsRouter.post(
       }
       // 這一期凍結後，尾差要改落到下一個未請款的期別。
       await recomputeBillings(tenantId, row.project_id)
-      if (invoicedChanges.length > 0 && ack.ack) {
+      if (invoicedChanges.length > 0 && ackCovers(ack, invoicedChanges)) {
         await recordInvoicedChanges(tenantId, invoicedChanges, ack.reason, loaded.self.id, "POST /billings/:id/bill（確認已開票期別金額變動）")
+      }
+      const raced = await verifyInvoicedAfterWrite(tenantId, row.project_id, plan, invoicedChanges, loaded.self.id, "POST /billings/:id/bill")
+      if (raced.length > 0) {
+        res.status(409).json(invoicedRaceBody(raced))
+        return
       }
       await respondSchedule(tenantId, row.project_id, res)
     } catch (err) {
@@ -692,10 +727,12 @@ billingsRouter.post(
         res.status(400).json({ error: ack.error })
         return
       }
-      const invoicedChanges = await invoicedAmountChanges(tenantId, row.project_id, {
+      // 含這一期自己：已開票的期別取消請款後回到試算金額，前值是請款金額（2026-11-18 驗收）。
+      const plan = await planInvoicedChanges(tenantId, row.project_id, {
         rows: (rows) => rows.map((r) => (r.id === row.id ? { ...toScheduleInput(r), billed: false, billedAmount: null } : toScheduleInput(r))),
       })
-      if (invoicedChanges.length > 0 && !ack.ack) {
+      const invoicedChanges = plan.changes
+      if (invoicedChanges.length > 0 && !ackCovers(ack, invoicedChanges)) {
         res.status(409).json(invoicedChangeConflictBody(invoicedChanges))
         return
       }
@@ -719,8 +756,13 @@ billingsRouter.post(
         return
       }
       await recomputeBillings(tenantId, row.project_id)
-      if (invoicedChanges.length > 0 && ack.ack) {
+      if (invoicedChanges.length > 0 && ackCovers(ack, invoicedChanges)) {
         await recordInvoicedChanges(tenantId, invoicedChanges, ack.reason, loaded.self.id, "POST /billings/:id/unbill（確認已開票期別金額變動）")
+      }
+      const raced = await verifyInvoicedAfterWrite(tenantId, row.project_id, plan, invoicedChanges, loaded.self.id, "POST /billings/:id/unbill")
+      if (raced.length > 0) {
+        res.status(409).json(invoicedRaceBody(raced))
+        return
       }
       await respondSchedule(tenantId, row.project_id, res)
     } catch (err) {
@@ -764,6 +806,10 @@ billingsRouter.post(
       }
       if (isInvoicedBilling(row)) {
         res.status(409).json({ error: "already_invoiced" })
+        return
+      }
+      if (await scheduleVersionStale(tenantId, row.project_id, parsed.data.expectedVersion)) {
+        res.status(409).json(SCHEDULE_STALE_BODY)
         return
       }
       const warnings: Warning[] = []
@@ -910,6 +956,10 @@ billingsRouter.post(
       }
       if (!isInvoicedBilling(row)) {
         res.status(409).json({ error: "not_invoiced" })
+        return
+      }
+      if (await scheduleVersionStale(tenantId, row.project_id, parsed.data.expectedVersion)) {
+        res.status(409).json(SCHEDULE_STALE_BODY)
         return
       }
       const { invoiceNo, invoicedOn, reason } = parsed.data

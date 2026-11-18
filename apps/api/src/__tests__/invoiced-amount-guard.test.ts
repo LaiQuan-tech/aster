@@ -114,7 +114,13 @@ beforeEach(() => {
 
 
 
-const ACK = { acknowledgeInvoicedChange: true, invoicedChangeReason: "業主同意折讓" }
+/** 確認時要帶「確認過的變動」（期別＋變動後金額），跟後端重新試算一致才放行。 */
+const ackOf = (changes: Array<{ billingId: string; after: number | null }>) => ({
+  acknowledgeInvoicedChange: true,
+  invoicedChangeReason: "業主同意折讓",
+  acknowledgedChanges: changes.map((c) => ({ billingId: c.billingId, after: c.after })),
+})
+const ACK = ackOf([])
 const C2 = "cccccccc-0000-4000-8000-000000000552"
 function contractRow(over: Row): Row {
   return {
@@ -148,7 +154,7 @@ describe("請款／取消請款別期", () => {
 
   it("帶 ack＋理由 → 放行；第 2 期備註與稽核留前後金額與理由", async () => {
     invoiceB2()
-    const res = await post(T.accountant, `/billings/${B1}/bill`, { billedAmount: 90000, ...ACK })
+    const res = await post(T.accountant, `/billings/${B1}/bill`, { billedAmount: 90000, ...ackOf([{ billingId: B2, after: 110000 }]) })
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect(billing(B1).billed_amount).toBe(90000)
     expect(billing(B2).note).toContain("已開票期別金額由 100,000 變 110,000：業主同意折讓")
@@ -175,7 +181,7 @@ describe("請款／取消請款別期", () => {
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({ error: "invoiced_amount_would_change", before: 110000, after: 100000 })
     expect(billing(B1).billed_on).toBe("2026-02-01")
-    const ok = await post(T.accountant, `/billings/${B1}/unbill`, { reason: "x", ...ACK })
+    const ok = await post(T.accountant, `/billings/${B1}/unbill`, { reason: "x", ...ackOf(res.body.changes) })
     expect(ok.status, JSON.stringify(ok.body)).toBe(200)
     expect(billing(B1).billed_on).toBeNull()
   })
@@ -188,7 +194,7 @@ describe("合約金額變動", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(409)
     expect(res.body).toMatchObject({ error: "invoiced_amount_would_change", installmentNo: 2, before: 100000, after: 150000 })
     expect(fake.db.contracts.find((c: Row) => c.id === "c-1")!.amount).toBe("200000")
-    const ok = await request(app).put(`/projects/${PROJECT}/main-contract`).set("Authorization", `Bearer ${T.accountant}`).send({ amount: 300000, ...ACK })
+    const ok = await request(app).put(`/projects/${PROJECT}/main-contract`).set("Authorization", `Bearer ${T.accountant}`).send({ amount: 300000, ...ackOf(res.body.changes) })
     expect(ok.status, JSON.stringify(ok.body)).toBe(200)
     expect(billing(B2).note).toContain("已開票期別金額由 100,000 變 150,000：業主同意折讓")
   })
@@ -210,12 +216,15 @@ describe("合約金額變動", () => {
     expect(patch.status).toBe(409)
     expect(fake.db.contracts.find((c: Row) => c.id === C2)!.amount).toBe("0")
 
+    // 追加減已是 20,000（期程也已依 220,000 重算：各 110,000）；作廢它會讓已開票第 2 期回到 100,000。
     Object.assign(fake.db.contracts.find((c: Row) => c.id === C2)!, { amount: "20000" })
+    Object.assign(billing(B1), { calculated_amount: "110000" })
+    Object.assign(billing(B2), { calculated_amount: "110000" })
     const del = await request(app).delete(`/contracts/${C2}`).set("Authorization", `Bearer ${T.accountant}`).send({ reason: "作廢" })
     expect(del.status).toBe(409)
     expect(fake.db.contracts.find((c: Row) => c.id === C2)!.deleted_at).toBeNull()
 
-    const delOk = await request(app).delete(`/contracts/${C2}`).set("Authorization", `Bearer ${T.accountant}`).send({ reason: "作廢", ...ACK })
+    const delOk = await request(app).delete(`/contracts/${C2}`).set("Authorization", `Bearer ${T.accountant}`).send({ reason: "作廢", ...ackOf(del.body.changes) })
     expect(delOk.status, JSON.stringify(delOk.body)).toBe(200)
     expect(fake.db.contracts.find((c: Row) => c.id === C2)!.deleted_at).not.toBeNull()
   })
@@ -244,7 +253,7 @@ describe("整批改期程", () => {
   it("改百分比讓已開票第 2 期吸收尾差：帶 ack 才放行", async () => {
     invoiceB2()
     const res = await request(app).put(`/projects/${PROJECT}/billings`).set("Authorization", `Bearer ${T.accountant}`)
-      .send({ installments: [item(billing(B1), { percentage: 40 }), item(billing(B2))], ...ACK })
+      .send({ installments: [item(billing(B1), { percentage: 40 }), item(billing(B2))], ...ackOf([{ billingId: B2, after: 120000 }]) })
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect(billing(B2).note).toContain("已開票期別金額由 100,000 變 120,000：業主同意折讓")
   })
@@ -285,5 +294,87 @@ describe("舊資料與 MCP", () => {
     }
     expect(dangerOf("POST", "/billings/x/bill", {})?.tier).toBe("medium")
     expect(dangerOf("PUT", "/projects/x/billings", { installments: [] })?.tier).toBe("medium")
+  })
+})
+
+describe("第四輪驗收：unbill 自己、ack 綁定、改前值用存的有效金額、競態、開票帶版本", () => {
+  it("驗收重現：合約 200,000、第 1 期 50% 以 90,000 請款並開票 → 取消請款（自己回到 100,000）→ 409；確認後放行", async () => {
+    Object.assign(billing(B1), { billed_on: "2026-02-01", billed_amount: "90000", invoice_no: "ZZ00001000", invoiced_on: "2026-02-02" })
+    Object.assign(billing(B2), { calculated_amount: "110000", residue_applied: "10000" })
+    const res = await post(T.accountant, `/billings/${B1}/unbill`, { reason: "請款金額錯" })
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.changes).toEqual([{ billingId: B1, installmentNo: 1, before: 90000, after: 100000 }])
+    expect(billing(B1).billed_on).toBe("2026-02-01")
+    const ok = await post(T.accountant, `/billings/${B1}/unbill`, { reason: "請款金額錯", ...ackOf(res.body.changes) })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(billing(B1).note).toContain("已開票期別金額由 90,000 變 100,000：業主同意折讓")
+  })
+
+  it("ack 綁定：確認的後值與重新試算不一致（或少列期別）→ 仍 409，要重新確認", async () => {
+    invoiceB2()
+    const wrongAfter = await post(T.accountant, `/billings/${B1}/bill`, { billedAmount: 90000, ...ackOf([{ billingId: B2, after: 105000 }]) })
+    expect(wrongAfter.status).toBe(409)
+    expect(wrongAfter.body.changes[0].after).toBe(110000)
+    const empty = await post(T.accountant, `/billings/${B1}/bill`, { billedAmount: 90000, ...ACK })
+    expect(empty.status).toBe(409)
+    expect(billing(B1).billed_on).toBeNull()
+  })
+
+  it("改前值用 DB 存的有效金額：存的是 100,001（舊試算）、新試算 100,000 → 也算變動", async () => {
+    Object.assign(billing(B2), { invoice_no: "ZZ00001001", invoiced_on: "2026-02-03", calculated_amount: "100001" })
+    const res = await request(app).put(`/projects/${PROJECT}/main-contract`).set("Authorization", `Bearer ${T.accountant}`).send({ amount: 200000 })
+    expect(res.status).toBe(409)
+    expect(res.body.changes).toEqual([{ billingId: B2, installmentNo: 2, before: 100001, after: 100000 }])
+  })
+
+  it("對已開票的期別自己請款、金額跟發票時不同 → 也要確認", async () => {
+    invoiceB2()
+    const res = await post(T.accountant, `/billings/${B2}/bill`, { billedAmount: 95000 })
+    expect(res.status).toBe(409)
+    expect(res.body.changes).toEqual([{ billingId: B2, installmentNo: 2, before: 100000, after: 95000 }])
+    const same = await post(T.accountant, `/billings/${B2}/bill`, {})
+    expect(same.status, JSON.stringify(same.body)).toBe(200)
+  })
+
+  it("競態：預測時第 2 期未開票、寫入前被別人開票 → 已存檔但回 409 conflict_retry（committed），該期備註與稽核留實際前後金額", async () => {
+    const realFrom = fake.from.bind(fake)
+    let armed = true
+    const spy = vi.spyOn(fake, "from").mockImplementation((table: string) => {
+      const builder = realFrom(table) as Row
+      if (table === "project_billings" && armed) {
+        const update = builder.update
+        builder.update = (...args: unknown[]) => {
+          if (armed) {
+            armed = false
+            Object.assign(billing(B2), { invoice_no: "ZZ00001002", invoiced_on: "2026-02-04" })
+          }
+          return update(...args)
+        }
+      }
+      return builder as never
+    })
+    try {
+      const res = await post(T.accountant, `/billings/${B1}/bill`, { billedAmount: 90000 })
+      expect(res.status, JSON.stringify(res.body)).toBe(409)
+      expect(res.body).toMatchObject({ error: "conflict_retry", committed: true, changes: [{ billingId: B2, before: 100000, after: 110000 }] })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(billing(B1).billed_amount).toBe(90000)
+    expect(billing(B2).note).toContain("已開票期別金額由 100,000 變 110,000（存檔期間期程被其他操作變動")
+    expect((fake.db.audit_logs ?? []).some((a: Row) => a.record_id === B2 && /競態/.test(a.context ?? ""))).toBe(true)
+  })
+
+  it("開票／修正開票帶期程版本：不符 → 409 conflict_retry、不寫；相符照登記", async () => {
+    const got = await request(app).get(`/projects/${PROJECT}/billings`).set("Authorization", `Bearer ${T.accountant}`)
+    const stale = await post(T.accountant, `/billings/${B1}/invoice`, { invoiceNo: "ZZ00001003", expectedVersion: "0-deadbeef" })
+    expect(stale.status).toBe(409)
+    expect(stale.body.error).toBe("conflict_retry")
+    expect(billing(B1).invoice_no).toBeNull()
+    const ok = await post(T.accountant, `/billings/${B1}/invoice`, { invoiceNo: "ZZ00001003", expectedVersion: got.body.version })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    const reStale = await post(T.accountant, `/billings/${B1}/reinvoice`, { invoiceNo: "ZZ00001004", invoicedOn: "2026-03-01", reason: "x", expectedVersion: "0-deadbeef" })
+    expect(reStale.status).toBe(409)
+    expect(reStale.body.error).toBe("conflict_retry")
   })
 })

@@ -11,6 +11,8 @@ export interface ReinvoiceTarget {
   label: string;
   invoiceNo: string | null;
   invoicedOn: string | null;
+  /** 開視窗時的期程版本（樂觀鎖；期程剛被改過 → 409 conflict_retry）。 */
+  expectedVersion?: string;
 }
 
 /**
@@ -43,7 +45,7 @@ export function ReinvoiceDialog({ target, onClose, onDone }: { target: Reinvoice
     setBusy(true);
     setError(null);
     try {
-      await reinvoiceBilling(target.billingId, { invoiceNo: invoiceNo.trim(), invoicedOn: invoicedOn.trim(), reason: reason.trim() });
+      await reinvoiceBilling(target.billingId, { invoiceNo: invoiceNo.trim(), invoicedOn: invoicedOn.trim(), reason: reason.trim(), expectedVersion: target.expectedVersion });
       await onDone();
       onClose();
     } catch (err) {

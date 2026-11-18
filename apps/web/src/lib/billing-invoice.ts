@@ -42,6 +42,8 @@ export function humanizeReinvoiceError(code: string | null | undefined): string 
       return "這一期還沒有登記開票，請直接填發票號碼登記。";
     case "unchanged":
       return "新的發票號碼與日期跟原本一樣。";
+    case "conflict_retry":
+      return "期程已被其他人更新，請重新整理後再修正。";
     case "invoice_changed":
       return "這一期的發票剛被別人改過，請重新整理後再修正。";
     case "forbidden":

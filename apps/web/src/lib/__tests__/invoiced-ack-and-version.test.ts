@@ -28,6 +28,12 @@ describe("已開票期別金額變動確認", () => {
   });
   it("理由必填：空白不產生 ack；有填就帶 acknowledgeInvoicedChange", () => {
     expect(invoicedAckBodyOf("  ")).toBeNull();
-    expect(invoicedAckBodyOf(" 折讓 ")).toEqual({ acknowledgeInvoicedChange: true, invoicedChangeReason: "折讓" });
+    expect(invoicedAckBodyOf(" 折讓 ")).toEqual({ acknowledgeInvoicedChange: true, invoicedChangeReason: "折讓", acknowledgedChanges: [] });
+    // 綁定確認過的變動（期別＋變動後金額），後端重新試算不一致會再要求確認。
+    expect(invoicedAckBodyOf("折讓", [{ billingId: "b2", installmentNo: 2, before: 100000, after: 110000 }])).toEqual({
+      acknowledgeInvoicedChange: true,
+      invoicedChangeReason: "折讓",
+      acknowledgedChanges: [{ billingId: "b2", after: 110000 }],
+    });
   });
 });

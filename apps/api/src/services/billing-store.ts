@@ -98,7 +98,7 @@ export function toInput(row: BillingRow): InstallmentInput {
     percentage: num(row.percentage),
     overrideAmount: num(row.override_amount),
     billedAmount: num(row.billed_amount),
-    billed: row.billed_on !== null,
+    billed: row.billed_on !== null && row.billed_on !== undefined,
   }
 }
 

@@ -161,7 +161,8 @@ export function BillingsCard({
     }
     setError(null);
     try {
-      setSchedule(await invoiceBilling(id, { invoiceNo: invoiceNo.trim(), invoicedOn }));
+      const expectedVersion = schedule ? (schedule.version ?? billingScheduleVersion(schedule.installments)) : undefined;
+      setSchedule(await invoiceBilling(id, { invoiceNo: invoiceNo.trim(), invoicedOn, expectedVersion }));
       setInvoiceFormId(null);
       setInvoiceNo("");
       await load();

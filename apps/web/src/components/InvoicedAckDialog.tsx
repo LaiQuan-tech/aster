@@ -36,7 +36,16 @@ export function useInvoicedAck(): { run: <T>(call: (ack?: InvoicedAckBody) => Pr
       if (!changes) throw err;
       const ack = await ask(changes);
       if (!ack) throw err;
-      return call(ack);
+      // 重送時後端會重新試算；期間金額又變了（409 invoiced_amount_would_change）→ 再問一次（最多一次，避免無限循環）。
+      try {
+        return await call(ack);
+      } catch (err2) {
+        const again = invoicedChangesOf(err2);
+        if (!again) throw err2;
+        const ack2 = await ask(again);
+        if (!ack2) throw err2;
+        return call(ack2);
+      }
     }
   }, []);
 
@@ -67,7 +76,7 @@ export function useInvoicedAck(): { run: <T>(call: (ack?: InvoicedAckBody) => Pr
             <Button
               type="button"
               onClick={() => {
-                const ack = invoicedAckBodyOf(reason);
+                const ack = invoicedAckBodyOf(reason, pending.changes);
                 if (!ack) {
                   setError("請填理由。");
                   return;

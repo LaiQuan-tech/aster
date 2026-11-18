@@ -56,7 +56,12 @@ export function statusLabel(s: string | null): string {
  * 確認「已開票期別金額會變動」（2026-11-18）：合約金額、請款／取消請款、整批改期程會讓已開票但未請款的期別金額變動時，
  * 後端回 409 invoiced_amount_would_change；使用者確認並填理由後，帶這兩個欄位重送（該期備註與稽核會留紀錄）。
  */
-export type InvoicedAckBody = { acknowledgeInvoicedChange: true; invoicedChangeReason: string }
+export type InvoicedAckBody = {
+  acknowledgeInvoicedChange: true
+  invoicedChangeReason: string
+  /** 使用者確認過的變動（期別 id＋變動後金額）；後端重新試算不一致 → 再回 409 要求重新確認。 */
+  acknowledgedChanges: Array<{ billingId: string; after: number | null }>
+}
 
 export interface Project {
   id: string

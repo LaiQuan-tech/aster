@@ -1,8 +1,9 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { OUR_CONTRACT_ROLES } from "../lib/contract-role.js"
 import { contractTotal, loadBillings, num, toScheduleInput, type BillingRow } from "./billing-store.js"
-import { computeSchedule, type ScheduleRowInput } from "./project-money.js"
+import { computeSchedule, effectiveBillingAmount, type ScheduleRowInput } from "./project-money.js"
 import { writeAuditLog } from "./audit.js"
+import { logger } from "../lib/logger.js"
 
 /**
  * 已開票期別的金額守門（2026-11-18 驗收）。
@@ -73,47 +74,72 @@ export type InvoicedAmountChange = {
   after: number | null
 }
 
+/** 金額比對以整數元為準（DB 存的有效金額可能是 numeric 字串；試算一律四捨五入到元）。 */
+function sameAmount(a: number | null, b: number | null): boolean {
+  if (a === null || b === null) return a === b
+  return Math.round(a) === Math.round(b)
+}
+
+/** DB 存的有效金額（已請款＝請款金額，否則人工金額 ?? 試算）。「改之前」一律用它，不重新試算（2026-11-18 驗收）。 */
+export function storedEffectiveAmount(row: BillingRow): number | null {
+  return effectiveBillingAmount(row)
+}
+
 /**
- * 純函式：existing＝目前的期別列；afterInputs＝寫入後的期程輸入（以 installmentNo 對應，期別改號用 renumber 對應）。
- * 回傳「已開票、寫入前後都未請款、仍存在」的期別裡，有效金額會改變的那些。
+ * 純函式：existing＝目前的期別列；afterInputs＝寫入後的期程輸入（以 installmentNo 對應，改號用 renumber 對應）。
+ * 守門範圍＝「改之後」仍存在、已開票、未請款的期別（含這次被取消請款的那期——它的前值是請款金額）。
+ * 回傳其中有效金額會改變的；前值用 DB 存的有效金額。
  */
 export function diffInvoicedAmounts(
   existing: readonly BillingRow[],
-  beforeTotal: number | null,
   afterInputs: ScheduleRowInput[],
   afterTotal: number | null,
   renumber: (row: BillingRow) => number | null = (row) => row.installment_no,
 ): InvoicedAmountChange[] {
-  const watched = existing.filter((r) => isInvoicedBilling(r) && r.billed_on === null)
-  if (watched.length === 0) return []
-  const before = computeSchedule(existing.map(toScheduleInput), beforeTotal)
+  const candidates = existing.filter((r) => isInvoicedBilling(r))
+  if (candidates.length === 0) return []
   const after = computeSchedule(afterInputs, afterTotal)
-  const beforeByNo = new Map(before.rows.map((r) => [r.installmentNo, r.effectiveAmount]))
   const afterByNo = new Map(after.rows.map((r) => [r.installmentNo, r]))
   const afterBilled = new Map(afterInputs.map((r) => [r.installmentNo, r.billed]))
   const out: InvoicedAmountChange[] = []
-  for (const r of watched) {
+  for (const r of candidates) {
     const nextNo = renumber(r)
     if (nextNo === null || !afterByNo.has(nextNo) || afterBilled.get(nextNo)) continue
-    const b = beforeByNo.get(r.installment_no) ?? null
+    const b = storedEffectiveAmount(r)
     const a = afterByNo.get(nextNo)?.effectiveAmount ?? null
-    if (b !== a) out.push({ billingId: r.id, installmentNo: r.installment_no, before: b, after: a })
+    if (!sameAmount(b, a)) out.push({ billingId: r.id, installmentNo: r.installment_no, before: b, after: a })
   }
   return out
 }
 
-/** 讀 DB 後預測：next.total 省略＝分母不變；next.rows 省略＝期別不變。 */
+export type InvoicedPlan = {
+  /** 寫入前讀到的期別列（寫入後比對競態用）。 */
+  rows: BillingRow[]
+  changes: InvoicedAmountChange[]
+}
+
+/** 讀 DB 後預測：next.total 省略＝分母不變；next.rows 省略＝期別不變；extra＝呼叫端另外判定的變動（例：請款金額≠發票時金額）。 */
+export async function planInvoicedChanges(
+  tenantId: string,
+  projectId: string,
+  next: { total?: number | null; rows?: (rows: BillingRow[]) => ScheduleRowInput[]; extra?: (rows: BillingRow[]) => InvoicedAmountChange[] },
+): Promise<InvoicedPlan> {
+  const rows = await loadBillings(tenantId, projectId)
+  const extra = next.extra ? next.extra(rows) : []
+  if (!rows.some((r) => isInvoicedBilling(r))) return { rows, changes: extra }
+  const { total } = await contractTotal(tenantId, projectId)
+  const afterTotal = next.total === undefined ? total : next.total
+  const afterInputs = next.rows ? next.rows(rows) : rows.map(toScheduleInput)
+  return { rows, changes: [...diffInvoicedAmounts(rows, afterInputs, afterTotal), ...extra] }
+}
+
+/** 相容舊呼叫：只要變動清單。 */
 export async function invoicedAmountChanges(
   tenantId: string,
   projectId: string,
   next: { total?: number | null; rows?: (rows: BillingRow[]) => ScheduleRowInput[] },
 ): Promise<InvoicedAmountChange[]> {
-  const rows = await loadBillings(tenantId, projectId)
-  if (!rows.some((r) => isInvoicedBilling(r) && r.billed_on === null)) return []
-  const { total } = await contractTotal(tenantId, projectId)
-  const afterTotal = next.total === undefined ? total : next.total
-  const afterInputs = next.rows ? next.rows(rows) : rows.map(toScheduleInput)
-  return diffInvoicedAmounts(rows, total, afterInputs, afterTotal)
+  return (await planInvoicedChanges(tenantId, projectId, next)).changes
 }
 
 /* ── 確認（ack）與紀錄 ─────────────────────────────────────────────── */
@@ -121,15 +147,44 @@ export async function invoicedAmountChanges(
 export const INVOICED_AMOUNT_CHANGE_MESSAGE =
   "這次修改會讓已開發票的期別金額變動（例如分母變了或它在吸收尾差）；確定要改請確認並填理由，或先調整讓該期金額不變／撤銷該期開票。"
 
-export type InvoicedAck = { ack: false } | { ack: true; reason: string } | { error: "invoiced_change_reason_required" }
+export type AcknowledgedChange = { billingId: string; after: number | null }
 
-/** 請求 body 的 acknowledgeInvoicedChange（true）＋ invoicedChangeReason（≥1 字）。帶了 ack 卻沒理由 → 錯誤。 */
+export type InvoicedAck =
+  | { ack: false }
+  | { ack: true; reason: string; acknowledged: AcknowledgedChange[] }
+  | { error: "invoiced_change_reason_required" }
+
+/**
+ * 請求 body：acknowledgeInvoicedChange（true）＋ invoicedChangeReason（≥1 字）＋ acknowledgedChanges
+ * （使用者在確認視窗看到的 [{ billingId, after }]）。帶了 ack 卻沒理由 → 錯誤。
+ */
 export function invoicedAckOf(body: unknown): InvoicedAck {
   const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>
   if (b.acknowledgeInvoicedChange !== true) return { ack: false }
   const reason = typeof b.invoicedChangeReason === "string" ? b.invoicedChangeReason.trim().slice(0, 500) : ""
   if (!reason) return { error: "invoiced_change_reason_required" }
-  return { ack: true, reason }
+  const list = Array.isArray(b.acknowledgedChanges) ? b.acknowledgedChanges.slice(0, 200) : []
+  const acknowledged: AcknowledgedChange[] = []
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue
+    const it = item as Record<string, unknown>
+    if (typeof it.billingId !== "string") continue
+    const after = typeof it.after === "number" && Number.isFinite(it.after) ? it.after : it.after === null ? null : undefined
+    if (after === undefined) continue
+    acknowledged.push({ billingId: it.billingId.toLowerCase(), after })
+  }
+  return { ack: true, reason, acknowledged }
+}
+
+/**
+ * ack 綁定：使用者確認過的變動（期別＋變動後金額）必須跟這次重新試算的完全一致（同一組期別、同樣的後值）。
+ * 不一致（期間有人改了合約／期程，或確認的是別的畫面）→ 視同沒確認，回 409 讓使用者重新確認。
+ */
+export function ackCovers(ack: InvoicedAck, changes: readonly InvoicedAmountChange[]): ack is { ack: true; reason: string; acknowledged: AcknowledgedChange[] } {
+  if (!("ack" in ack) || !ack.ack) return false
+  if (ack.acknowledged.length !== changes.length) return false
+  const byId = new Map(ack.acknowledged.map((a) => [a.billingId, a.after]))
+  return changes.every((c) => byId.has(c.billingId.toLowerCase()) && sameAmount(byId.get(c.billingId.toLowerCase()) ?? null, c.after))
 }
 
 export function invoicedChangeConflictBody(changes: readonly InvoicedAmountChange[]) {
@@ -145,10 +200,31 @@ export function invoicedChangeConflictBody(changes: readonly InvoicedAmountChang
 }
 
 function fmt(v: number | null): string {
-  return v === null ? "—" : v.toLocaleString("en-US")
+  return v === null ? "—" : Math.round(v).toLocaleString("en-US")
 }
 
-/** 確認放行後：該期備註追加「已開票期別金額由 X 變 Y：理由」，並寫稽核（best-effort，不擋主流程）。 */
+async function appendBillingNote(tenantId: string, billingId: string, line: string): Promise<void> {
+  const { data: current, error: readError } = await supabaseAdmin
+    .from("project_billings")
+    .select("note")
+    .eq("tenant_id", tenantId)
+    .eq("id", billingId)
+    .maybeSingle()
+  if (readError) {
+    logger.error({ billingId, err: readError.message }, "invoiced-guard: read note failed")
+    return
+  }
+  const note = [current?.note as string | null | undefined, line].filter((s) => !!s && String(s).trim()).join("\n")
+  const { error } = await supabaseAdmin
+    .from("project_billings")
+    .update({ note })
+    .eq("tenant_id", tenantId)
+    .eq("id", billingId)
+    .is("deleted_at", null)
+  if (error) logger.error({ billingId, err: error.message }, "invoiced-guard: write note failed")
+}
+
+/** 確認放行後：該期備註追加「已開票期別金額由 X 變 Y：理由」，並寫稽核。 */
 export async function recordInvoicedChanges(
   tenantId: string,
   changes: readonly InvoicedAmountChange[],
@@ -157,15 +233,7 @@ export async function recordInvoicedChanges(
   context: string,
 ): Promise<void> {
   for (const c of changes) {
-    const line = `已開票期別金額由 ${fmt(c.before)} 變 ${fmt(c.after)}：${reason}`
-    const { data: current } = await supabaseAdmin
-      .from("project_billings")
-      .select("note")
-      .eq("tenant_id", tenantId)
-      .eq("id", c.billingId)
-      .maybeSingle()
-    const note = [current?.note as string | null | undefined, line].filter((s) => !!s && String(s).trim()).join("\n")
-    await supabaseAdmin.from("project_billings").update({ note }).eq("tenant_id", tenantId).eq("id", c.billingId).is("deleted_at", null)
+    await appendBillingNote(tenantId, c.billingId, `已開票期別金額由 ${fmt(c.before)} 變 ${fmt(c.after)}：${reason}`)
     await writeAuditLog({
       tenantId,
       tableName: "project_billings",
@@ -176,5 +244,55 @@ export async function recordInvoicedChanges(
       actorEmpId,
       context,
     })
+  }
+}
+
+/**
+ * 寫入＋重算之後的競態檢查（2026-11-18 驗收）：重新讀期程，凡是「現在已開票、未請款」的期別，
+ * 有效金額跟寫入前讀到的不同、又不在這次確認放行的清單（同樣的後值）裡 → 代表預測之後有人開了票或改了期程。
+ * 已寫入無法回滾：該期備註寫入實際前後金額（標明存檔期間被其他操作變動）、寫稽核，回傳違規清單讓路由回 409 conflict_retry。
+ */
+export async function verifyInvoicedAfterWrite(
+  tenantId: string,
+  projectId: string,
+  plan: InvoicedPlan,
+  allowed: readonly InvoicedAmountChange[],
+  actorEmpId: string | null,
+  context: string,
+): Promise<InvoicedAmountChange[]> {
+  const now = await loadBillings(tenantId, projectId)
+  const beforeById = new Map(plan.rows.map((r) => [r.id, storedEffectiveAmount(r)]))
+  const allowedById = new Map(allowed.map((c) => [c.billingId, c.after]))
+  const violations: InvoicedAmountChange[] = []
+  for (const r of now) {
+    if (!isInvoicedBilling(r) || r.billed_on !== null || !beforeById.has(r.id)) continue
+    const before = beforeById.get(r.id) ?? null
+    const actual = storedEffectiveAmount(r)
+    if (sameAmount(before, actual)) continue
+    if (allowedById.has(r.id) && sameAmount(allowedById.get(r.id) ?? null, actual)) continue
+    violations.push({ billingId: r.id, installmentNo: r.installment_no, before, after: actual })
+  }
+  for (const v of violations) {
+    await appendBillingNote(tenantId, v.billingId, `已開票期別金額由 ${fmt(v.before)} 變 ${fmt(v.after)}（存檔期間期程被其他操作變動，未經確認；請核對發票）`)
+    await writeAuditLog({
+      tenantId,
+      tableName: "project_billings",
+      recordId: v.billingId,
+      action: "UPDATE",
+      oldRow: { effective_amount: v.before },
+      newRow: { effective_amount: v.after, invoiced_amount_unconfirmed_change: true },
+      actorEmpId,
+      context: `${context}（競態：已開票期別金額未經確認變動）`,
+    })
+  }
+  return violations
+}
+
+export function invoicedRaceBody(violations: readonly InvoicedAmountChange[]) {
+  return {
+    error: "conflict_retry" as const,
+    committed: true,
+    changes: violations,
+    message: "已存檔，但存檔期間有其他人開票或修改期程，已開發票的期別金額因此變動（已記在該期備註與稽核）；請重新整理核對發票。",
   }
 }
