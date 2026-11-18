@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
-import { ApplicationSheet } from "../ApplicationSheet"
+import { ApplicationSheet, NEW_CLIENT_LOCKED_NOTE, mergeCreatedClients } from "../ApplicationSheet"
 import { applicationSheetDraftOf, type ApplicationSheetDraft } from "@/lib/project-application-sheet"
 import type { Contract } from "@/lib/projects-api"
 import type { ApplicationData, BillingExt, Client, ProjectDetail, ProjectMoney, Subcontract } from "@/lib/projects-ext-api"
@@ -176,6 +176,47 @@ describe("申請單表格：可直接編輯", () => {
     expect(printed).not.toContain("＋ 新增一列發包")
     expect(html).toContain("80,000")
     expect(html).toContain("80%")
+  })
+})
+
+/** 「客戶名稱」那一格：從它的 testid 到下一個 sheet-* 格子（格內有巢狀 div，不能用 cell()）。 */
+function clientNameCell(html: string): string {
+  const i = html.indexOf('data-testid="sheet-clientName"')
+  expect(i).toBeGreaterThan(-1)
+  const rest = html.slice(i + 10)
+  const next = rest.search(/data-testid="sheet-(?!new-client)/)
+  return next === -1 ? rest : rest.slice(0, next)
+}
+
+describe("既有申請單：客戶名稱旁的「＋ 新增客戶」（2026-11-18 業主：已建立的申請單沒辦法新增客戶）", () => {
+  it("可改名冊（HR／會計）：客戶搜尋格旁有「＋ 新增客戶」按鈕（同新建專案申請單）", () => {
+    const html = clientNameCell(render())
+    expect(html).toContain("輸入客戶名稱搜尋")
+    expect(html).toContain('data-testid="sheet-new-client-toggle"')
+    expect(html).toContain("＋ 新增客戶")
+    expect(html).not.toMatch(/data-testid="sheet-new-client-toggle"[^>]*\sdisabled=""/)
+    expect(html).not.toContain(NEW_CLIENT_LOCKED_NOTE)
+  })
+
+  it("沒有客戶名冊寫入權：按鈕停用並說明原因（不是按了沒反應）", () => {
+    const html = clientNameCell(render({ canEditClients: false }))
+    expect(html).toContain('data-testid="sheet-new-client-toggle"')
+    expect(html).toMatch(/data-testid="sheet-new-client-toggle"[^>]*\sdisabled=""/)
+    expect(html).toContain('data-testid="sheet-new-client-locked"')
+    expect(html).toContain("只有 HR／會計")
+  })
+
+  it("唯讀／列印：沒有新增按鈕", () => {
+    expect(render({ readOnly: true })).not.toContain("sheet-new-client-toggle")
+    expect(render({ mode: "print" })).not.toContain("sheet-new-client-toggle")
+  })
+
+  it("草稿選了剛新增的客戶（名冊還沒重抓回來）：mergeCreatedClients 讓它選得到、名冊有了以名冊為準", () => {
+    const fresh: Client = { ...client, id: "c9", name: "測試新客戶丙", phone: null }
+    expect(mergeCreatedClients([client], []).map((c) => c.id)).toEqual(["c1"])
+    expect(mergeCreatedClients([client], [fresh]).map((c) => c.id)).toEqual(["c1", "c9"])
+    const rosterCopy = { ...fresh, phone: "02-0000-0009" }
+    expect(mergeCreatedClients([client, rosterCopy], [fresh]).find((c) => c.id === "c9")?.phone).toBe("02-0000-0009")
   })
 })
 

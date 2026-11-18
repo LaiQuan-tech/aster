@@ -44,7 +44,8 @@ const REFRESH_INTERVAL_MS = 10_000;
  * 但客戶一定要對回名冊既有的 id——不像廠商／協力技師有 vendorName 自由文字
  * 欄位可以兜底，所以這裡用 `<input list>` + `<datalist>` 做「打字即過濾」：
  * 文字對得上名冊裡的名稱就回傳該筆 id，清空就回傳 null（不會憑空生出一個
- * 不存在的客戶）。就地新增仍走呼叫端既有的「＋ 新增客戶」表單，不在這裡處理。
+ * 不存在的客戶）。就地新增仍走呼叫端的「＋ 新增客戶」表單（QuickNewClientForm），不在這裡處理；
+ * 給了 `onCreateNew` 時，找不到的提示旁會多一顆按鈕把打的名字交給呼叫端開表單。
  *
  * 2026-11-12 修：名冊是頁面載入時抓的一份。管理員在另一個分頁（客戶名冊）新增客戶後回來選，
  * 下拉裡沒有新客戶、打完整名稱也對不到，以前會靜默回傳 null、離開格子就把字清掉——
@@ -62,6 +63,7 @@ export function ClientCombo({
   clientId,
   onChange,
   onRefresh,
+  onCreateNew,
   placeholder = "輸入客戶名稱搜尋",
 }: {
   clients: Client[];
@@ -69,6 +71,11 @@ export function ClientCombo({
   onChange: (clientId: string | null) => void;
   /** 重新抓客戶名冊（例如別的分頁剛新增了客戶）。聚焦時呼叫，10 秒內不重複。 */
   onRefresh?: () => void | Promise<void>;
+  /**
+   * 打了名冊沒有的名字時，提示旁多一顆「＋ 新增客戶「X」」（2026-11-18）：呼叫端開就地新增表單並預填這個名稱。
+   * 省略＝只顯示找不到的提示。
+   */
+  onCreateNew?: (typedName: string) => void;
   placeholder?: string;
 }) {
   const listId = useId();
@@ -144,6 +151,11 @@ export function ClientCombo({
       {notFound && (
         <p role="alert" className="text-xs text-red-600">
           名冊裡找不到「{notFound}」，客戶{selected ? `仍是「${selected.name}」` : "未選"}。請從下拉清單點選；剛在別的分頁新增的客戶，點一下這格會重新載入名冊。
+          {onCreateNew && (
+            <button type="button" className="ml-1 font-medium underline" style={{ color: "var(--brand)" }} onClick={() => onCreateNew(notFound)}>
+              ＋ 新增客戶「{notFound}」
+            </button>
+          )}
         </p>
       )}
       <datalist id={listId}>

@@ -4,6 +4,7 @@ import { BOUND_SUBCONTRACT_LOCKED_NOTE, useCanManageBoundSubcontracts } from "@/
 import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Button, PrimaryButton } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
+import { QuickNewClientForm } from "@/components/QuickNewClientForm";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 import { MoneyInput } from "@/components/MoneyInput";
 import { AddDisciplineOptionButton, DesignDisciplineDatalist } from "@/components/DesignDisciplineInput";
@@ -15,6 +16,7 @@ import {
   INVOICE_TYPE_LABELS,
   PAYMENT_METHOD_LABELS,
   clientSaveWarningText,
+  createClient,
   disciplineLabel,
   getBillingSchedule,
   getProjectSubcontracts,
@@ -293,6 +295,16 @@ interface ApplicationSheetProps {
   shareEmployees?: ReadonlyArray<{ id: string; name?: string | null; empNo?: string | null; emp_no?: string | null }>;
 }
 
+/** 沒有客戶名冊寫入權時「＋ 新增客戶」的說明（POST /clients 只放行 HR／會計／平台管理員）。 */
+export const NEW_CLIENT_LOCKED_NOTE = "新增客戶會寫進客戶名冊，只有 HR／會計（或平台管理員）能新增；請他們先在「客戶名冊」建檔，再回來搜尋選用。";
+
+/** 名冊 ∪ 本單剛建的客戶（名冊已有同 id 的以名冊為準）。 */
+export function mergeCreatedClients(roster: readonly Client[], created: readonly Client[]): Client[] {
+  if (created.length === 0) return roster as Client[];
+  const ids = new Set(roster.map((c) => c.id));
+  return [...roster, ...created.filter((c) => !ids.has(c.id))];
+}
+
 /**
  * 專案明細頁上半部：版面照公司 Word「專案申請單」（抬頭、專案明細表、付款階段、發包單位），
  * 整張表像 Excel 一樣在格子裡直接改（格內有淡框輸入框＝可填），按「儲存申請單」一次存：
@@ -335,7 +347,13 @@ export function ApplicationSheet({
   const draft = controlledDraft ?? localDraft;
   const setDraft = onDraftChange ?? setLocalDraft;
   const [ownClients, setOwnClients] = useState<Client[]>([]);
-  const clients = clientsProp ?? ownClients;
+  /** 這張單上剛「＋ 新增客戶」建的客戶：名冊（page.tsx 持有）重抓回來前先併進來，選得到也顯示得出資料。 */
+  const [createdClients, setCreatedClients] = useState<Client[]>([]);
+  const rosterClients = clientsProp ?? ownClients;
+  const clients = useMemo(() => mergeCreatedClients(rosterClients, createdClients), [rosterClients, createdClients]);
+  /** 就地新增客戶表單：null＝收起；字串＝展開並預填的名稱。 */
+  const [newClientName, setNewClientName] = useState<string | null>(null);
+  const [newClientNotice, setNewClientNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   /** 正在輸入的發包金額格（slot key）：聚焦時顯示純數字方便改，離開後顯示千分位。 */
   const [editingSubAmount, setEditingSubAmount] = useState<string | null>(null);
@@ -362,6 +380,19 @@ export function ApplicationSheet({
   /** 客戶名稱格聚焦時重抓名冊；page.tsx 持有名冊時交給它，否則重抓自己那份。 */
   const refreshClients =
     onRefreshClients ?? (clientsProp ? undefined : async () => setOwnClients((await listClients()).clients));
+
+  /** POST /clients（只放行 HR／會計／平台管理員＝canEditClients）；成功併進名冊並重抓。 */
+  async function createSheetClient(body: Parameters<typeof createClient>[0]): Promise<Client> {
+    try {
+      const res = await createClient(body);
+      setCreatedClients((cs) => [...cs.filter((c) => c.id !== res.client.id), res.client]);
+      setNewClientNotice(clientSaveWarningText(res));
+      void Promise.resolve(refreshClients?.()).catch(() => {});
+      return res.client;
+    } catch (err) {
+      throw new Error(humanizeClientError(err, "新增客戶失敗"));
+    }
+  }
 
   // 客戶資料格：草稿裡選的客戶（還沒存也即時顯示它的名冊資料）。
   const client: Client | null = resolveSheetClient(clients, project, draft.clientId);
@@ -571,7 +602,41 @@ export function ApplicationSheet({
         return editable ? (
           <div className="w-full [&_input]:max-w-none [&_input]:rounded-md [&_input]:px-1.5 [&_input]:py-0.5 [&_input]:text-[13px]">
             {/* 換客戶時清掉客戶欄位的修改（那些是改「原客戶」名冊用的）。 */}
-            <ClientCombo clients={clientChoices} clientId={draft.clientId || null} onRefresh={refreshClients} onChange={(id) => setDraft((d) => ({ ...d, clientId: id ?? "", clientEdits: {} }))} />
+            <div className="flex flex-wrap items-start gap-2">
+              <ClientCombo
+                clients={clientChoices}
+                clientId={draft.clientId || null}
+                onRefresh={refreshClients}
+                onChange={(id) => setDraft((d) => ({ ...d, clientId: id ?? "", clientEdits: {} }))}
+                onCreateNew={canEditClients ? (name) => setNewClientName(name) : undefined}
+              />
+              <button
+                type="button"
+                data-testid="sheet-new-client-toggle"
+                className="rounded-md border border-slate-300 px-2 py-0.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-50 print:hidden"
+                disabled={!canEditClients}
+                title={canEditClients ? undefined : NEW_CLIENT_LOCKED_NOTE}
+                onClick={() => { setNewClientNotice(null); setNewClientName((cur) => (cur === null ? "" : null)); }}
+              >
+                {newClientName !== null ? "取消新增客戶" : "＋ 新增客戶"}
+              </button>
+            </div>
+            {!canEditClients && <p className="mt-0.5 text-xs text-gray-500 print:hidden" data-testid="sheet-new-client-locked">{NEW_CLIENT_LOCKED_NOTE}</p>}
+            {canEditClients && newClientName !== null && (
+              <QuickNewClientForm
+                key={newClientName}
+                className="mt-1 print:hidden [&_input]:!max-w-none"
+                clients={clientChoices}
+                initialName={newClientName}
+                onCreate={createSheetClient}
+                onPicked={(picked) => {
+                  // 換客戶＝清掉改原客戶名冊用的欄位修改；儲存申請單時才寫回專案。
+                  setDraft((d) => ({ ...d, clientId: picked.id, clientEdits: {} }));
+                  setNewClientName(null);
+                }}
+              />
+            )}
+            {newClientNotice && <p className="mt-0.5 text-xs text-amber-700 print:hidden">{newClientNotice}</p>}
           </div>
         ) : (client?.name ?? "—");
       case "clientPhone":

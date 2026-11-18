@@ -5,12 +5,12 @@ import { formatMoney } from "@/lib/money";
 import { MoneyInput } from "@/components/MoneyInput";
 import { AddDisciplineOptionButton, DesignDisciplineDatalist } from "@/components/DesignDisciplineInput";
 import { ClientCombo } from "@/components/ClientCombo";
+import { QuickNewClientForm } from "@/components/QuickNewClientForm";
 import { VendorCombo } from "@/components/VendorCombo";
 import { Button, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import type { Department, Employee } from "@/lib/admin-api";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions, isCompanyActive } from "@/lib/company-options";
-import { optionChoices, useOptionList } from "@/lib/option-lists-api";
 import {
   INVOICE_TYPE_LABELS,
   PAYMENT_METHOD_LABELS,
@@ -18,7 +18,6 @@ import {
   PROJECT_KIND_ORDER,
   disciplineLabel,
   type Client,
-  type ClientCategory,
   type ClientInput,
   type Company,
   type CreateProjectExtBody,
@@ -114,14 +113,8 @@ export function ProjectApplicationForm({
   }, [roleShareDefaults]);
   const showRoleShare = canSeeBonus ?? canBonus;
   const [formErrors, setFormErrors] = useState<string[]>([]);
-  const [showNewClient, setShowNewClient] = useState(false);
-  const [newClientName, setNewClientName] = useState("");
-  const [newClientTaxId, setNewClientTaxId] = useState("");
-  const [newClientPhone, setNewClientPhone] = useState("");
-  const [newClientCategory, setNewClientCategory] = useState<ClientCategory | "">("");
-  const [creatingClient, setCreatingClient] = useState(false);
-  // 快速新增客戶的分類下拉：吃「選項清單 → 客戶分類」，新客戶只能選啟用的項目。
-  const clientCategories = useOptionList("client_category");
+  /** 「＋ 新增客戶」表單：null＝收起；字串＝展開並預填的名稱（共用 QuickNewClientForm，既有專案申請單也用同一個）。 */
+  const [newClientName, setNewClientName] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft((current) => ({
@@ -152,29 +145,6 @@ export function ProjectApplicationForm({
     setFormErrors(errors);
     if (errors.length > 0) return;
     await onSubmit(toAuthorizedCreateProjectBody({ ...draft, companyId }, { canFinance, canBonus }));
-  }
-
-  async function submitNewClient() {
-    if (!newClientName.trim()) return;
-    setCreatingClient(true);
-    try {
-      const client = await onCreateClient({
-        name: newClientName.trim(),
-        category: newClientCategory || null,
-        taxId: newClientTaxId.trim() || null,
-        phone: newClientPhone.trim() || null,
-      });
-      patch("clientId", client.id);
-      setShowNewClient(false);
-      setNewClientName("");
-      setNewClientTaxId("");
-      setNewClientPhone("");
-      setNewClientCategory("");
-    } catch {
-      // 呼叫端會把 API 錯誤顯示在表單底部；這裡只確保 void click handler 不產生未處理 rejection。
-    } finally {
-      setCreatingClient(false);
-    }
   }
 
   return (
@@ -257,18 +227,22 @@ export function ProjectApplicationForm({
           <div className="sm:col-span-2">
             <label className={labelCls}>客戶名稱</label>
             <div className="flex flex-wrap items-start gap-2">
-              <ClientCombo clients={clients} clientId={draft.clientId || null} onRefresh={onRefreshClients} onChange={(id) => patch("clientId", id ?? "")} />
-              <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-sm" onClick={() => setShowNewClient((current) => !current)}>{showNewClient ? "取消新增客戶" : "＋ 新增客戶"}</button>
+              <ClientCombo clients={clients} clientId={draft.clientId || null} onRefresh={onRefreshClients} onChange={(id) => patch("clientId", id ?? "")} onCreateNew={(name) => setNewClientName(name)} />
+              <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-sm" onClick={() => setNewClientName((current) => (current === null ? "" : null))}>{newClientName !== null ? "取消新增客戶" : "＋ 新增客戶"}</button>
             </div>
           </div>
-          {showNewClient ? (
-            <div className="grid grid-cols-1 gap-2 rounded-lg border border-dashed border-slate-300 p-3 sm:col-span-2 sm:grid-cols-5">
-              <input className={inputCls} value={newClientName} onChange={(event) => setNewClientName(event.target.value)} placeholder="客戶名稱 *" />
-              <select className={inputCls} value={newClientCategory} onChange={(event) => setNewClientCategory(event.target.value as ClientCategory | "")}><option value="">分類</option>{optionChoices(clientCategories.items, newClientCategory).map((choice) => <option key={choice.code} value={choice.code}>{choice.label}</option>)}</select>
-              <input className={inputCls} value={newClientTaxId} onChange={(event) => setNewClientTaxId(event.target.value)} placeholder="統編" />
-              <input className={inputCls} value={newClientPhone} onChange={(event) => setNewClientPhone(event.target.value)} placeholder="電話" />
-              <PrimaryButton type="button" onClick={() => void submitNewClient()} disabled={creatingClient || !newClientName.trim()}>{creatingClient ? "建立中…" : "建立並選用"}</PrimaryButton>
-            </div>
+          {newClientName !== null ? (
+            <QuickNewClientForm
+              key={newClientName}
+              className="sm:col-span-2"
+              clients={clients}
+              initialName={newClientName}
+              onCreate={onCreateClient}
+              onPicked={(client) => {
+                patch("clientId", client.id);
+                setNewClientName(null);
+              }}
+            />
           ) : null}
           <div><label className={labelCls}>發票地址</label><div className={`${inputCls} min-h-10 bg-slate-50 text-slate-600`}>{selectedClient?.invoiceAddress || "—"}</div></div>
           <div><label className={labelCls}>電話／傳真</label><div className={`${inputCls} min-h-10 bg-slate-50 text-slate-600`}>{[selectedClient?.phone, selectedClient?.fax].filter(Boolean).join(" ／ ") || "—"}</div></div>
