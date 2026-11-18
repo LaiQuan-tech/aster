@@ -82,6 +82,7 @@ export function DeleteProjectDialog(props: DeleteProjectDialogProps) {
         <p className="mt-2 text-sm text-gray-600">
           即將刪除 <span className="font-medium text-gray-900">{project.code ?? "（無序號）"}</span> {project.name}
           。沒有收款、工時、獎金等資料的空期程、未簽約合約與副委託列會一併刪除。
+          <span data-testid="delete-project-share-audit-note">分潤比例修改紀錄會保留在稽核紀錄。</span>
         </p>
         <div className="mt-4">
           <label className={labelCls} htmlFor="delete-project-confirm">
@@ -205,7 +206,7 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
           <h2 className="text-sm font-semibold text-red-700">危險操作：刪除專案</h2>
           <p className="mt-1 text-xs text-gray-500">
             只用於打錯（key 錯）、還沒有任何資料的空殼專案。刪除後列表與報表都不再出現，序號可重新使用。
-            已有請款、入帳、工時、獎金等資料的專案不能刪，請改用「封存」。
+            已有請款、入帳、工時、獎金等資料的專案不能刪，請改用「封存」；只改過分潤比例不影響刪除。
           </p>
         </div>
         <Button variant="danger" size="sm" onClick={() => setOpen(true)} data-testid="delete-project-button">

@@ -104,6 +104,13 @@ describe("送出流程（submitProjectDelete → DeleteProjectDialog）", () => 
     expect(html).not.toContain('data-testid="delete-project-submit"')
   })
 
+  it("2026-11-18：確認框說明分潤比例修改紀錄會保留在稽核紀錄", () => {
+    const html = renderToStaticMarkup(<DeleteProjectDialog {...base} />)
+    expect(html).toContain('data-testid="delete-project-share-audit-note"')
+    expect(html).toContain("分潤比例修改紀錄會保留在稽核紀錄")
+    expect(html).not.toContain("分潤異動紀錄")
+  })
+
   it("成功、沒有原案說明 → done（直接回列表）", async () => {
     expect(await submitProjectDelete(async () => ({ id: "p1", code: null, deleted: true, restoredMessage: null }))).toEqual({ kind: "done" })
   })

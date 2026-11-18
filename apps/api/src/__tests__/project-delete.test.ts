@@ -183,7 +183,6 @@ describe("DELETE /projects/:id — 擋刪條件（有實質資料 → 409）", (
     ["每期款獎金分潤", () => fake.db.project_billing_shares.push({ id: "s1", tenant_id: TENANT_ID, project_id: P1, billing_id: "b1" }), "billing_shares"],
     ["每期款發獎金日", () => fake.db.project_billing_bonus_dates.push({ billing_id: "b1", tenant_id: TENANT_ID, project_id: P1 }), "billing_bonus_dates"],
     ["獎金計算批次", () => fake.db.bonus_run_items.push({ id: "r1", tenant_id: TENANT_ID, project_id: P1 }), "bonus_run_items"],
-    ["分潤異動紀錄", () => fake.db.project_share_adjustments.push({ id: "a1", tenant_id: TENANT_ID, project_id: P1 }), "share_adjustments"],
     ["工時", () => fake.db.attendance_sheet_days.push({ id: "d1", tenant_id: TENANT_ID, project_id: P1 }), "attendance_days"],
     ["請款／放款（直接掛專案）", () => fake.db.disbursement_allocations.push({ id: "x1", tenant_id: TENANT_ID, project_id: P1, subcontract_id: null }), "disbursements"],
     ["請款／放款（只掛副委託）", () => {
@@ -240,6 +239,33 @@ describe("DELETE /projects/:id — 擋刪條件（有實質資料 → 409）", (
     const res = await del(T.boss, P2, "AT-115-017")
     expect(res.status, JSON.stringify(res.body)).toBe(409)
     expect(res.body.blockers).toContainEqual({ key: "disbursements", label: "請款／放款單", count: 1 })
+  })
+
+  it("2026-11-18：只有分潤比例異動紀錄 → 可刪（200），異動紀錄原樣保留、不出現在擋刪原因", async () => {
+    fake.db.project_share_adjustments.push(
+      { id: "a1", tenant_id: TENANT_ID, project_id: P1, employee_id: E.member, field: "pct", old_value: "10", new_value: "20" },
+      { id: "a2", tenant_id: TENANT_ID, project_id: P1, employee_id: null, field: "pool", old_value: null, new_value: "5" },
+    )
+    const before = JSON.stringify(fake.db.project_share_adjustments)
+    const res = await del(T.boss, P1, "AT-115-018")
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(proj(P1)!.deleted_at).not.toBeNull()
+    expect(JSON.stringify(fake.db.project_share_adjustments)).toBe(before)
+  })
+
+  it.each<[string, () => void, string]>([
+    ["＋每期款獎金分潤", () => fake.db.project_billing_shares.push({ id: "s1", tenant_id: TENANT_ID, project_id: P1, billing_id: "b1" }), "billing_shares"],
+    ["＋每期款發獎金日", () => fake.db.project_billing_bonus_dates.push({ billing_id: "b1", tenant_id: TENANT_ID, project_id: P1 }), "billing_bonus_dates"],
+    ["＋獎金計算批次", () => fake.db.bonus_run_items.push({ id: "r1", tenant_id: TENANT_ID, project_id: P1 }), "bonus_run_items"],
+  ])("2026-11-18：分潤異動紀錄%s → 仍 409（擋刪原因不含分潤異動）", async (_label, seed, key) => {
+    fake.db.project_share_adjustments.push({ id: "a1", tenant_id: TENANT_ID, project_id: P1, field: "pct" })
+    seed()
+    const res = await del(T.boss, P1, "AT-115-018")
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    const keys = res.body.blockers.map((b: { key: string }) => b.key)
+    expect(keys).toEqual([key])
+    expect(JSON.stringify(res.body)).not.toContain("分潤異動")
+    expect(proj(P1)!.deleted_at).toBeNull()
   })
 
   it("已軟刪除的期程／合約／副委託不算資料；已刪除的子案也不擋", async () => {

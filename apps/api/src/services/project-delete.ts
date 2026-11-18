@@ -15,7 +15,6 @@ import { supabaseAdmin } from "../lib/supabase.js"
  *     • project_billing_shares    每期款獎金分潤
  *     • project_billing_bonus_dates 每期款發獎金日
  *     • bonus_run_items           獎金計算批次（含草稿）
- *     • project_share_adjustments 分潤異動紀錄
  *     • attendance_sheet_days     出勤表工作內容掛了這個專案（工時）
  *     • disbursement_allocations  請款／放款分攤（直接掛專案，或掛在本案副委託上）；已作廢（void）放款單的分攤不算
  *                                 （作廢單與其分攤都不能刪，算進去的話專案永遠刪不掉；草稿仍算，2026-11-12 決定）
@@ -33,6 +32,9 @@ import { supabaseAdmin } from "../lib/supabase.js"
  *
  *   不擋、原樣保留（沒有 deleted_at 欄位；專案已刪除後只經 /projects/:id/* 讀，一律 404）：
  *     • project_members           成員名單（「我的專案」另外過濾掉已刪除的案）
+ *     • project_share_adjustments 分潤比例異動紀錄（2026-11-18 業主決定不再擋刪，migration 0118 ＝ sql/0108；
+ *                                 留存稽核、不刪不改。實際算過／發過的獎金分潤由上面 project_billing_shares／
+ *                                 project_billing_bonus_dates／bonus_run_items 擋下）
  *     • project_application_versions 申請單版本快照（本案自己的歷史，不是交易）
  *
  * ⚠️ 2026-11-12 修正：真正的檢查＋寫入在 DB 函式 soft_delete_project（migration 0096 ＝ sql/0086）同一交易內完成——
@@ -49,7 +51,6 @@ export type DeleteBlockerKey =
   | "billing_shares"
   | "billing_bonus_dates"
   | "bonus_run_items"
-  | "share_adjustments"
   | "attendance_days"
   | "disbursements"
   | "documents"
@@ -64,7 +65,6 @@ export const DELETE_BLOCKER_LABELS: Record<DeleteBlockerKey, string> = {
   billing_shares: "每期款獎金分潤",
   billing_bonus_dates: "每期款發獎金日",
   bonus_run_items: "獎金計算批次",
-  share_adjustments: "分潤異動紀錄",
   attendance_days: "出勤表工時（工作內容選了此專案）",
   disbursements: "請款／放款單",
   documents: "專案文件或合約掃描檔",
@@ -140,7 +140,7 @@ export type DeletePlan = {
 /** 盤點擋刪條件與要一併軟刪除的列（唯讀）。 */
 export async function planProjectDelete(tenantId: string, projectId: string): Promise<DeletePlan> {
   const ids = [projectId]
-  const [billings, shares, bonusDates, runItems, adjustments, sheetDays, allocations, documents, contracts, subs, children] =
+  const [billings, shares, bonusDates, runItems, sheetDays, allocations, documents, contracts, subs, children] =
     await Promise.all([
       rowsOf<BillingLite>(
         "project_billings",
@@ -150,7 +150,6 @@ export async function planProjectDelete(tenantId: string, projectId: string): Pr
       rowsOf<{ id: string }>("project_billing_shares", "id", tenantId, "project_id", ids),
       rowsOf<{ billing_id: string }>("project_billing_bonus_dates", "billing_id", tenantId, "project_id", ids),
       rowsOf<{ id: string }>("bonus_run_items", "id", tenantId, "project_id", ids),
-      rowsOf<{ id: string }>("project_share_adjustments", "id", tenantId, "project_id", ids),
       rowsOf<{ id: string }>("attendance_sheet_days", "id", tenantId, "project_id", ids),
       rowsOf<AllocationLite>("disbursement_allocations", "id, disbursement_id", tenantId, "project_id", ids),
       rowsOf<{ id: string }>("project_documents", "id", tenantId, "project_id", ids),
@@ -191,7 +190,6 @@ export async function planProjectDelete(tenantId: string, projectId: string): Pr
     ["billing_shares", shares.length],
     ["billing_bonus_dates", bonusDates.length],
     ["bonus_run_items", runItems.length],
-    ["share_adjustments", adjustments.length],
     ["attendance_days", sheetDays.length],
     ["disbursements", allocationIds.size],
     ["documents", documents.length],

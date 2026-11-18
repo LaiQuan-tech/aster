@@ -57,10 +57,12 @@ const BASE_FILES = [
   "docs/套用-2026-11-12-刪除專案-修正3.sql",
   "docs/套用-2026-11-12-刪除專案-修正4.sql",
   "docs/套用-2026-11-12-刪除專案-修正5.sql",
+  "docs/套用-2026-11-18-刪除專案-分潤異動不擋.sql",
 ]
 
 const T = "f0000000-0000-4000-8000-0000000000f1"
 const COMPANY = "f0000000-0000-4000-8000-0000000000f2"
+const EMP = "f0000000-0000-4000-8000-0000000000f3"
 const pid = (n: number) => `f0000000-0000-4000-8000-0000000a${String(n).padStart(4, "0")}`
 const sid = (n: number) => `f0000000-0000-4000-8000-0000000b${String(n).padStart(4, "0")}`
 
@@ -90,9 +92,20 @@ const SCENARIOS: Array<{ name: string; sql: string }> = [
     UPDATE project_subcontracts SET deleted_at = now() WHERE id = $S;` },
   { name: "事務所已代扣", sql: `INSERT INTO project_subcontracts (id, tenant_id, project_id, kind, withholding_date) VALUES ($S, '${T}', $P, 'firm', '2026-11-03');` },
   { name: "非事務所有代扣日（不算代扣）", sql: `INSERT INTO project_subcontracts (id, tenant_id, project_id, kind, withholding_date) VALUES ($S, '${T}', $P, 'subcontract', '2026-11-03');` },
-  { name: "專案文件＋分潤異動", sql: `
+  { name: "專案文件＋分潤異動（只算文件）", sql: `
     INSERT INTO project_documents (tenant_id, project_id, file_name, storage_path) VALUES ('${T}', $P, 'a.pdf', 'x/a.pdf');
     INSERT INTO project_share_adjustments (tenant_id, project_id, field) VALUES ('${T}', $P, 'pool');` },
+  { name: "只有分潤比例異動紀錄（2026-11-18 起不擋）", sql: `
+    INSERT INTO project_share_adjustments (tenant_id, project_id, field, old_value, new_value) VALUES ('${T}', $P, 'pct', 10, 20);
+    INSERT INTO project_share_adjustments (tenant_id, project_id, field, new_value) VALUES ('${T}', $P, 'pool', 5);` },
+  { name: "分潤異動＋每期款發獎金日（仍擋，只算發獎金日）", sql: `
+    INSERT INTO project_share_adjustments (tenant_id, project_id, field) VALUES ('${T}', $P, 'pct');
+    INSERT INTO project_billings (id, tenant_id, project_id, installment_no) VALUES ($S, '${T}', $P, 1);
+    INSERT INTO project_billing_bonus_dates (billing_id, tenant_id, project_id, bonus_paid_on) VALUES ($S, '${T}', $P, '2026-11-05');` },
+  { name: "分潤異動＋獎金計算批次（仍擋，只算批次）", sql: `
+    INSERT INTO project_share_adjustments (tenant_id, project_id, field) VALUES ('${T}', $P, 'pct');
+    INSERT INTO bonus_runs (id, tenant_id, label, as_of) VALUES ($S, '${T}', '一致性測試批次', '2026-10-31');
+    INSERT INTO bonus_run_items (tenant_id, run_id, project_id, employee_id, share_mode) VALUES ('${T}', $S, $P, '${EMP}', 'pct');` },
   { name: "未刪除的子案＋已刪除的子案", sql: `
     INSERT INTO projects (tenant_id, name, code, kind, parent_project_id) VALUES ('${T}', '子案', 'ZZ-PAR-' || substr($P::text, 33), 'change', $P);
     INSERT INTO projects (tenant_id, name, code, kind, parent_project_id, deleted_at) VALUES ('${T}', '刪掉的子案', 'ZZ-PAR-D-' || substr($P::text, 33), 'change', $P, now());` },
@@ -152,6 +165,7 @@ describe.skipIf(!pglite)("刪除專案：TS 預檢 vs DB 函式（pglite）", ()
     for (const f of BASE_FILES) await db.exec(readFileSync(join(REPO, f), "utf8"))
     await db.exec(`INSERT INTO public.tenants (id, name, status) VALUES ('${T}', '一致性測試租戶', 'active')`)
     await db.exec(`INSERT INTO public.companies (id, tenant_id, name) VALUES ('${COMPANY}', '${T}', '一致性測試公司')`)
+    await db.exec(`INSERT INTO public.employees (id, tenant_id, name) VALUES ('${EMP}', '${T}', '一致性測試員工')`)
     for (let i = 0; i < SCENARIOS.length; i++) {
       await db.exec(`INSERT INTO public.projects (id, tenant_id, name, code) VALUES ('${pid(i)}', '${T}', '情境 ${i}', 'ZZ-PAR-${i}')`)
       await db.exec(
@@ -194,10 +208,33 @@ describe.skipIf(!pglite)("刪除專案：TS 預檢 vs DB 函式（pglite）", ()
     expect(ts, JSON.stringify({ ts, sql })).toEqual(sql)
   })
 
+  it("只有分潤比例異動紀錄：DB 函式真的刪除，異動紀錄原樣保留；刪除後再寫分潤異動 → PD409", async () => {
+    const i = SCENARIOS.findIndex((s) => s.name.startsWith("只有分潤比例異動紀錄"))
+    const snap = `SELECT id, field, old_value::text, new_value::text, reason FROM public.project_share_adjustments WHERE project_id = $1 ORDER BY id`
+    const before = (await db!.query(snap, [pid(i)])).rows
+    expect(before).toHaveLength(2)
+    await db!.exec("BEGIN")
+    try {
+      const { rows } = await db!.query<{ r: { status: string } }>(
+        "SELECT public.soft_delete_project($1::uuid, $2::uuid, NULL, '一致性測試') AS r", [T, pid(i)])
+      expect(rows[0]!.r.status).toBe("deleted")
+      const { rows: p } = await db!.query<{ deleted_at: unknown }>(`SELECT deleted_at FROM public.projects WHERE id = $1`, [pid(i)])
+      expect(p[0]!.deleted_at).not.toBeNull()
+      expect((await db!.query(snap, [pid(i)])).rows).toEqual(before)
+      await db!.exec("SAVEPOINT sp")
+      await expect(
+        db!.exec(`INSERT INTO public.project_share_adjustments (tenant_id, project_id, field) VALUES ('${T}', '${pid(i)}', 'pct')`),
+      ).rejects.toThrow(/project_deleted/)
+      await db!.exec("ROLLBACK TO SAVEPOINT sp")
+    } finally {
+      await db!.exec("ROLLBACK")
+    }
+  })
+
   it("情境確實有覆蓋到擋刪與放行兩種結果（不是全部空轉）", async () => {
     const results = await Promise.all(SCENARIOS.map((_, i) => planProjectDelete(T, pid(i))))
     const keys = new Set(results.flatMap((p) => p.blockers.map((b) => b.key)))
-    for (const k of ["billing_activity", "disbursements", "signed_contracts", "invoiced_subcontracts", "paid_subcontract_payments", "withheld_subcontracts", "documents", "share_adjustments", "child_projects"]) {
+    for (const k of ["billing_activity", "disbursements", "signed_contracts", "invoiced_subcontracts", "paid_subcontract_payments", "withheld_subcontracts", "documents", "billing_bonus_dates", "bonus_run_items", "child_projects"]) {
       expect(keys.has(k as never), k).toBe(true)
     }
     expect(results.some((p) => p.blockers.length === 0)).toBe(true)
