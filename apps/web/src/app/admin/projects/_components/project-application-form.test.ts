@@ -437,3 +437,41 @@ describe("2026-11-18 新建專案：專案編號與付款階段期數不限", ()
     expect(one.billings).toHaveLength(1);
   });
 });
+
+describe("2026-11-18 驗收修正：新建表單", () => {
+  it("技師公會代墊固定一列：移除無效", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    expect(removeProjectApplicationBilling(draft, 8)).toBe(draft);
+  });
+
+  it("完全沒填的新增列：送出時略過、其餘重新編號（公會代墊仍最後）；有填的保留", () => {
+    let draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "測試案";
+    draft = addProjectApplicationBilling(addProjectApplicationBilling(draft));
+    draft.billings[8] = { ...draft.billings[8], milestone: "竣工圖" }; // 第 9 列有填、第 8 列空白
+    const body = toCreateProjectBody(draft);
+    expect(body.billings?.map((row) => [row.installmentNo, row.kind, row.milestone])).toEqual([
+      [1, "installment", "訂金款"],
+      [2, "installment", "初步設計"],
+      [3, "installment", "五管核准"],
+      [4, "installment", "發包後"],
+      [5, "installment", "工程50%"],
+      [6, "installment", "施工驗收"],
+      [7, "installment", "候選綠建築證書"],
+      [8, "installment", "竣工圖"],
+      [9, "guild_advance", "技師公會代墊"],
+    ]);
+    // 預設模板的空白列（候選綠建築證書沒填 %）不是新增列：照送。
+    expect(body.billings?.[6]?.percentage).toBeNull();
+  });
+
+  it("每列有穩定 key，新增／移除後 key 跟著列走", () => {
+    let draft = addProjectApplicationBilling(emptyProjectApplicationDraft("2026-10-01", []));
+    const keys = draft.billings.map((row) => row.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    const addedKey = draft.billings[7].key;
+    draft = removeProjectApplicationBilling(draft, 1);
+    expect(draft.billings[6].key).toBe(addedKey);
+    expect(draft.billings[6].installmentNo).toBe(7);
+  });
+});

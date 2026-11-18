@@ -234,13 +234,15 @@ export type AttachmentRow = {
 export type ProjectLite = {
   id: string
   code: string | null
+  /** 專案編號（自由輸入，≠ code 專案序號；migration 0117）。 */
+  project_no?: string | null
   name: string
   lead_emp_id: string | null
   archived_at: string | null
   reserved_at: string | null
   client_id: string | null
 }
-const PROJECT_LITE_COLS = "id, code, name, lead_emp_id, archived_at, reserved_at, client_id"
+const PROJECT_LITE_COLS = "id, code, name, lead_emp_id, archived_at, reserved_at, client_id, project_no"
 
 /** `is_active`：停用的公司不能被新選成付款公司／收據抬頭（見 resolveHeader）；缺值一律當啟用。 */
 type CompanyLite = { id: string; name: string; bank_name: string | null; bank_account: string | null; is_active?: boolean }
@@ -1186,6 +1188,8 @@ export type PayableRow = {
   subcontractId: string
   projectId: string
   projectCode: string | null
+  /** 專案編號（自由輸入；應付清單關鍵字可搜）。 */
+  projectNo: string | null
   projectName: string
   vendorId: string | null
   vendorName: string | null
@@ -1358,6 +1362,7 @@ export async function buildPayables(
         subcontractId: s.id,
         projectId: s.project_id,
         projectCode: project.code,
+        projectNo: project.project_no ?? null,
         projectName: project.name,
         vendorId: s.vendor_id,
         vendorName: subVendorName(s),

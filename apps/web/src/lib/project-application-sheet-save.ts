@@ -49,6 +49,7 @@ import type {
   Subcontract,
   UpdateProjectExtBody,
 } from "./projects-ext-api";
+import { isBillingInvoiced } from "./billing-invoice";
 import {
   CLIENT_SHEET_FIELDS,
   applicationSheetPatch,
@@ -255,12 +256,14 @@ export function stageBaseValues(row: ApplicationStageRow): StageBase {
 /** 一列哪些格子能在表格裡改（其他狀態要撤銷事件、填理由，留在下方「分期請款期程」卡）。 */
 export function stageLocks(row: ApplicationStageRow) {
   const received = !!row.receivedOn;
+  /** 已開票（號碼或日期任一有值）：發票金額已開出，百分比／金額比照已入帳凍結（後端 409 invoiced_frozen；2026-11-18）。 */
+  const invoiced = isBillingInvoiced(row);
   return {
     milestone: false,
-    /** 已入帳的期別金額凍結（後端 409 received）。 */
-    percentage: received,
-    /** 已請款＝金額凍結在請款金額；已入帳同上。 */
-    amount: received || row.billed,
+    /** 已入帳／已開票的期別金額凍結（後端 409 received／invoiced_frozen）。 */
+    percentage: received || invoiced,
+    /** 已請款＝金額凍結在請款金額；已入帳、已開票同上。 */
+    amount: received || row.billed || invoiced,
     /** 已入帳的要先撤銷入帳（要理由）。 */
     receivedOn: received,
     /** 已開票（號碼或日期任一有值）→ 鎖住，改用格子旁的「修正」（POST /billings/:id/reinvoice）；公會代墊列那格在 Word 上是「審迄還款」。 */
@@ -290,6 +293,29 @@ export interface StagePlan {
   errors: SheetError[];
   /** 草稿裡對不到任何列的修改（那一列已被別處新增／移除）：不送出，提醒使用者。 */
   warnings: string[];
+}
+
+/**
+ * 新增一般期別時，技師公會代墊順移到最後一號（2026-11-18）：申請單、分期請款期程卡、請款單的期別編號一致
+ * （公會代墊固定排在最後）。做法：新增的期別接手公會代墊原本的號碼起依序編號，公會代墊改成最後一號；
+ * 後端整批 PUT 依 payload 順序寫入（既有列先更新、新列後插入），公會代墊先讓出號碼，不會撞號。
+ * 公會代墊已請款／開票／入帳（號碼可能已印在單據上）、或它本來就不在一般期別之後：不移動，新增期別照常接在最大號之後。
+ */
+function renumberGuildAfterCreated(ctx: SheetSaveContext, payload: InstallmentInputExt[], out: StagePlan): void {
+  const created = out.created.filter((c) => payload.some((p) => !p.id && p.installmentNo === c.installmentNo && (p.kind ?? "installment") === "installment"));
+  if (created.length === 0) return;
+  const guild = payload.find((p) => p.id && p.kind === "guild_advance");
+  if (!guild) return;
+  const saved = ctx.billings.find((b) => b.id === guild.id);
+  if (!saved || saved.billedOn || saved.receivedOn || isBillingInvoiced(saved)) return;
+  const othersMax = payload.filter((p) => p.id && p !== guild).reduce((m, p) => Math.max(m, p.installmentNo), 0);
+  if (guild.installmentNo < othersMax) return;
+  let no = guild.installmentNo;
+  const renumber = new Map<number, number>();
+  for (const c of [...created].sort((x, y) => x.installmentNo - y.installmentNo)) renumber.set(c.installmentNo, no++);
+  for (const p of payload) if (!p.id && renumber.has(p.installmentNo)) p.installmentNo = renumber.get(p.installmentNo)!;
+  out.created = out.created.map((c) => (renumber.has(c.installmentNo) ? { ...c, installmentNo: renumber.get(c.installmentNo)! } : c));
+  guild.installmentNo = no;
 }
 
 /** 申請單上實際畫出的付款階段列：既有／補版面的列＋「＋ 新增一期」多開的空白列（含標記移除的列）。 */
@@ -630,6 +656,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     if (receivedOn && dateRe.test(receivedOn)) out.receipts.push({ key, label, receivedOn });
     if (invoiceNo) out.invoices.push({ key, label, invoiceNo, invoicedOn: dateRe.test(invoicedOn) ? invoicedOn : "" });
   }
+  renumberGuildAfterCreated(ctx, payload, out);
   if (scheduleChanged && total !== null && total > 0) {
     const summary = stageScheduleSummary(rows, draft.stageEdits, stageRowKey, total);
     if (summary.diff !== null && summary.diff !== 0) {

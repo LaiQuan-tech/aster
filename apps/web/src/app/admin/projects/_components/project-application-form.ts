@@ -20,6 +20,10 @@ export interface ProjectApplicationScopeDraft {
 }
 
 export interface ProjectApplicationBillingDraft {
+  /** 畫面列的穩定 key（新增／移除後期別重編號，key 不變，React 不會把輸入框錯接到別列）。 */
+  key?: string;
+  /** 使用者按「＋ 新增一期」加的列（送出時整列空白就略過）。 */
+  added?: boolean;
   installmentNo: number;
   kind: BillingKind;
   milestone: string;
@@ -85,6 +89,21 @@ const DEFAULT_STAGES: ReadonlyArray<Pick<ProjectApplicationBillingDraft, "kind" 
 /** 預設付款階段數（訂金款…技師公會代墊）。付款階段不限期數（2026-11-18 業主），這只是起始模板。 */
 export const DEFAULT_STAGE_COUNT = DEFAULT_STAGES.length;
 
+let addedStageSeq = 0;
+
+/** 新增的列整列都沒填（名稱、%、指定金額／理由、預計日、備註都空）。 */
+export function isBlankAddedBilling(row: ProjectApplicationBillingDraft): boolean {
+  return (
+    !!row.added &&
+    [row.milestone, row.percentage, row.plannedOn, row.overrideAmount, row.overrideReason, row.note].every((v) => (v ?? "").trim() === "")
+  );
+}
+
+/** 送出／驗證用的期別：略過完全沒填的新增列，其餘依順序重新編號（公會代墊仍在最後）。 */
+export function effectiveProjectApplicationBillings(rows: readonly ProjectApplicationBillingDraft[]): ProjectApplicationBillingDraft[] {
+  return renumberBillings(rows.filter((row) => !isBlankAddedBilling(row)));
+}
+
 /** 依陣列順序把期別重新編成 1…n（新增／移除後期別自動編號，不跳號）。 */
 function renumberBillings(rows: readonly ProjectApplicationBillingDraft[]): ProjectApplicationBillingDraft[] {
   return rows.map((row, index) => (row.installmentNo === index + 1 ? row : { ...row, installmentNo: index + 1 }));
@@ -96,6 +115,8 @@ function renumberBillings(rows: readonly ProjectApplicationBillingDraft[]): Proj
  */
 export function addProjectApplicationBilling(draft: ProjectApplicationDraft): ProjectApplicationDraft {
   const blank: ProjectApplicationBillingDraft = {
+    key: `added-${++addedStageSeq}`,
+    added: true,
     installmentNo: 0,
     kind: "installment",
     milestone: "",
@@ -112,11 +133,14 @@ export function addProjectApplicationBilling(draft: ProjectApplicationDraft): Pr
 }
 
 /**
- * 付款階段「移除」：新建表單的期別都還沒有請款／開票／入帳／分潤，任何一列都可移除；移除後其餘期別重新編號。
+ * 付款階段「移除」：新建表單的期別都還沒有請款／開票／入帳／分潤，一般期款任何一列都可移除（技師公會代墊固定一列除外）；
+ * 移除後其餘期別重新編號。
  * 至少保留一列（避免付款階段整張變成空表）。
  */
 export function removeProjectApplicationBilling(draft: ProjectApplicationDraft, installmentNo: number): ProjectApplicationDraft {
   if (draft.billings.length <= 1) return draft;
+  // 技師公會代墊固定一列，不能移除（2026-11-18）。
+  if (draft.billings.some((row) => row.installmentNo === installmentNo && row.kind === "guild_advance")) return draft;
   const next = draft.billings.filter((row) => row.installmentNo !== installmentNo);
   if (next.length === draft.billings.length) return draft;
   return { ...draft, billings: renumberBillings(next) };
@@ -148,6 +172,7 @@ export function emptyProjectApplicationDraft(
     paymentDay: "",
     contractAmount: "",
     billings: DEFAULT_STAGES.map((stage, index) => ({
+      key: `stage-${index + 1}`,
       installmentNo: index + 1,
       ...stage,
       plannedOn: "",
@@ -354,7 +379,7 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
     closingDay: optionalText(draft.closingDay),
     paymentDay: optionalText(draft.paymentDay),
     ...(contractAmount === null ? {} : { contractAmount }),
-    billings: draft.billings.map((row) => ({
+    billings: effectiveProjectApplicationBillings(draft.billings).map((row) => ({
       installmentNo: row.installmentNo,
       kind: row.kind,
       milestone: optionalText(row.milestone),
@@ -402,8 +427,10 @@ export function projectApplicationSchedule(draft: ProjectApplicationDraft): {
   guildAdvanceTotal: number;
 } {
   const contractTotal = optionalNumber(draft.contractAmount);
-  const installments = draft.billings.filter((row) => row.kind !== "guild_advance");
-  const advances = draft.billings.filter((row) => row.kind === "guild_advance");
+  // 完全沒填的新增列送出時會略過：試算也不算它（免得畫面上由空白列吸收尾差、存後卻落在別列）。
+  const filled = draft.billings.filter((row) => !isBlankAddedBilling(row));
+  const installments = filled.filter((row) => row.kind !== "guild_advance");
+  const advances = filled.filter((row) => row.kind === "guild_advance");
   const percentageTotal = Math.round(installments.reduce((sum, row) => sum + (optionalNumber(row.percentage) ?? 0), 0) * 1000) / 1000;
   const rows: ProjectApplicationScheduleRow[] = installments.map((row) => {
     const override = optionalNumber(row.overrideAmount);

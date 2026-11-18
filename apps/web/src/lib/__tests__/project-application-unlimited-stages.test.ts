@@ -245,7 +245,7 @@ describe("付款階段期數不限（既有專案申請單）", () => {
     expect(applicationStageRows(eightStages())).toHaveLength(8)
   })
 
-  it("新增兩期存檔：期別編號接續成第 9、10 期，比例合計含新增期別", () => {
+  it("新增兩期存檔：新期別接在第 7 期之後成第 8、9 期，技師公會代墊順移到第 10 期；比例合計含新增期別", () => {
     const ctx = ctxOf({ billings: eightStages() })
     const draft: ApplicationSheetDraft = {
       ...draftOf(ctx),
@@ -258,13 +258,18 @@ describe("付款階段期數不限（既有專案申請單）", () => {
     }
     const plan = stagePlan(ctx, draft)
     expect(plan.errors).toEqual([])
-    expect(plan.created.map((c) => c.installmentNo)).toEqual([9, 10])
+    expect(plan.created.map((c) => c.installmentNo)).toEqual([8, 9])
     const created = plan.installments!.filter((i) => !i.id)
     expect(created).toEqual([
-      expect.objectContaining({ installmentNo: 9, kind: "installment", milestone: "追加設計", percentage: 3 }),
-      expect.objectContaining({ installmentNo: 10, kind: "installment", milestone: "竣工圖", percentage: 2 }),
+      expect.objectContaining({ installmentNo: 8, kind: "installment", milestone: "追加設計", percentage: 3 }),
+      expect.objectContaining({ installmentNo: 9, kind: "installment", milestone: "竣工圖", percentage: 2 }),
     ])
     expect(plan.installments!.filter((i) => i.id)).toHaveLength(8)
+    expect(plan.installments!.find((i) => i.id === "b8")).toMatchObject({ installmentNo: 10, kind: "guild_advance" })
+    // 既有列在 payload 裡排在新列之前：後端先把公會代墊改成 10、再插入 8、9，不撞號；編號不重複。
+    const nos = plan.installments!.map((i) => i.installmentNo)
+    expect(new Set(nos).size).toBe(nos.length)
+    expect(plan.installments!.findIndex((i) => i.id === "b8")).toBeLessThan(plan.installments!.findIndex((i) => !i.id))
     const rows = applicationStageRows(ctx.billings, 2)
     // 合計（金額為準、合約未稅 100,000）：新增的兩期也算進去。
     const amountEdits = { b6: { amount: "5000" }, "new-installment-8": { amount: "3000" }, "new-installment-9": { amount: "2000" } }
@@ -352,5 +357,34 @@ describe("所有專案列表：專案編號欄", () => {
     const cells = registerRowCells({ seq: 1, code: "T-115-001", projectNo: "客-0001", clientName: null, name: "測試工程", register: null }, [])
     expect(cells.slice(0, 3)).toEqual(["1", "T-115-001", "客-0001"])
     expect(registerRowCells({ seq: 1, code: "T-115-001", clientName: null, name: "測試工程", register: null }, [])[2]).toBe("")
+  })
+})
+
+describe("2026-11-18 驗收修正", () => {
+  it("技師公會代墊已開票（或請款／入帳）：不移動，新期別接在最大號之後（第 9、10 期）", () => {
+    const billings = eightStages().map((b) => (b.id === "b8" ? { ...b, invoiceNo: "ZZ00000001" } : b))
+    const ctx = ctxOf({ billings })
+    const draft: ApplicationSheetDraft = {
+      ...draftOf(ctx),
+      stageExtraRows: 2,
+      stageEdits: { "new-installment-8": { milestone: "甲", percentage: "0" }, "new-installment-9": { milestone: "乙", percentage: "0" } },
+    }
+    const plan = stagePlan(ctx, draft)
+    expect(plan.created.map((c) => c.installmentNo)).toEqual([9, 10])
+    expect(plan.installments!.find((i) => i.id === "b8")!.installmentNo).toBe(8)
+  })
+
+  it("沒有新增期別：公會代墊號碼不動", () => {
+    const ctx = ctxOf({ billings: eightStages() })
+    const plan = stagePlan(ctx, { ...draftOf(ctx), stageEdits: { b1: { milestone: "改名" } } })
+    expect(plan.created).toEqual([])
+    expect(plan.installments!.find((i) => i.id === "b8")!.installmentNo).toBe(8)
+  })
+
+  it("已開票未請款的期別：百分比與金額比照已入帳凍結", () => {
+    const [row] = applicationStageRows([fakeBilling({ invoiceNo: "ZZ00000001", invoicedOn: null })])
+    expect(stageLocks(row!)).toMatchObject({ percentage: true, amount: true })
+    const [plain] = applicationStageRows([fakeBilling({})])
+    expect(stageLocks(plain!)).toMatchObject({ percentage: false, amount: false })
   })
 })

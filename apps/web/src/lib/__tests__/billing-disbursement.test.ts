@@ -3,6 +3,7 @@ import {
   applyBatchPayResults,
   buildLedger,
   filterLedger,
+  matchesKeyword,
   markPaidCheck,
   parseBillingDisbursementView,
   validateBatchPay,
@@ -226,8 +227,8 @@ describe("buildLedger：每個專案的客戶請款 × 廠商付款", () => {
 
 describe("filterLedger：快速篩選與關鍵字", () => {
   const ledger = buildLedger({
-    receivables: [receivable({ projectId: P2, code: "T-002", projectName: "測試案乙", clientName: "測試客戶乙" })],
-    payables: [payable(), payable({ subcontractPaymentId: "sp-2", installmentNo: 2, acceptedOn: null, vendorName: "測試技師乙" })],
+    receivables: [receivable({ projectId: P2, code: "T-002", projectNo: "業主-乙-77", projectName: "測試案乙", clientName: "測試客戶乙" })],
+    payables: [payable({ projectNo: "業主-甲-11" }), payable({ subcontractPaymentId: "sp-2", installmentNo: 2, acceptedOn: null, vendorName: "測試技師乙" })],
     disbursements: [disbursement()],
     acceptanceTracked: true,
     includePaid: false,
@@ -243,6 +244,12 @@ describe("filterLedger：快速篩選與關鍵字", () => {
     expect(filterLedger(ledger, { q: "技師乙" }).map((p) => p.code)).toEqual(["T-001"]);
     expect(filterLedger(ledger, { q: "d-test-001" }).map((p) => p.code)).toEqual(["T-001"]);
     expect(filterLedger(ledger, { q: "  " })).toHaveLength(2);
+  });
+  it("關鍵字同時比對專案序號與專案編號（2026-11-18）", () => {
+    expect(filterLedger(ledger, { q: "業主-乙" }).map((p) => p.code)).toEqual(["T-002"]);
+    expect(filterLedger(ledger, { q: "甲-11" }).map((p) => p.code)).toEqual(["T-001"]);
+    expect(filterLedger(ledger, { q: "t-002" }).map((p) => p.code)).toEqual(["T-002"]);
+    expect(matchesKeyword("乙-77", "T-002", "業主-乙-77")).toBe(true);
   });
 });
 

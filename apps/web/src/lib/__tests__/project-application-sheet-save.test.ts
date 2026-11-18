@@ -728,6 +728,15 @@ describe("付款階段清空名稱／整列清空", () => {
     const ctx = ctxOf({ billings: [done] })
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: "", percentage: "" } } }))
     expect(plan.stages.removed).toEqual([])
+    // 2026-11-18：已開票的期別百分比凍結，清空 % 不生效（不算整列清空），只有名稱存成空白。
+    expect(plan.stages.installments?.[0]).toMatchObject({ id: "b1", milestone: null, percentage: 30 })
+  })
+
+  it("已入帳（未開票）的期別整列清空：不移除，名稱照存空白，畫面提示原因", () => {
+    const done = fakeBilling({ id: "b1", installmentNo: 1, milestone: "訂金款", billedOn: "2026-10-20", billedAmount: 30000, percentage: null, overrideAmount: null })
+    const ctx = ctxOf({ billings: [{ ...done, receivedOn: "2026-10-25", receivedAmount: 30000 }] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: "" } } }))
+    expect(plan.stages.removed).toEqual([])
     expect(plan.stages.installments?.[0]).toMatchObject({ id: "b1", milestone: null })
     expect(plan.warnings.join()).toMatch(/第 1 列.*不能整列移除/)
   })

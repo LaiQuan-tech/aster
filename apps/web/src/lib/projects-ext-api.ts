@@ -543,6 +543,9 @@ export const BILLING_ERRORS: Record<string, string> = {
   duplicate_billing_id: "同一期別在期程裡出現兩次，請重新整理後再存。",
   billed_installment_not_removable: "已請款的期別不能移除。",
   invoiced_installment_not_removable: "已開發票的期別不能移除，請先撤銷開票。",
+  invoiced_frozen: "已開發票的期別金額已凍結，不能改百分比／金額；要改請先撤銷開票或用「修正」換發票。",
+  invoiced_amount_would_change: "這次修改會讓已開發票的期別金額變動（例如它在吸收尾差），請調整其他期別讓該期金額不變，或先撤銷該期開票。",
+  advance_not_invoiceable: "技師公會代墊（代墊款）不開發票。",
   received: "已入帳的期別金額已凍結，不能移除或改百分比／覆寫金額。",
   duplicate_installment_no: "期別編號重複。",
   installment_no_taken: "期別編號已存在。",
@@ -1142,7 +1145,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
   if (msg.includes("invalid_company")) return "選到的承接公司不存在或不屬於本租戶，請重新選擇。"
   if (msg.includes("company_inactive")) return "選到的承接公司已停用，請改選其他公司。"
-  if (msg.includes("code_immutable")) return "專案編號不可變更。"
+  if (msg.includes("code_immutable")) return "專案序號不可變更。"
   if (msg.includes("unknown_discipline")) return "協力技師的科別不在專案設定的科別清單裡。請先到「專案設定 → 科別」新增。"
   if (msg.includes("forbidden_bonus")) return "分潤（獎金池／成員趴數）不在您的權限範圍內。"
   if (msg.includes("bonus_edit_boss_only") || msg.includes("boss_not_configured")) return humanizeBonusEditError(msg)
@@ -1206,6 +1209,8 @@ export const RECEIVABLE_STATE_BADGE_CLASS: Record<ReceivableState, string> = {
 export interface ReceivableRow {
   projectId: string
   code: string | null
+  /** 專案編號（自由輸入，≠ code 專案序號）；舊版 API 沒回＝缺席。 */
+  projectNo?: string | null
   projectName: string
   clientName: string | null
   billingId: string

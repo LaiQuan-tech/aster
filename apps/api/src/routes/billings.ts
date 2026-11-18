@@ -82,6 +82,10 @@ const invoiceSchema = z.object({
   invoicedOn: z.string().regex(dateRe).optional(),
 })
 
+const INVOICED_FROZEN_MESSAGE = "這一期已開發票，百分比與金額不能改；要改請先撤銷開票或用「修正」換發票。"
+const INVOICED_AMOUNT_CHANGE_MESSAGE =
+  "這次修改會讓已開發票的期別金額變動（例如它在吸收尾差）；請調整其他期別讓已開票期別金額不變，或先撤銷該期開票。"
+
 /** 修正開票（2026-11-18）：新號碼、新日期、理由全部必填。 */
 const reinvoiceSchema = z.object({
   invoiceNo: z.string().trim().min(1).max(40),
@@ -137,7 +141,11 @@ async function respondSchedule(
   const result = computeSchedule(rows.map(toScheduleInput), total)
   const installments = rows.map(serializeBilling)
   const billedTotal = installments.reduce((s, r) => s + (r.billedOn ? (r.billedAmount ?? 0) : 0), 0)
-  const invoicedTotal = installments.reduce((s, r) => s + (r.invoicedOn ? (r.effectiveAmount ?? 0) : 0), 0)
+  // 已開票口徑同 isInvoicedBilling：號碼或日期任一有值（2026-11-18）。
+  const invoicedTotal = installments.reduce(
+    (s, r) => s + (isInvoicedBilling({ invoice_no: r.invoiceNo ?? null, invoiced_on: r.invoicedOn ?? null }) ? (r.effectiveAmount ?? 0) : 0),
+    0,
+  )
   const receivedTotal = installments.reduce((s, r) => s + (r.receivedOn ? (r.receivedAmount ?? 0) : 0), 0)
 
   res.status(extra.status ?? 200).json({
@@ -340,7 +348,7 @@ billingsRouter.put(
         return
       }
       // 已開發票（含先開票、尚未請款）的期別也不可移除：發票已經開出去，移掉會讓那張發票對不到期別（2026-11-18）。
-      const invoicedRemoval = removing.find((r) => r.invoiced_on !== null || (r.invoice_no ?? "") !== "")
+      const invoicedRemoval = removing.find((r) => isInvoicedBilling(r))
       if (invoicedRemoval) {
         res.status(409).json({
           error: "invoiced_installment_not_removable",
@@ -358,6 +366,56 @@ billingsRouter.put(
         if (pctChanged || overrideChanged) {
           res.status(409).json({ error: "received", installmentNo: row.installment_no })
           return
+        }
+      }
+      // 已開票（尚未入帳；含未請款先開票）的期別同樣凍結：發票金額已經開出去，百分比／覆寫金額不可改（2026-11-18）。
+      for (const item of payload) {
+        if (!item.id) continue
+        const row = byId.get(item.id)
+        if (!row || row.received_on !== null || !isInvoicedBilling(row)) continue
+        const pctChanged = (item.percentage ?? null) !== num(row.percentage)
+        const overrideChanged = (item.overrideAmount ?? null) !== num(row.override_amount)
+        if (pctChanged || overrideChanged) {
+          res.status(409).json({ error: "invoiced_frozen", installmentNo: row.installment_no, message: INVOICED_FROZEN_MESSAGE })
+          return
+        }
+      }
+      // 新增／移除其他期別、改其他期別百分比，會讓「已開票但未請款」期別的有效金額變動（例：它在吸收尾差）→ 擋下。
+      // 已請款的期別金額本來就凍結在請款金額，不會變；已入帳的上面已處理。
+      {
+        const watched = existing.filter((r) => isInvoicedBilling(r) && r.billed_on === null && keepIds.has(r.id.toLowerCase()))
+        if (watched.length > 0) {
+          const { total } = await contractTotal(tenantId, projectId)
+          const before = computeSchedule(existing.map(toScheduleInput), total)
+          const after = computeSchedule(
+            payload.map((item) => {
+              const saved = item.id ? byId.get(item.id) : undefined
+              return {
+                installmentNo: item.installmentNo,
+                kind: item.kind ?? saved?.kind ?? "installment",
+                percentage: item.percentage ?? null,
+                overrideAmount: item.overrideAmount ?? null,
+                billedAmount: saved ? num(saved.billed_amount) : null,
+                billed: !!saved && saved.billed_on !== null,
+              }
+            }),
+            total,
+          )
+          const beforeByNo = new Map(before.rows.map((r) => [r.installmentNo, r.effectiveAmount]))
+          const afterByNo = new Map(after.rows.map((r) => [r.installmentNo, r.effectiveAmount]))
+          for (const r of watched) {
+            const nextNo = payload.find((item) => item.id === r.id.toLowerCase())?.installmentNo ?? r.installment_no
+            if ((beforeByNo.get(r.installment_no) ?? null) !== (afterByNo.get(nextNo) ?? null)) {
+              res.status(409).json({
+                error: "invoiced_amount_would_change",
+                installmentNo: r.installment_no,
+                before: beforeByNo.get(r.installment_no) ?? null,
+                after: afterByNo.get(nextNo) ?? null,
+                message: INVOICED_AMOUNT_CHANGE_MESSAGE,
+              })
+              return
+            }
+          }
         }
       }
 
@@ -656,6 +714,11 @@ billingsRouter.post(
         return
       }
       const row = loaded.row
+      // 技師公會代墊（代墊款）不開發票（2026-11-18）。
+      if (isAdvanceBillingKind(row.kind)) {
+        res.status(400).json({ error: "advance_not_invoiceable" })
+        return
+      }
       if (isInvoicedBilling(row)) {
         res.status(409).json({ error: "already_invoiced" })
         return
@@ -798,6 +861,10 @@ billingsRouter.post(
         return
       }
       const row = loaded.row
+      if (isAdvanceBillingKind(row.kind)) {
+        res.status(400).json({ error: "advance_not_invoiceable" })
+        return
+      }
       if (!isInvoicedBilling(row)) {
         res.status(409).json({ error: "not_invoiced" })
         return

@@ -238,6 +238,8 @@ export interface Payable {
   subcontractId: string
   projectId: string
   projectCode: string | null
+  /** 專案編號（自由輸入）；舊版 API 沒回＝缺席。 */
+  projectNo?: string | null
   projectName: string
   vendorId: string | null
   vendorName: string | null

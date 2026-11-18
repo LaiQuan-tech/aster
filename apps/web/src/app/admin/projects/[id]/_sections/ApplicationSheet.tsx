@@ -985,7 +985,7 @@ export function ApplicationSheet({
             onValueChange={(v) => patchStage(applyStageAmountEdit(rowEdit, v))}
           />
         ) : (
-          <span className="tabular-nums" title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
+          <span className="tabular-nums" title={editable && locks.amount ? "已請款／已開票／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
         )}
       </Cell>,
       <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={S[2]} row={r} kind="value" align="center" testId={`sheet-stage-${s.no}-pct`} editable={editable && !locks.percentage && !locks.amount} {...errAttr(`stage:${key}:percentage`)}>

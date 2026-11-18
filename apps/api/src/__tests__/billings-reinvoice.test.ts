@@ -236,3 +236,60 @@ describe("PUT /projects/:id/billings — 期數不限與移除限制", () => {
     expect(billing(B2).deleted_at).not.toBeNull()
   })
 })
+
+describe("已開票期別金額凍結（2026-11-18 驗收）", () => {
+  it("已開票未請款的期別：改百分比或覆寫金額 → 409 invoiced_frozen，不寫", async () => {
+    Object.assign(billing(B2), { invoice_no: "ZZ00000300", invoiced_on: "2026-02-03" })
+    const pct = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { percentage: 40 })])
+    expect(pct.status).toBe(409)
+    expect(pct.body).toMatchObject({ error: "invoiced_frozen", installmentNo: 2 })
+    const ov = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { overrideAmount: 90000, overrideReason: "談價" })])
+    expect(ov.status).toBe(409)
+    expect(ov.body.error).toBe("invoiced_frozen")
+    // 只有號碼沒日期也算已開票。
+    Object.assign(billing(B2), { invoiced_on: null })
+    const noDate = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { percentage: 40 })])
+    expect(noDate.body.error).toBe("invoiced_frozen")
+    expect(billingWrites()).toHaveLength(0)
+  })
+
+  it("尾差：改別期百分比會讓吸收尾差的已開票期別金額變動 → 409 invoiced_amount_would_change", async () => {
+    // 合約 200,000；第 1 期 50%、第 2 期 50%（第 2 期是最後一個未請款期，吸收尾差）且已開票。
+    Object.assign(billing(B2), { invoice_no: "ZZ00000301", invoiced_on: "2026-02-03" })
+    const res = await put(T.accountant, PROJECT, [item(billing(B1), { percentage: 40 }), item(billing(B2))])
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body).toMatchObject({ error: "invoiced_amount_would_change", installmentNo: 2, before: 100000, after: 120000 })
+    expect(billingWrites()).toHaveLength(0)
+  })
+
+  it("尾差改由新增的第 3 期吸收、已開票期別金額不變 → 照存", async () => {
+    Object.assign(billing(B2), { invoice_no: "ZZ00000302", invoiced_on: "2026-02-03" })
+    const res = await put(T.accountant, PROJECT, [
+      item(billing(B1), { percentage: 40 }),
+      item(billing(B2)),
+      { installmentNo: 3, kind: "installment", percentage: 10, milestone: "新增期" },
+    ])
+    // 40%＋50%＋10%＝100%：沒有尾差，已開票的第 2 期仍是 100,000 → 預檢放行。
+    // （存後金額由 recomputeBillings 寫回；記憶體版 DB 新插入列沒有 billed_on 欄位預設值，這裡不驗存後試算。）
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(billing(B2)).toMatchObject({ percentage: 50, invoice_no: "ZZ00000302" })
+  })
+
+  it("技師公會代墊不開發票：invoice／reinvoice → 400 advance_not_invoiceable", async () => {
+    Object.assign(billing(B2), { kind: "guild_advance" })
+    const inv = await post(T.accountant, `/billings/${B2}/invoice`, { invoiceNo: "ZZ00000400" })
+    expect(inv.status).toBe(400)
+    expect(inv.body.error).toBe("advance_not_invoiceable")
+    Object.assign(billing(B2), { invoice_no: "ZZ00000401" })
+    const re = await post(T.accountant, `/billings/${B2}/reinvoice`, { invoiceNo: "ZZ00000402", invoicedOn: "2026-02-05", reason: "x" })
+    expect(re.status).toBe(400)
+    expect(re.body.error).toBe("advance_not_invoiceable")
+  })
+
+  it("期程摘要的已開票金額：號碼或日期任一有值都算", async () => {
+    Object.assign(billing(B2), { invoice_no: "ZZ00000500", invoiced_on: null })
+    const res = await request(app).get(`/projects/${PROJECT}/billings`).set("Authorization", `Bearer ${T.accountant}`)
+    expect(res.status).toBe(200)
+    expect(res.body.summary.invoicedTotal).toBe(100000)
+  })
+})

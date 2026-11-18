@@ -356,6 +356,8 @@ export function BillingsCard({
                             <button type="button" className="text-green-700 hover:underline" onClick={() => cancelInvoice(saved.id)}>
                               已開票 {saved.invoiceNo || "（未填號碼）"}／{saved.invoicedOn || "（未填日期）"}（點取消）
                             </button>
+                          ) : saved.kind === "guild_advance" ? (
+                            <span className="text-gray-400">代墊款不開發票</span>
                           ) : invoiceFormId === saved.id ? (
                             <span className="flex flex-wrap items-center gap-1.5">
                               <input className="w-28 rounded border border-gray-300 px-1.5 py-0.5" placeholder="發票號碼" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} />

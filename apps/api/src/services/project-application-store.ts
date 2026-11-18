@@ -911,6 +911,8 @@ export async function batch<T>(
 export type ReceivableRow = {
   projectId: string
   code: string | null
+  /** 專案編號（自由輸入，≠ code 專案序號）；應收關鍵字可搜。 */
+  projectNo: string | null
   projectName: string
   clientName: string | null
   billingId: string
@@ -942,11 +944,11 @@ export async function buildReceivables(
 ): Promise<ReceivableRow[]> {
   const { data: projData, error: projErr } = await supabaseAdmin
     .from("projects")
-    .select("id, name, code, client_id, archived_at")
+    .select("id, name, code, project_no, client_id, archived_at")
     .eq("tenant_id", tenantId)
     .is("deleted_at", null)
   if (projErr) throw new Error(`buildReceivables (projects): ${projErr.message}`)
-  const projects = ((projData ?? []) as Array<{ id: string; name: string; code: string | null; client_id: string | null; archived_at: string | null }>)
+  const projects = ((projData ?? []) as Array<{ id: string; name: string; code: string | null; project_no?: string | null; client_id: string | null; archived_at: string | null }>)
     .filter((p) => opts.projectIds === null || opts.projectIds.has(p.id))
   const ids = projects.map((p) => p.id)
   if (ids.length === 0) return []
@@ -996,6 +998,7 @@ export async function buildReceivables(
       rows.push({
         projectId: p.id,
         code: p.code,
+        projectNo: p.project_no ?? null,
         projectName: p.name,
         clientName: p.client_id ? (clientName.get(p.client_id) ?? null) : null,
         billingId: b.id,

@@ -111,6 +111,8 @@ export interface VendorRow {
 export interface ProjectLedger {
   projectId: string;
   code: string | null;
+  /** 專案編號（自由輸入，≠ code 專案序號）；關鍵字可搜。舊版 API 沒回＝null。 */
+  projectNo: string | null;
   name: string;
   clientName: string | null;
   archived: boolean;
@@ -234,12 +236,13 @@ export function buildLedger(input: BuildLedgerInput): ProjectLedger[] {
   }
 
   const projects = new Map<string, ProjectLedger>();
-  const ensure = (projectId: string, code: string | null, name: string, clientName: string | null, archived: boolean) => {
+  const ensure = (projectId: string, code: string | null, name: string, clientName: string | null, archived: boolean, projectNo: string | null = null) => {
     let p = projects.get(projectId);
     if (!p) {
       p = {
         projectId,
         code,
+        projectNo,
         name,
         clientName,
         archived,
@@ -252,17 +255,18 @@ export function buildLedger(input: BuildLedgerInput): ProjectLedger[] {
     } else {
       if (!p.clientName && clientName) p.clientName = clientName;
       if (!p.code && code) p.code = code;
+      if (!p.projectNo && projectNo) p.projectNo = projectNo;
     }
     return p;
   };
 
   for (const r of input.receivables) {
-    const p = ensure(r.projectId, r.code, r.projectName, r.clientName, !!r.archived);
+    const p = ensure(r.projectId, r.code, r.projectName, r.clientName, !!r.archived, r.projectNo ?? null);
     p.billings.push(r);
   }
 
   for (const pay of input.payables) {
-    const p = ensure(pay.projectId, pay.projectCode, pay.projectName, null, !!pay.archived);
+    const p = ensure(pay.projectId, pay.projectCode, pay.projectName, null, !!pay.archived, pay.projectNo ?? null);
     if (pay.projectReceiptProgressPct != null) p.receiptProgressPct = pay.projectReceiptProgressPct;
     const linked = activeByPayment.get(pay.subcontractPaymentId);
     const notAccepted = input.acceptanceTracked && !pay.acceptedOn;
@@ -366,7 +370,7 @@ export const LEDGER_CHIPS: ReadonlyArray<{ value: LedgerChip; label: string }> =
   { value: "blocked", label: "卡驗收／簽核" },
 ];
 
-/** 關鍵字比對專案編號／名稱／客戶／廠商／放款單號（不分大小寫）。 */
+/** 關鍵字比對專案序號／專案編號／名稱／客戶／廠商／放款單號（不分大小寫）。 */
 export function filterLedger(ledger: ProjectLedger[], opts: { q?: string; chip?: LedgerChip }): ProjectLedger[] {
   const q = opts.q?.trim().toLowerCase() ?? "";
   const chip = opts.chip ?? "all";
@@ -381,7 +385,7 @@ export function filterLedger(ledger: ProjectLedger[], opts: { q?: string; chip?:
       return false;
     }
     if (!q) return true;
-    const hay = [p.code, p.name, p.clientName, ...p.vendorRows.map((v) => v.vendorName), ...p.vendorRows.map((v) => v.disbursement?.disbursementNo)]
+    const hay = [p.code, p.projectNo, p.name, p.clientName, ...p.vendorRows.map((v) => v.vendorName), ...p.vendorRows.map((v) => v.disbursement?.disbursementNo)]
       .filter(Boolean)
       .join(" ")
       .toLowerCase();

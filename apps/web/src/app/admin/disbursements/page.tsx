@@ -270,7 +270,7 @@ function BillingDisbursementsPage() {
               className={`${inputCls} md:w-72`}
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="關鍵字：專案編號／名稱／客戶／廠商／放款單號"
+              placeholder="關鍵字：專案序號／專案編號／名稱／客戶／廠商／放款單號"
               aria-label="關鍵字"
             />
           )}

@@ -46,7 +46,7 @@ export default function PayablesView({
   const groups = useMemo(() => {
     const map = new Map<string, PayableGroupView>();
     for (const p of payables) {
-      if (!matchesKeyword(q, p.projectCode, p.projectName, p.vendorName, p.item, p.discipline)) continue;
+      if (!matchesKeyword(q, p.projectCode, p.projectNo, p.projectName, p.vendorName, p.item, p.discipline)) continue;
       const key = p.vendorId ?? `name:${p.vendorName ?? "—"}`;
       if (!map.has(key)) map.set(key, { key, vendorId: p.vendorId, vendorName: p.vendorName ?? "未指定廠商", rows: [] });
       map.get(key)!.rows.push(p);
