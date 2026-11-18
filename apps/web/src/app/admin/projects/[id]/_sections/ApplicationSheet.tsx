@@ -12,7 +12,7 @@ import { ProjectCodeField } from "./ProjectCodeField";
 import { ReinvoiceDialog, type ReinvoiceTarget } from "./ReinvoiceDialog";
 import { useInvoicedAck } from "@/components/InvoicedAckDialog";
 import { billingScheduleVersion } from "@/lib/billing-version";
-import type { InvoicedAckBody } from "@/lib/invoiced-ack";
+import { COMMITTED_CONFLICT_MESSAGE, conflictKindOf, type InvoicedAckBody } from "@/lib/invoiced-ack";
 import { isBillingInvoiced } from "@/lib/billing-invoice";
 import { PROJECT_NO_MAX } from "@/lib/project-no";
 import type { Vendor } from "@/lib/company-api";
@@ -455,12 +455,30 @@ export function ApplicationSheet({
    */
   let expectedVersion = billingScheduleVersion(billings);
   /** 銷售金額／期程會讓已開票期別金額改變（409）→ 跳確認視窗、填理由後帶 ack 重送。 */
+  /**
+   * 409 conflict_retry 且 committed（後端其實已寫入，期間有人開票／改期程）：這一步當成已完成（草稿清掉、不重送，
+   * 免得合約或報價單重複），存檔結果另外提示「已存檔，但…請核對發票」，存完重新載入。
+   */
+  const committedNotices: string[] = [];
+  const toleratingCommitted = async <T,>(call: () => Promise<T>, fallback: () => Promise<T>): Promise<T> => {
+    try {
+      return await call();
+    } catch (err) {
+      if (conflictKindOf(err) !== "committed") throw err;
+      committedNotices.push(COMMITTED_CONFLICT_MESSAGE);
+      return fallback();
+    }
+  };
   const withInvoicedAck = async <T,>(call: (ack?: InvoicedAckBody) => Promise<T>): Promise<T> => {
     let acked = false;
-    const result = await invoicedAck.run((ack) => {
-      if (ack) acked = true;
-      return call(ack);
-    });
+    const result = await toleratingCommitted(
+      () =>
+        invoicedAck.run((ack) => {
+          if (ack) acked = true;
+          return call(ack);
+        }),
+      async () => undefined as T,
+    );
     if (acked) {
       // 重抓失敗不影響已成功的這一步：沿用舊版本（之後存期程若被判衝突，會提示重新整理）。
       try {
@@ -479,12 +497,17 @@ export function ApplicationSheet({
     updateContract: (id, body) => withInvoicedAck((ack) => updateContract(id, body, ack)),
     createQuotation: (body) => withInvoicedAck((ack) => createContract(project.id, { docType: "quotation", title: "報價單", amount: body.amount }, ack)),
     saveBillingSchedule: async (installments) => {
-      const res = await invoicedAck.run((ack) => saveBillingSchedule(project.id, installments, { expectedVersion, ack }));
+      const res = await toleratingCommitted(
+        () => invoicedAck.run((ack) => saveBillingSchedule(project.id, installments, { expectedVersion, ack })),
+        // 已寫入：用重新讀到的期程當作這一步的結果（新建期別的 id 從這裡對回草稿）。
+        () => getBillingSchedule(project.id),
+      );
       // 期程存好後版本換新：同一次存檔接著登記發票時帶新版本。
       expectedVersion = res.version ?? billingScheduleVersion(res.installments);
       return res;
     },
-    invoiceBilling: (id, invoiceNo, invoicedOn) => invoiceBilling(id, invoicedOn ? { invoiceNo, invoicedOn, expectedVersion } : { invoiceNo, expectedVersion }),
+    invoiceBilling: (id, invoiceNo, invoicedOn, expectedAmount) =>
+      invoiceBilling(id, { invoiceNo, ...(invoicedOn ? { invoicedOn } : {}), expectedVersion, ...(expectedAmount !== undefined ? { expectedAmount } : {}) }),
     receiveBilling: (id, receivedOn) => receiveBilling(id, { receivedOn }),
     // 第六輪：改綁另一家名冊廠商且有未付期款 → 跳輸入框問原因後重送。
     putSubcontracts: (list, deleteReason) =>
@@ -528,7 +551,7 @@ export function ApplicationSheet({
       });
       // 先把已存成的格子從草稿拿掉，再重新載入（沒存成的留著，下一次只送那些）。
       setDraft(result.residual);
-      setReport({ steps: result.steps, notices: result.notices });
+      setReport({ steps: result.steps, notices: [...result.notices, ...committedNotices.filter((m, i, a) => a.indexOf(m) === i)] });
       if (result.steps.some((st) => st.status === "ok" || st.status === "warning")) await load?.();
     } finally {
       setSaving(false);
@@ -952,7 +975,8 @@ export function ApplicationSheet({
     /** 已登記發票的期別（號碼或日期任一有值）：鎖住的發票格旁給「修正」鈕（要能重新載入才顯示）。 */
     const canReinvoice = editable && !guild && !!s.id && !!load && isBillingInvoiced(s);
     const openReinvoice = () =>
-      s.id && setReinvoiceTarget({ billingId: s.id, label: rowLabel, invoiceNo: s.invoiceNo, invoicedOn: s.invoicedOn, expectedVersion: billingScheduleVersion(billings) });
+      s.id &&
+      setReinvoiceTarget({ billingId: s.id, label: rowLabel, invoiceNo: s.invoiceNo, invoicedOn: s.invoicedOn, expectedVersion: billingScheduleVersion(billings), expectedAmount: s.amount });
     /** 不能移除的原因（已請款／開票／入帳；看得到分潤時，已有分潤或發獎金日）；null＝可以移除。 */
     const removeBlock = stageRemoveBlockReason(s, { hasShares: !!shareSet && (shareSet.shares.length > 0 || !!shareSet.bonusPaidOn) });
     const shareEdit: ShareEdit | undefined = sharesEditable ? draft.shareEdits?.[key] : undefined;

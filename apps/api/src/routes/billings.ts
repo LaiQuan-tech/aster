@@ -97,6 +97,8 @@ const invoiceSchema = z.object({
   invoicedOn: z.string().regex(dateRe).optional(),
   /** 樂觀鎖（2026-11-18）：開票時看到的期程版本；不符（期程剛被改過、金額可能不同）→ 409 conflict_retry。省略＝不檢查。 */
   expectedVersion: z.string().max(40).optional(),
+  /** 畫面上看到的這一期有效金額（2026-11-18）：跟當下有效金額（整數元）不同 → 409 invoiced_amount_mismatch。省略＝不比對。 */
+  expectedAmount: z.number().finite().nullable().optional(),
 })
 
 const INVOICED_FROZEN_MESSAGE = "這一期已開發票，百分比與金額不能改；要改請先撤銷開票或用「修正」換發票。"
@@ -107,6 +109,8 @@ const reinvoiceSchema = z.object({
   invoicedOn: z.string().regex(dateRe),
   reason: z.string().trim().min(1).max(500),
   expectedVersion: z.string().max(40).optional(),
+  /** 畫面上看到的這一期有效金額（2026-11-18）：跟當下有效金額（整數元）不同 → 409 invoiced_amount_mismatch。省略＝不比對。 */
+  expectedAmount: z.number().finite().nullable().optional(),
 })
 
 /** 開票／修正開票的期程版本檢查：帶了版本且跟目前期程不符 → true（呼叫端回 409 conflict_retry）。 */
@@ -116,6 +120,16 @@ async function scheduleVersionStale(tenantId: string, projectId: string, expecte
   return billingScheduleVersion(rows.map(serializeBilling)) !== expected
 }
 const SCHEDULE_STALE_BODY = { error: "conflict_retry", message: "期程已被其他人更新（金額可能已變），請重新整理後再登記發票。" } as const
+
+/** 開票前比對畫面金額與這一期當下的有效金額（整數元）；不同 → 回 409 的內容，相同或沒帶 → null。 */
+function amountMismatchBody(row: BillingRow, expected: number | null | undefined) {
+  if (expected === undefined) return null
+  const current = effectiveBillingAmount(row)
+  const same = current === null || expected === null ? current === expected : Math.round(current) === Math.round(expected)
+  if (same) return null
+  const shown = current === null ? "（未定）" : Math.round(current).toLocaleString("en-US")
+  return { error: "invoiced_amount_mismatch", amount: current, message: `此期金額已變為 ${shown}，請重新整理確認後再開票。` }
+}
 
 /** 已開票判斷移到 services/invoiced-guard.ts（號碼或日期任一有值）；保留匯出相容。 */
 export { isInvoicedBilling }
@@ -644,7 +658,8 @@ billingsRouter.post(
           const self = rows.find((r) => r.id === row.id)
           if (!self || !isInvoicedBilling(self)) return []
           const before = storedEffectiveAmount(self)
-          return before !== null && Math.round(before) === Math.round(billedAmount)
+          // 前值為空（沒有合約、也沒有人工金額）＝發票時就沒有金額基準，不必確認。
+          return before === null || Math.round(before) === Math.round(billedAmount)
             ? []
             : [{ billingId: self.id, installmentNo: self.installment_no, before, after: billedAmount }]
         },
@@ -812,6 +827,11 @@ billingsRouter.post(
         res.status(409).json(SCHEDULE_STALE_BODY)
         return
       }
+      const mismatch = amountMismatchBody(row, parsed.data.expectedAmount)
+      if (mismatch) {
+        res.status(409).json(mismatch)
+        return
+      }
       const warnings: Warning[] = []
       // 順序不擋只提醒：先開票再請款在工程業真的會發生。
       if (!row.billed_on) warnings.push("invoiced_before_billed")
@@ -960,6 +980,11 @@ billingsRouter.post(
       }
       if (await scheduleVersionStale(tenantId, row.project_id, parsed.data.expectedVersion)) {
         res.status(409).json(SCHEDULE_STALE_BODY)
+        return
+      }
+      const reMismatch = amountMismatchBody(row, parsed.data.expectedAmount)
+      if (reMismatch) {
+        res.status(409).json(reMismatch)
         return
       }
       const { invoiceNo, invoicedOn, reason } = parsed.data

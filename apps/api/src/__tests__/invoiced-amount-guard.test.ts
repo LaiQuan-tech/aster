@@ -378,3 +378,109 @@ describe("第四輪驗收：unbill 自己、ack 綁定、改前值用存的有�
     expect(reStale.body.error).toBe("conflict_retry")
   })
 })
+
+describe("終驗（079f3e1）：開票比對畫面金額、正常流程不誤擋、committed 409", () => {
+  const gv = async () => (await request(app).get(`/projects/${PROJECT}/billings`).set("Authorization", `Bearer ${T.accountant}`)).body.version as string
+
+  it("版本碼不含金額：主合約 200k→300k 後用舊版本開第 2 期——帶畫面金額 100,000 → 409 invoiced_amount_mismatch（新金額 150,000）；不帶照舊 200", async () => {
+    const v0 = await gv()
+    expect((await request(app).put(`/projects/${PROJECT}/main-contract`).set("Authorization", `Bearer ${T.accountant}`).send({ amount: 300000 })).status).toBe(200)
+    const r = await post(T.accountant, `/billings/${B2}/invoice`, { invoiceNo: "ZZ00002000", expectedVersion: v0, expectedAmount: 100000 })
+    expect(r.status).toBe(409)
+    expect(r.body).toMatchObject({ error: "invoiced_amount_mismatch", amount: 150000 })
+    expect(r.body.message).toContain("此期金額已變為 150,000")
+    expect(billing(B2).invoice_no).toBeNull()
+    const ok = await post(T.accountant, `/billings/${B2}/invoice`, { invoiceNo: "ZZ00002000", expectedAmount: 150000 })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+  })
+
+  it("別期請款 90,000 讓尾差移到第 2 期 → 用畫面上的 100,000 開第 2 期 → 409", async () => {
+    expect((await post(T.accountant, `/billings/${B1}/bill`, { billedAmount: 90000 })).status).toBe(200)
+    const r = await post(T.accountant, `/billings/${B2}/invoice`, { invoiceNo: "ZZ00002001", expectedAmount: 100000 })
+    expect(r.status).toBe(409)
+    expect(r.body).toMatchObject({ error: "invoiced_amount_mismatch", amount: 110000 })
+  })
+
+  it("修正開票也比對畫面金額；舊客戶端／MCP 不帶金額 → 不比對", async () => {
+    Object.assign(billing(B2), { invoice_no: "ZZ00002002", invoiced_on: "2026-02-03" })
+    const bad = await post(T.accountant, `/billings/${B2}/reinvoice`, { invoiceNo: "ZZ00002003", invoicedOn: "2026-03-01", reason: "x", expectedAmount: 99999 })
+    expect(bad.status).toBe(409)
+    expect(bad.body.error).toBe("invoiced_amount_mismatch")
+    const okAmount = await post(T.accountant, `/billings/${B2}/reinvoice`, { invoiceNo: "ZZ00002003", invoicedOn: "2026-03-01", reason: "x", expectedAmount: 100000 })
+    expect(okAmount.status, JSON.stringify(okAmount.body)).toBe(200)
+    expect((await post(T.accountant, `/billings/${B1}/invoice`, { invoiceNo: "ZZ00002004" })).status).toBe(200)
+  })
+
+  it("未開票專案的正常流程全不誤擋：請款、取消請款、主合約改、追加減、改期程（帶版本）", async () => {
+    const codes: number[] = []
+    codes.push((await post(T.accountant, `/billings/${B1}/bill`, {})).status)
+    codes.push((await post(T.accountant, `/billings/${B1}/unbill`, { reason: "x" })).status)
+    codes.push((await request(app).put(`/projects/${PROJECT}/main-contract`).set("Authorization", `Bearer ${T.accountant}`).send({ amount: 300000 })).status)
+    codes.push((await request(app).post(`/projects/${PROJECT}/contracts`).set("Authorization", `Bearer ${T.accountant}`).send({ docType: "change_order", title: "追", amount: 1000 })).status)
+    codes.push((await request(app).put(`/projects/${PROJECT}/billings`).set("Authorization", `Bearer ${T.accountant}`).send({ installments: [item(billing(B1), { percentage: 30 }), item(billing(B2), { percentage: 70 })], expectedVersion: await gv() })).status)
+    expect(codes).toEqual([200, 200, 200, 201, 200])
+  })
+
+  it("開票（帶版本）→ 同頁舊版本開第 2 期 → 請款（等於試算）→ 入帳 → 舊版本存期程：全不 409；已開票期自己請款＝試算、取消請款也不需確認", async () => {
+    const v0 = await gv()
+    const a = await post(T.accountant, `/billings/${B1}/invoice`, { invoiceNo: "ZZ00002010", expectedVersion: v0, expectedAmount: 100000 })
+    const b = await post(T.accountant, `/billings/${B2}/invoice`, { invoiceNo: "ZZ00002011", expectedVersion: v0, expectedAmount: 100000 })
+    const c = await post(T.accountant, `/billings/${B1}/bill`, {})
+    const d = await post(T.accountant, `/billings/${B1}/receive`, {})
+    const e = await request(app).put(`/projects/${PROJECT}/billings`).set("Authorization", `Bearer ${T.accountant}`).send({ installments: [item(billing(B1)), item(billing(B2))], expectedVersion: v0 })
+    expect([a.status, b.status, c.status, d.status, e.status], JSON.stringify([c.body, d.body, e.body])).toEqual([200, 200, 200, 200, 200])
+    expect((await post(T.accountant, `/billings/${B2}/bill`, {})).status).toBe(200)
+    const u = await post(T.accountant, `/billings/${B2}/unbill`, { reason: "x" })
+    expect(u.status, JSON.stringify(u.body)).toBe(200)
+  })
+
+  it("沒有合約、有效金額為空的已開票期自己請款（自訂金額）→ 不跳確認", async () => {
+    fake.db.contracts = []
+    Object.assign(billing(B2), { invoice_no: "ZZ00002020", invoiced_on: "2026-02-03", calculated_amount: null })
+    const r = await post(T.accountant, `/billings/${B2}/bill`, { billedAmount: 50000 })
+    expect(r.status, JSON.stringify(r.body)).toBe(200)
+  })
+
+  it("committed 409 後重送：請款已寫入 → 再送回 already_billed（不重複）；新增追加減已寫入 → 回 committed 讓前端清表單", async () => {
+    const arm = (table: string, method: "update" | "insert", onFirst: () => void) => {
+      const realFrom = fake.from.bind(fake)
+      let armed = true
+      return vi.spyOn(fake, "from").mockImplementation((tb: string) => {
+        const builder = realFrom(tb) as Row
+        if (tb === table && armed) {
+          const orig = builder[method]
+          builder[method] = (...args: unknown[]) => {
+            if (armed) {
+              armed = false
+              onFirst()
+            }
+            return orig(...args)
+          }
+        }
+        return builder as never
+      })
+    }
+    let spy = arm("project_billings", "update", () => Object.assign(billing(B2), { invoice_no: "ZZ00002030", invoiced_on: "2026-02-04" }))
+    let r
+    try {
+      r = await post(T.accountant, `/billings/${B1}/bill`, { billedAmount: 90000 })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(r.body).toMatchObject({ error: "conflict_retry", committed: true })
+    const again = await post(T.accountant, `/billings/${B1}/bill`, { billedAmount: 90000 })
+    expect(again.status).toBe(409)
+    expect(again.body.error).toBe("already_billed")
+
+    Object.assign(billing(B2), { invoice_no: null, invoiced_on: null })
+    spy = arm("contracts", "insert", () => Object.assign(billing(B2), { invoice_no: "ZZ00002031", invoiced_on: "2026-02-04" }))
+    try {
+      r = await request(app).post(`/projects/${PROJECT}/contracts`).set("Authorization", `Bearer ${T.accountant}`).send({ docType: "change_order", title: "追加二", amount: 20000 })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(r.status).toBe(409)
+    expect(r.body).toMatchObject({ error: "conflict_retry", committed: true })
+    expect(fake.db.contracts.filter((c: Row) => c.doc_type === "change_order" && c.title === "追加二")).toHaveLength(1)
+  })
+})

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { billingScheduleVersion } from "../billing-version";
-import { invoicedAckBodyOf, invoicedChangeLines, invoicedChangesOf } from "../invoiced-ack";
+import { COMMITTED_CONFLICT_MESSAGE, STALE_CONFLICT_MESSAGE, conflictKindOf, conflictMessageOf, invoicedAckBodyOf, invoicedChangeLines, invoicedChangesOf } from "../invoiced-ack";
+import { humanizeBillingError } from "../projects-ext-api";
 
 /** 期程版本：後端 apps/api/src/lib/billing-version.ts 用同一組向量、同一個期望值，兩邊實作必須一致。 */
 const VECTOR = [
@@ -35,5 +36,24 @@ describe("已開票期別金額變動確認", () => {
       invoicedChangeReason: "折讓",
       acknowledgedChanges: [{ billingId: "b2", after: 110000 }],
     });
+  });
+});
+
+describe("409 conflict_retry：committed 與沒存", () => {
+  const committed = Object.assign(new Error("[409] conflict_retry"), { code: "conflict_retry", body: { error: "conflict_retry", committed: true } });
+  const stale = Object.assign(new Error("[409] conflict_retry"), { code: "conflict_retry", body: { error: "conflict_retry" } });
+  it("依 body.committed 分兩種訊息；其他錯誤 null", () => {
+    expect(conflictKindOf(committed)).toBe("committed");
+    expect(conflictKindOf(stale)).toBe("stale");
+    expect(conflictKindOf(new Error("[409] already_billed"))).toBeNull();
+    expect(conflictMessageOf(committed)).toBe(COMMITTED_CONFLICT_MESSAGE);
+    expect(conflictMessageOf(stale)).toBe(STALE_CONFLICT_MESSAGE);
+    expect(COMMITTED_CONFLICT_MESSAGE).toContain("已存檔");
+  });
+  it("期程錯誤訊息：conflict_retry 兩種、金額已變用後端訊息", () => {
+    expect(humanizeBillingError(committed, "x")).toBe(COMMITTED_CONFLICT_MESSAGE);
+    expect(humanizeBillingError(stale, "x")).toBe(STALE_CONFLICT_MESSAGE);
+    const mismatch = Object.assign(new Error("[409] invoiced_amount_mismatch"), { code: "invoiced_amount_mismatch", serverMessage: "此期金額已變為 150,000，請重新整理確認後再開票。" });
+    expect(humanizeBillingError(mismatch, "x")).toContain("150,000");
   });
 });

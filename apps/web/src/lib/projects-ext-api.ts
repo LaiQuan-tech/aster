@@ -12,6 +12,7 @@
  */
 import { similarNameConflict, similarNameErrorText, similarNamePrompt } from "./vendor-name-binding"
 import { apiFetch, apiDownload } from "./api-client"
+import { conflictMessageOf } from "./invoiced-ack"
 import type { ProjectRegisterCells } from "./project-register"
 import type {
   Project, ProjectStatus, ShareMode, Installment, InstallmentInput, DocType, OurRole, Contract,
@@ -527,14 +528,14 @@ export function unbillInstallmentExt(id: string, reason: string, ack?: InvoicedA
   return apiFetch<BillingScheduleExt>(`/billings/${id}/unbill`, { method: "POST", body: JSON.stringify({ reason, ...(ack ?? {}) }) })
 }
 /** expectedVersion：登記時看到的期程版本（樂觀鎖，期程剛被改過 → 409 conflict_retry）。 */
-export function invoiceBilling(id: string, body: { invoiceNo: string; invoicedOn?: string; expectedVersion?: string }) {
+export function invoiceBilling(id: string, body: { invoiceNo: string; invoicedOn?: string; expectedVersion?: string; expectedAmount?: number | null }) {
   return apiFetch<BillingScheduleExt>(`/billings/${id}/invoice`, { method: "POST", body: JSON.stringify(body) })
 }
 export function uninvoiceBilling(id: string, reason: string) {
   return apiFetch<BillingScheduleExt>(`/billings/${id}/uninvoice`, { method: "POST", body: JSON.stringify({ reason }) })
 }
 /** 修正開票（2026-11-18）：同一請求內撤銷舊登記並寫入新號碼／日期；理由必填，備註與稽核留新舊值。 */
-export function reinvoiceBilling(id: string, body: { invoiceNo: string; invoicedOn: string; reason: string; expectedVersion?: string }) {
+export function reinvoiceBilling(id: string, body: { invoiceNo: string; invoicedOn: string; reason: string; expectedVersion?: string; expectedAmount?: number | null }) {
   return apiFetch<BillingScheduleExt>(`/billings/${id}/reinvoice`, { method: "POST", body: JSON.stringify(body) })
 }
 export function receiveBilling(id: string, body: { receivedOn?: string; receivedAmount?: number | null } = {}) {
@@ -557,7 +558,7 @@ export const BILLING_ERRORS: Record<string, string> = {
   invoiced_amount_would_change: "這次修改會讓已開發票的期別金額變動（例如它在吸收尾差），請調整其他期別讓該期金額不變，或先撤銷該期開票。",
   advance_not_invoiceable: "技師公會代墊（代墊款）不開發票。",
   invoiced_change_reason_required: "確認已開票期別金額變動時必須填理由。",
-  conflict_retry: "期程已被其他人更新，請重新整理後再確認（若畫面顯示已存檔，已開票期別的金額變動已記在該期備註）。",
+  invoiced_amount_mismatch: "此期金額已變動，請重新整理確認後再開票。",
   received: "已入帳的期別金額已凍結，不能移除或改百分比／覆寫金額。",
   duplicate_installment_no: "期別編號重複。",
   installment_no_taken: "期別編號已存在。",
@@ -571,6 +572,11 @@ export const BILLING_ERRORS: Record<string, string> = {
   reason_required: "請填理由。",
 }
 export function humanizeBillingError(err: unknown, fallback: string): string {
+  // conflict_retry 依 committed 分兩種：已存檔（勿重送）／沒存（請重新整理）。
+  const conflict = conflictMessageOf(err)
+  if (conflict) return conflict
+  const amountChanged = (err as { code?: string; serverMessage?: string } | null)
+  if (amountChanged?.code === "invoiced_amount_mismatch" && amountChanged.serverMessage) return amountChanged.serverMessage
   const msg = err instanceof Error ? err.message : fallback
   for (const [code, text] of Object.entries(BILLING_ERRORS)) {
     if (msg.includes(code)) return text

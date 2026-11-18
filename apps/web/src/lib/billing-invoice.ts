@@ -43,7 +43,9 @@ export function humanizeReinvoiceError(code: string | null | undefined): string 
     case "unchanged":
       return "新的發票號碼與日期跟原本一樣。";
     case "conflict_retry":
-      return "期程已被其他人更新，請重新整理後再修正。";
+      return "資料已被他人更新，請重新整理後再試。";
+    case "invoiced_amount_mismatch":
+      return "此期金額已變動，請重新整理確認後再修正。";
     case "invoice_changed":
       return "這一期的發票剛被別人改過，請重新整理後再修正。";
     case "forbidden":

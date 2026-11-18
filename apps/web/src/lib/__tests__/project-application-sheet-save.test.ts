@@ -347,7 +347,8 @@ describe("付款階段", () => {
     const ctx = ctxOf({ billings })
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: " AB12345678 ", invoicedOn: "2026-10-27", receivedOn: "2026-10-28" } } }))
     expect(plan.stages.installments).toBeNull()
-    expect(plan.stages.invoices).toEqual([{ key: "b1", label: "第 1 列", invoiceNo: "AB12345678", invoicedOn: "2026-10-27" }])
+    // amount＝畫面上的該期金額（開票時給後端比對，期間被改過 → 409 invoiced_amount_mismatch）。
+    expect(plan.stages.invoices).toEqual([{ key: "b1", label: "第 1 列", invoiceNo: "AB12345678", invoicedOn: "2026-10-27", amount: 30000 }])
     expect(plan.dirtyCount).toBe(2)
   })
 
@@ -515,6 +516,21 @@ function fakeApi(over: Partial<SheetSaveApi> = {}): SheetSaveApi & { calls: stri
   }
   return api as SheetSaveApi & { calls: string[] }
 }
+
+describe("開票帶畫面金額（2026-11-18）", () => {
+  it("這次沒動期程、沒改銷售金額：開票帶畫面上的該期金額；有改期程或銷售金額：不帶（金額本來就會照新期程變）", async () => {
+    const ctx = ctxOf({ billings: [fakeBilling({})], contracts: [fakeContract({})], money: fakeMoney({ amountUntaxed: 100000, amountSource: "contract" }) })
+    const onlyInvoice = draftOf(ctx, { stageEdits: { b1: { invoiceNo: "AB00000009" } } })
+    const api = fakeApi()
+    await runApplicationSheetSave(applicationSheetPlan(ctx, onlyInvoice), onlyInvoice, api)
+    expect(api.invoiceBilling).toHaveBeenCalledWith("b1", "AB00000009", undefined, 30000)
+
+    const withTotal = draftOf(ctx, { amountUntaxed: "110000", stageEdits: { b1: { invoiceNo: "AB00000010" } } })
+    const api2 = fakeApi()
+    await runApplicationSheetSave(applicationSheetPlan(ctx, withTotal), withTotal, api2)
+    expect(api2.invoiceBilling).toHaveBeenCalledWith("b1", "AB00000010", undefined, undefined)
+  })
+})
 
 describe("依序儲存與失敗回報", () => {
   const ctx = ctxOf({

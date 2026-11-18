@@ -108,6 +108,20 @@ export function BillingsCard({
     return !!saved && ((row.overrideAmount ?? null) !== (saved.overrideAmount ?? null) || (row.overrideReason ?? "") !== (saved.overrideReason ?? ""));
   });
 
+  /**
+   * 出錯後重新載入再顯示訊息（2026-11-18）：409 conflict_retry 若 committed（後端其實已寫入）要清掉草稿、不能重送；
+   * 其他錯誤也重新載入，畫面跟後端一致（load() 會用已存檔的值重建草稿）。
+   */
+  async function failAndReload(err: unknown, fallback: string) {
+    const message = humanizeBillingError(err, humanError(err, fallback));
+    try {
+      await load();
+    } catch {
+      // 重新載入失敗：至少把原本的錯誤訊息顯示出來
+    }
+    setError(message);
+  }
+
   async function saveSchedule() {
     setSavingSchedule(true);
     setError(null);
@@ -126,7 +140,7 @@ export function BillingsCard({
       const notices = billingSaveNotices(res.warnings);
       if (notices.length > 0) setError(notices.join(" "));
     } catch (err) {
-      setError(humanizeBillingError(err, humanError(err, "儲存人工指定金額失敗")));
+      await failAndReload(err, "儲存人工指定金額失敗");
     } finally {
       setSavingSchedule(false);
     }
@@ -138,7 +152,7 @@ export function BillingsCard({
       setSchedule(await invoicedAck.run((ack) => billInstallmentExt(id, {}, ack)));
       await load();
     } catch (err) {
-      setError(humanizeBillingError(err, humanError(err, "標記請款失敗")));
+      await failAndReload(err, "標記請款失敗");
     }
   }
 
@@ -150,7 +164,7 @@ export function BillingsCard({
       setSchedule(await invoicedAck.run((ack) => unbillInstallmentExt(id, reason.trim(), ack)));
       await load();
     } catch (err) {
-      setError(humanizeBillingError(err, "取消請款失敗"));
+      await failAndReload(err, "取消請款失敗");
     }
   }
 
@@ -162,12 +176,15 @@ export function BillingsCard({
     setError(null);
     try {
       const expectedVersion = schedule ? (schedule.version ?? billingScheduleVersion(schedule.installments)) : undefined;
-      setSchedule(await invoiceBilling(id, { invoiceNo: invoiceNo.trim(), invoicedOn, expectedVersion }));
+      // 畫面上看到的這一期金額：期間被改過（合約、別期請款讓尾差換人）→ 409 invoiced_amount_mismatch，不會開出跟畫面不同的金額。
+      const shown = schedule?.installments.find((i) => i.id === id);
+      const expectedAmount = shown ? shown.effectiveAmount : undefined;
+      setSchedule(await invoiceBilling(id, { invoiceNo: invoiceNo.trim(), invoicedOn, expectedVersion, expectedAmount }));
       setInvoiceFormId(null);
       setInvoiceNo("");
       await load();
     } catch (err) {
-      setError(humanizeBillingError(err, "標記開票失敗"));
+      await failAndReload(err, "標記開票失敗");
     }
   }
   async function cancelInvoice(id: string) {

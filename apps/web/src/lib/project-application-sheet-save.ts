@@ -285,7 +285,8 @@ export interface StagePlan {
    * 空殼上有沒有獎金分潤；後端回 409 billing_has_bonus_shares 時，存檔會把這些列放回去重送一次（保留、不擋存）。
    */
   autoShells: InstallmentInputExt[];
-  invoices: Array<{ key: string; label: string; invoiceNo: string; invoicedOn: string }>;
+  /** amount：畫面上看到的該期金額（只有既有、這次沒改期程的列才帶；開票時給後端比對，期間被改過 → 409 invoiced_amount_mismatch）。 */
+  invoices: Array<{ key: string; label: string; invoiceNo: string; invoicedOn: string; amount?: number | null }>;
   receipts: Array<{ key: string; label: string; receivedOn: string }>;
   /** 改了金額、要使用者填人工指定理由的列（沒有合約總額、只能人工指定時；沒有既有理由可沿用）。 */
   needsReason: Array<{ key: string; label: string }>;
@@ -608,7 +609,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     if (row.id) {
       if (rowScheduleChanges === 0) {
         if (receivedOn && dateRe.test(receivedOn)) out.receipts.push({ key, label, receivedOn });
-        if (invoiceNo) out.invoices.push({ key, label, invoiceNo, invoicedOn: dateRe.test(invoicedOn) ? invoicedOn : "" });
+        if (invoiceNo) out.invoices.push({ key, label, invoiceNo, invoicedOn: dateRe.test(invoicedOn) ? invoicedOn : "", amount: row.amount });
         continue;
       }
       const target = payload.find((p) => p.id === row.id);
@@ -1044,7 +1045,7 @@ export interface SheetSaveApi {
   saveBillingSchedule(
     installments: InstallmentInputExt[],
   ): Promise<{ installments: Array<{ id: string; installmentNo: number; kind?: string | null }>; warnings?: ReadonlyArray<BillingScheduleWarning> }>;
-  invoiceBilling(id: string, invoiceNo: string, invoicedOn?: string): Promise<unknown>;
+  invoiceBilling(id: string, invoiceNo: string, invoicedOn?: string, expectedAmount?: number | null): Promise<unknown>;
   receiveBilling(id: string, receivedOn: string): Promise<unknown>;
   /** deleteReason：這次有移除既有副委託（payload 沒帶到的列）時必帶。 */
   putSubcontracts(subcontracts: Subcontract[], deleteReason?: string): Promise<unknown>;
@@ -1330,7 +1331,9 @@ export async function runApplicationSheetSave(
       steps.push({ section: "invoice", label, status: "skipped", message: "銷售金額沒存成，這格未送出（避免用舊金額登記）。" });
       continue;
     }
-    if (await attempt("invoice", label, () => api.invoiceBilling(id, inv.invoiceNo, inv.invoicedOn || undefined).then(() => undefined))) { dropStageField(inv.key, "invoiceNo"); dropStageField(inv.key, "invoicedOn"); }
+    // 這次存檔沒動期程、也沒改銷售金額時才帶畫面金額比對（有動的話金額本來就會照新期程變）。
+    const expectedAmount = !stages.installments && draft.amountUntaxed === null && inv.amount !== undefined ? inv.amount : undefined;
+    if (await attempt("invoice", label, () => api.invoiceBilling(id, inv.invoiceNo, inv.invoicedOn || undefined, expectedAmount).then(() => undefined))) { dropStageField(inv.key, "invoiceNo"); dropStageField(inv.key, "invoicedOn"); }
   }
   for (const rc of stages.receipts) {
     const label = `付款階段${rc.label}入帳日期`;

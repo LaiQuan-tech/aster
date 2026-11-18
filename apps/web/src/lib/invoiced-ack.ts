@@ -49,3 +49,29 @@ export function invoicedAckBodyOf(reason: string, changes: readonly InvoicedAmou
       }
     : null;
 }
+
+/* ── 409 conflict_retry：已存檔（committed）與沒存兩種 ──────────────────── */
+
+export const COMMITTED_CONFLICT_MESSAGE = "已存檔，但期程在存檔期間被其他操作變動，請核對發票。";
+export const STALE_CONFLICT_MESSAGE = "資料已被他人更新，請重新整理後再試。";
+
+/**
+ * 409 conflict_retry 的兩種情形（2026-11-18）：
+ *   • committed＝後端其實已寫入（期間有人開票／改期程，已開票期別金額未經確認變動；已記在該期備註與稽核）→
+ *     不能重送（會造成合約／報價單重複），要清掉草稿、重新載入。
+ *   • stale＝沒寫入（期程版本不符），請重新整理後再試。
+ * 其他錯誤回 null。
+ */
+export function conflictKindOf(err: unknown): "committed" | "stale" | null {
+  const e = err as { code?: string; body?: unknown; message?: string } | null;
+  if (!e) return null;
+  const isConflict = e.code === "conflict_retry" || (typeof e.message === "string" && e.message.includes("conflict_retry"));
+  if (!isConflict) return null;
+  const body = (e.body && typeof e.body === "object" ? e.body : {}) as { committed?: unknown };
+  return body.committed === true ? "committed" : "stale";
+}
+
+export function conflictMessageOf(err: unknown): string | null {
+  const kind = conflictKindOf(err);
+  return kind === "committed" ? COMMITTED_CONFLICT_MESSAGE : kind === "stale" ? STALE_CONFLICT_MESSAGE : null;
+}

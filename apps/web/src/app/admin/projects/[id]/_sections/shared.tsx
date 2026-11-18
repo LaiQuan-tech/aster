@@ -4,6 +4,7 @@
  */
 import type { Dispatch, SetStateAction } from "react";
 import { formatMoney } from "@/lib/money";
+import { conflictMessageOf } from "@/lib/invoiced-ack";
 import {
   type Subcontract,
   type SubcontractsResponse,
@@ -21,6 +22,8 @@ export const STATUS_ERRORS: Record<string, string> = {
   override_reason_required: "人工指定金額必須填理由——偏離期程的金額是談出來的，要留得下痕跡。",
   billed_installment_not_removable: "已請款的期別不能移除。帳已經出去了，移掉那筆應收會憑空消失。",
   invoiced_installment_not_removable: "已開發票的期別不能移除。請先撤銷開票再移除。",
+  conflict_retry: "資料已被他人更新，請重新整理後再試。",
+  invoiced_amount_mismatch: "此期金額已變動，請重新整理確認後再開票。",
   invoiced_frozen: "已開發票的期別金額已凍結，不能改百分比／金額；要改請先撤銷開票或用「修正」換發票。",
   invoiced_amount_would_change: "這次修改會讓已開發票的期別金額變動（例如它在吸收尾差），請調整其他期別讓該期金額不變，或先撤銷該期開票。",
   advance_not_invoiceable: "技師公會代墊（代墊款）不開發票。",
@@ -62,6 +65,9 @@ export function emptyBillingSchedule(): BillingScheduleExt {
 }
 
 export function humanError(err: unknown, fallback: string): string {
+  // conflict_retry 依 committed 分兩種：已存檔（勿重送，請核對發票）／沒存（請重新整理後再試）。
+  const conflict = conflictMessageOf(err);
+  if (conflict) return conflict;
   const msg = err instanceof Error ? err.message : fallback;
   for (const [code, text] of Object.entries(STATUS_ERRORS)) {
     if (msg.includes(code)) return text;

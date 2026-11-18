@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { BottomSheet, Button, ErrorText, Field, inputCls } from "@/components/admin-ui";
 import { humanizeReinvoiceError, reinvoiceInputError } from "@/lib/billing-invoice";
 import { reinvoiceBilling } from "@/lib/projects-ext-api";
+import { COMMITTED_CONFLICT_MESSAGE, conflictKindOf } from "@/lib/invoiced-ack";
 
 export interface ReinvoiceTarget {
   billingId: string;
@@ -13,6 +14,8 @@ export interface ReinvoiceTarget {
   invoicedOn: string | null;
   /** 開視窗時的期程版本（樂觀鎖；期程剛被改過 → 409 conflict_retry）。 */
   expectedVersion?: string;
+  /** 畫面上看到的這一期金額（期間被改過 → 409 invoiced_amount_mismatch）。 */
+  expectedAmount?: number | null;
 }
 
 /**
@@ -45,11 +48,19 @@ export function ReinvoiceDialog({ target, onClose, onDone }: { target: Reinvoice
     setBusy(true);
     setError(null);
     try {
-      await reinvoiceBilling(target.billingId, { invoiceNo: invoiceNo.trim(), invoicedOn: invoicedOn.trim(), reason: reason.trim(), expectedVersion: target.expectedVersion });
+      await reinvoiceBilling(target.billingId, { invoiceNo: invoiceNo.trim(), invoicedOn: invoicedOn.trim(), reason: reason.trim(), expectedVersion: target.expectedVersion, expectedAmount: target.expectedAmount });
       await onDone();
       onClose();
     } catch (err) {
-      setError(humanizeReinvoiceError((err as { code?: string } | null)?.code));
+      const e = err as { code?: string; serverMessage?: string } | null;
+      // 已存檔（committed）或金額已變：關掉視窗、重新載入，訊息留在畫面上提示。
+      if (conflictKindOf(err) === "committed") {
+        await onDone();
+        setError(COMMITTED_CONFLICT_MESSAGE);
+        return;
+      }
+      if (e?.code === "invoiced_amount_mismatch" || conflictKindOf(err) === "stale") await onDone();
+      setError(e?.code === "invoiced_amount_mismatch" && e.serverMessage ? e.serverMessage : humanizeReinvoiceError(e?.code));
     } finally {
       setBusy(false);
     }

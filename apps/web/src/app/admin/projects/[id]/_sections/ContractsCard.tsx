@@ -3,6 +3,7 @@
 import { Fragment, useId, type RefObject } from "react";
 import { MoneyInput } from "@/components/MoneyInput";
 import { useInvoicedAck } from "@/components/InvoicedAckDialog";
+import { conflictKindOf } from "@/lib/invoiced-ack";
 import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   uploadProjectDocument,
@@ -108,6 +109,27 @@ export function ContractsCard({
   /** 合約金額變動會讓已開票期別金額改變時（409），跳確認視窗、填理由後重送。 */
   const invoicedAck = useInvoicedAck();
 
+  /** 409 conflict_retry：committed（後端已寫入）或沒存都要重新載入；回 true＝已處理（呼叫端不再顯示其他訊息）。 */
+  async function handleConflict(err: unknown): Promise<boolean> {
+    if (!conflictKindOf(err)) return false;
+    try {
+      await load();
+    } catch {
+      // 重新載入失敗：照樣顯示訊息
+    }
+    setError(humanError(err, "儲存失敗"));
+    return true;
+  }
+
+  function resetAddForm() {
+    setCTitle("");
+    setCCounterparty("");
+    setCAmount("");
+    setCSignedOn("");
+    setCCopies("1");
+    setCContentNote("");
+  }
+
   async function addContract() {
     if (!cTitle.trim()) {
       setError("請輸入文件名稱");
@@ -127,14 +149,12 @@ export function ContractsCard({
         // 內容欄位只有有權者能寫（沒權限的人表單上根本沒有這欄；帶了後端也回 403）。
         ...(canSeeContractDocs && cContentNote.trim() ? { contentNote: cContentNote.trim() } : {}),
       }, ack));
-      setCTitle("");
-      setCCounterparty("");
-      setCAmount("");
-      setCSignedOn("");
-      setCCopies("1");
-      setCContentNote("");
+      resetAddForm();
       await load();
     } catch (err) {
+      // 已存檔（committed）：文件其實建好了，清掉表單避免重送造成重複。
+      if (conflictKindOf(err) === "committed") resetAddForm();
+      if (await handleConflict(err)) return;
       setError(humanError(err, "新增文件失敗"));
     } finally {
       setSavingContract(false);
@@ -160,6 +180,7 @@ export function ContractsCard({
       await invoicedAck.run((ack) => updateContract(c.id, { ourRole }, ack));
       await load();
     } catch (err) {
+      if (await handleConflict(err)) return;
       setError(humanError(err, "更新失敗"));
     }
   }
@@ -197,6 +218,7 @@ export function ContractsCard({
       await invoicedAck.run((ack) => deleteContract(c.id, reason.trim(), ack));
       await load();
     } catch (err) {
+      if (await handleConflict(err)) return;
       setError(humanError(err, "作廢失敗"));
     }
   }
