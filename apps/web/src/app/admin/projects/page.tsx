@@ -38,10 +38,10 @@ import {
 } from "@/lib/projects-ext-api";
 import {
   MASKED,
-  REGISTER_FROZEN_COLUMNS,
   SHOW_HIDDEN_STORAGE_KEY,
   excelWidthToPx,
   isTextSelected,
+  frozenRegisterColumnCount,
   registerRowCells,
   visibleRegisterColumns,
 } from "@/lib/project-register";
@@ -205,8 +205,9 @@ export default function AdminProjectsPage() {
   }
 
   const columns = visibleRegisterColumns(registerDisciplines, showHiddenColumns);
-  // 凍結欄（A:E）的 left 位移：前面各欄寬的累加。
-  const frozenLeft = columns.slice(0, REGISTER_FROZEN_COLUMNS).reduce<number[]>((acc, c, i) => {
+  // 凍結欄（原檔 A:E，畫面已移除項次＝專案單號…工程名稱）的 left 位移：前面各欄寬的累加。
+  const frozenCount = frozenRegisterColumnCount(columns);
+  const frozenLeft = columns.slice(0, frozenCount).reduce<number[]>((acc, c, i) => {
     acc.push(i === 0 ? 0 : acc[i - 1] + excelWidthToPx(columns[i - 1].width));
     return acc;
   }, []);
@@ -417,8 +418,8 @@ export default function AdminProjectsPage() {
                     <th
                       key={c.header}
                       scope="col"
-                      className={`sticky top-0 whitespace-nowrap border-b border-r border-gray-200 bg-gray-50 px-1.5 py-2 text-center text-xs font-medium text-gray-600 ${i < REGISTER_FROZEN_COLUMNS ? "z-30" : "z-20"}`}
-                      style={i < REGISTER_FROZEN_COLUMNS ? { left: frozenLeft[i] } : undefined}
+                      className={`sticky top-0 whitespace-nowrap border-b border-r border-gray-200 bg-gray-50 px-1.5 py-2 text-center text-xs font-medium text-gray-600 ${i < frozenCount ? "z-30" : "z-20"}`}
+                      style={i < frozenCount ? { left: frozenLeft[i] } : undefined}
                     >
                       {c.header}
                     </th>
@@ -454,7 +455,7 @@ export default function AdminProjectsPage() {
                       }}
                     >
                       {columns.map((c, i) => {
-                        const frozen = i < REGISTER_FROZEN_COLUMNS;
+                        const frozen = i < frozenCount;
                         const text = cells[c.index];
                         return (
                           <td

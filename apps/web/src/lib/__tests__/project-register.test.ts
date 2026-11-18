@@ -4,6 +4,7 @@ import {
   REGISTER_FIXED_HEADERS,
   REGISTER_FROZEN_COLUMNS,
   formatRegisterMoney,
+  frozenRegisterColumnCount,
   registerColumns,
   registerRowCells,
   visibleRegisterColumns,
@@ -41,15 +42,25 @@ describe("專案列表＝專案申請單總表欄位", () => {
     ]);
   });
 
-  it("I:N（已收帳款…發包）比照原檔預設隱藏，打開後全部顯示；index 仍對得到儲存格", () => {
+  it("I:N（已收帳款…發包）比照原檔預設隱藏，打開後全部顯示；畫面不畫項次；index 仍對得到儲存格", () => {
     const hidden = visibleRegisterColumns(["空調"], false);
     expect(hidden.map((c) => c.header)).toEqual([
-      "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註", "空調",
+      "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註", "空調",
     ]);
-    expect(hidden.map((c) => c.index)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 14, 15, 16]);
-    expect(visibleRegisterColumns(["空調"], true).map((c) => c.header)).toEqual([...REGISTER_FIXED_HEADERS, "空調"]);
-    // 沒有原檔以外的系統欄（狀態等）。
-    expect(visibleRegisterColumns([], true)).toHaveLength(16);
+    expect(hidden.map((c) => c.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 14, 15, 16]);
+    expect(visibleRegisterColumns(["空調"], true).map((c) => c.header)).toEqual([...REGISTER_FIXED_HEADERS.slice(1), "空調"]);
+    // 沒有原檔以外的系統欄（狀態等）；項次只在畫面移除。
+    expect(visibleRegisterColumns([], true)).toHaveLength(15);
+    expect(visibleRegisterColumns([], true).some((c) => c.header === "項次")).toBe(false);
+  });
+
+  it("項次移除後凍結欄＝專案單號…工程名稱（顯示／隱藏 I:N 都一樣）", () => {
+    for (const showHidden of [false, true]) {
+      const cols = visibleRegisterColumns(["空調"], showHidden);
+      expect(cols.slice(0, frozenRegisterColumnCount(cols)).map((c) => c.header)).toEqual([
+        "專案單號", "日期", "客戶", "工程名稱",
+      ]);
+    }
   });
 
   it("金額格式同原檔會計格式：千分位、0 顯示「-」、空值空白", () => {

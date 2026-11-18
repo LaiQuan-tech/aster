@@ -75,9 +75,22 @@ export function registerColumns(disciplines: string[]): RegisterColumn[] {
   return [...fixed, ...disc]
 }
 
-/** 畫面上要畫的欄：預設比照原檔藏起 I:N；`showHidden` 時全部顯示。 */
+/**
+ * 畫面上一律不畫的欄（0 起算）：A 項次（業主 2026-11-18：列表移除項次）。
+ * 只影響畫面；「下載 Excel」由後端產生，仍與原檔一模一樣保留項次。
+ */
+export const REGISTER_SCREEN_OMITTED_COLUMNS: readonly number[] = [0]
+
+/** 畫面上要畫的欄：預設比照原檔藏起 I:N；`showHidden` 時全部顯示（項次除外）。 */
 export function visibleRegisterColumns(disciplines: string[], showHidden: boolean): RegisterColumn[] {
-  return registerColumns(disciplines).filter((c) => showHidden || !c.hidden)
+  return registerColumns(disciplines).filter(
+    (c) => !REGISTER_SCREEN_OMITTED_COLUMNS.includes(c.index) && (showHidden || !c.hidden),
+  )
+}
+
+/** 畫面上凍結（sticky left）的欄數：原檔凍結 A:E 裡實際畫在畫面上的那幾欄（項次移除後＝專案單號…工程名稱）。 */
+export function frozenRegisterColumnCount(columns: readonly RegisterColumn[]): number {
+  return columns.filter((c) => c.index < REGISTER_FROZEN_COLUMNS).length
 }
 
 /** 「顯示隱藏欄」的記憶（每位使用者自己的瀏覽器）。 */
