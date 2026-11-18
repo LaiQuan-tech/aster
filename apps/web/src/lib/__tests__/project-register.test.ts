@@ -42,16 +42,17 @@ describe("專案列表＝專案申請單總表欄位", () => {
     ]);
   });
 
-  it("I:N（已收帳款…發包）比照原檔預設隱藏，打開後全部顯示；畫面不畫項次；index 仍對得到儲存格", () => {
-    const hidden = visibleRegisterColumns(["空調"], false);
+  it("I:N（已收帳款…發包）比照原檔預設隱藏，打開後全部顯示；畫面不畫項次與科別欄；index 仍對得到儲存格", () => {
+    const disc = ["電機", "空調", "消防", "汙水", "未分類"];
+    const hidden = visibleRegisterColumns(disc, false);
     expect(hidden.map((c) => c.header)).toEqual([
-      "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註", "空調",
+      "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註",
     ]);
-    expect(hidden.map((c) => c.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 14, 15, 16]);
-    expect(visibleRegisterColumns(["空調"], true).map((c) => c.header)).toEqual([...REGISTER_FIXED_HEADERS.slice(1), "空調"]);
-    // 沒有原檔以外的系統欄（狀態等）；項次只在畫面移除。
-    expect(visibleRegisterColumns([], true)).toHaveLength(15);
-    expect(visibleRegisterColumns([], true).some((c) => c.header === "項次")).toBe(false);
+    expect(hidden.map((c) => c.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 14, 15]);
+    expect(visibleRegisterColumns(disc, true).map((c) => c.header)).toEqual([...REGISTER_FIXED_HEADERS.slice(1)]);
+    // 沒有原檔以外的系統欄（狀態等）；項次、科別只在畫面移除（registerColumns 仍完整）。
+    expect(visibleRegisterColumns(disc, true)).toHaveLength(15);
+    expect(registerColumns(disc)).toHaveLength(21);
   });
 
   it("項次移除後凍結欄＝專案單號…工程名稱（顯示／隱藏 I:N 都一樣）", () => {

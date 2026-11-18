@@ -81,10 +81,17 @@ export function registerColumns(disciplines: string[]): RegisterColumn[] {
  */
 export const REGISTER_SCREEN_OMITTED_COLUMNS: readonly number[] = [0]
 
-/** 畫面上要畫的欄：預設比照原檔藏起 I:N；`showHidden` 時全部顯示（項次除外）。 */
+/**
+ * 畫面上要畫的欄：預設比照原檔藏起 I:N；`showHidden` 時全部顯示。
+ * 項次與科別發包欄（電機、空調、消防、汙水、未分類…）一律不畫（業主 2026-11-18）；
+ * 只影響畫面，「下載 Excel」由後端產生，仍保留這些欄。
+ */
 export function visibleRegisterColumns(disciplines: string[], showHidden: boolean): RegisterColumn[] {
   return registerColumns(disciplines).filter(
-    (c) => !REGISTER_SCREEN_OMITTED_COLUMNS.includes(c.index) && (showHidden || !c.hidden),
+    (c) =>
+      !REGISTER_SCREEN_OMITTED_COLUMNS.includes(c.index) &&
+      c.index < REGISTER_FIXED_HEADERS.length &&
+      (showHidden || !c.hidden),
   )
 }
 
