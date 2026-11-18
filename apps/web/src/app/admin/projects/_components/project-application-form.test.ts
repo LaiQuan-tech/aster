@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   defaultCompanyIdOf,
+  addProjectApplicationBilling,
   emptyProjectApplicationDraft,
+  removeProjectApplicationBilling,
+  PROJECT_NO_MAX,
   projectApplicationAmounts,
   projectApplicationErrors,
   projectApplicationSchedule,
@@ -367,5 +370,70 @@ describe("母案是選填（業主 2026-09-30 會議：拿掉「必須先有母�
   it("錯誤訊息：invalid_parent 說明三種不合法（非主案／自己／主案掛母案）；不再有 parent_required 的專屬訊息", () => {
     expect(humanizeProjectExtError(new Error("[400] invalid_parent"), "x")).toContain("必須是同租戶的主案");
     expect(humanizeProjectExtError(new Error("[400] parent_required"), "x")).toBe("[400] parent_required");
+  });
+});
+
+describe("2026-11-18 新建專案：專案編號與付款階段期數不限", () => {
+  it("專案編號：去頭尾空白送 projectNo，空白＝null，與專案序號 code 分開；超過上限擋下", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    Object.assign(draft, { name: "測試案", code: " AT-115-099 ", projectNo: "  業主-甲-12 " });
+    expect(toCreateProjectBody(draft)).toMatchObject({ code: "AT-115-099", projectNo: "業主-甲-12" });
+    expect(toCreateProjectBody({ ...draft, projectNo: "   " }).projectNo).toBeNull();
+    expect(projectApplicationErrors({ ...draft, projectNo: "x".repeat(PROJECT_NO_MAX + 1) })).toContain(`專案編號最多 ${PROJECT_NO_MAX} 字`);
+    expect(projectApplicationErrors({ ...draft, projectNo: "x".repeat(PROJECT_NO_MAX) })).toEqual([]);
+    // 沒有財務權限的人照樣可以填專案編號（不是金額欄位）。
+    expect(toAuthorizedCreateProjectBody(draft, { canFinance: false, canBonus: false }).projectNo).toBe("業主-甲-12");
+  });
+
+  it("＋ 新增一期兩次：插在技師公會代墊之前，期別自動編號到第 10 期（公會代墊變第 10 期）", () => {
+    let draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft = addProjectApplicationBilling(addProjectApplicationBilling(draft));
+    expect(draft.billings.map((row) => [row.installmentNo, row.kind, row.milestone])).toEqual([
+      [1, "installment", "訂金款"],
+      [2, "installment", "初步設計"],
+      [3, "installment", "五管核准"],
+      [4, "installment", "發包後"],
+      [5, "installment", "工程50%"],
+      [6, "installment", "施工驗收"],
+      [7, "installment", "候選綠建築證書"],
+      [8, "installment", ""],
+      [9, "installment", ""],
+      [10, "guild_advance", "技師公會代墊"],
+    ]);
+  });
+
+  it("新增期別納入比例合計與存檔 body；合計超過 100% 擋下", () => {
+    let draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "測試案";
+    draft.contractAmount = "1000000";
+    draft = addProjectApplicationBilling(addProjectApplicationBilling(draft));
+    draft.billings[5] = { ...draft.billings[5], percentage: "5" }; // 施工驗收 10 → 5
+    draft.billings[7] = { ...draft.billings[7], milestone: "追加設計", percentage: "3" };
+    draft.billings[8] = { ...draft.billings[8], milestone: "竣工圖", percentage: "2" };
+    const schedule = projectApplicationSchedule(draft);
+    expect(schedule.percentageTotal).toBe(100);
+    expect(schedule.effectiveTotal).toBe(1_000_000);
+    expect(schedule.rows.find((row) => row.installmentNo === 9)?.effectiveAmount).toBe(20_000);
+    expect(projectApplicationErrors(draft)).toEqual([]);
+    const body = toCreateProjectBody(draft);
+    expect(body.billings).toHaveLength(10);
+    expect(body.billings?.slice(7).map((row) => [row.installmentNo, row.kind, row.milestone, row.percentage])).toEqual([
+      [8, "installment", "追加設計", 3],
+      [9, "installment", "竣工圖", 2],
+      [10, "guild_advance", "技師公會代墊", null],
+    ]);
+    draft.billings[8] = { ...draft.billings[8], percentage: "10" };
+    expect(projectApplicationErrors(draft).join()).toContain("不可超過 100%");
+  });
+
+  it("移除：其餘期別重新編號；至少保留一期；不存在的期別不動", () => {
+    let draft = addProjectApplicationBilling(emptyProjectApplicationDraft("2026-10-01", []));
+    draft = removeProjectApplicationBilling(draft, 2);
+    expect(draft.billings.map((row) => row.installmentNo)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(draft.billings[1].milestone).toBe("五管核准");
+    expect(removeProjectApplicationBilling(draft, 99)).toBe(draft);
+    let one = { ...draft, billings: draft.billings.slice(0, 1) };
+    one = removeProjectApplicationBilling(one, 1);
+    expect(one.billings).toHaveLength(1);
   });
 });

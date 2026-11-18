@@ -26,7 +26,10 @@ import {
   type ProjectListItem,
 } from "@/lib/projects-ext-api";
 import {
+  PROJECT_NO_MAX,
+  addProjectApplicationBilling,
   emptyProjectApplicationDraft,
+  removeProjectApplicationBilling,
   projectApplicationAmounts,
   projectApplicationErrors,
   projectApplicationSchedule,
@@ -177,14 +180,18 @@ export function ProjectApplicationForm({
             <input className={inputCls} type="date" value={draft.openedOn} onChange={(event) => patch("openedOn", event.target.value)} />
           </div>
         </div>
-        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div>
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[2fr_1fr_1fr]">
+          <div className="sm:col-span-2 lg:col-span-1">
             <label className={labelCls}>工程名稱 *</label>
             <input className={inputCls} value={draft.name} onChange={(event) => patch("name", event.target.value)} placeholder="請輸入工程名稱" />
           </div>
           <div>
             <label className={labelCls}>專案序號</label>
             <input className={inputCls} value={draft.code} onChange={(event) => patch("code", event.target.value)} placeholder="留空由系統自動產生" />
+          </div>
+          <div>
+            <label className={labelCls} htmlFor="project-no">專案編號</label>
+            <input id="project-no" className={inputCls} value={draft.projectNo} maxLength={PROJECT_NO_MAX} onChange={(event) => patch("projectNo", event.target.value)} placeholder="選填（業主／客戶或內部編號）" />
           </div>
         </div>
       </div>
@@ -274,13 +281,17 @@ export function ProjectApplicationForm({
           </div>
           <div className={sheet.frame}>
             <table className={`min-w-[980px] ${sheet.table}`}>
-              <thead><tr><th className={`${sheet.th} whitespace-nowrap`}>期別</th><th className={`${sheet.th} whitespace-nowrap`}>名稱</th><th className={`${sheet.th} whitespace-nowrap`}>%</th><th className={`${sheet.th} whitespace-nowrap`}>預估金額</th><th className={`${sheet.th} whitespace-nowrap`}>指定金額</th><th className={`${sheet.th} whitespace-nowrap`}>指定理由</th><th className={`${sheet.th} whitespace-nowrap`}>預計日</th><th className={`${sheet.th} whitespace-nowrap`}>備註</th></tr></thead>
+              <thead><tr><th className={`${sheet.th} whitespace-nowrap`}>期別</th><th className={`${sheet.th} whitespace-nowrap`}>名稱</th><th className={`${sheet.th} whitespace-nowrap`}>%</th><th className={`${sheet.th} whitespace-nowrap`}>預估金額</th><th className={`${sheet.th} whitespace-nowrap`}>指定金額</th><th className={`${sheet.th} whitespace-nowrap`}>指定理由</th><th className={`${sheet.th} whitespace-nowrap`}>預計日</th><th className={`${sheet.th} whitespace-nowrap`}>備註</th><th className={`${sheet.th} whitespace-nowrap`}><span className="sr-only">移除</span></th></tr></thead>
               <tbody>{draft.billings.map((row, index) => {
                 const computed = schedule.rows.find((item) => item.installmentNo === row.installmentNo);
                 const update = (next: Partial<(typeof draft.billings)[number]>) => patch("billings", draft.billings.map((item, rowIndex) => rowIndex === index ? { ...item, ...next } : item));
-                return <tr key={row.installmentNo} className={sheet.row}><td className={`${sheet.td} text-center tabular-nums`}>{row.installmentNo}</td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.milestone} onChange={(event) => update({ milestone: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="number" min="0" max="100" step="any" value={row.percentage} onChange={(event) => update({ percentage: event.target.value })} /></td><td className={`${sheet.td} ${sheet.num} ${(computed?.effectiveAmount ?? 0) < 0 ? "bg-red-50 text-red-700" : ""}`}>{money(computed?.effectiveAmount ?? null)}{computed?.residueApplied ? <span className="ml-1 block text-[10px] text-amber-700">尾差 {computed.residueApplied > 0 ? "+" : ""}{computed.residueApplied.toLocaleString()}</span> : null}</td><td className={`${sheet.td} !p-1`}><MoneyInput className={sheet.input} value={row.overrideAmount} onValueChange={(v) => update({ overrideAmount: v })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.overrideReason} onChange={(event) => update({ overrideReason: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="date" value={row.plannedOn} onChange={(event) => update({ plannedOn: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.note} onChange={(event) => update({ note: event.target.value })} /></td></tr>;
+                return <tr key={row.installmentNo} className={sheet.row}><td className={`${sheet.td} text-center tabular-nums`}>{row.installmentNo}</td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.milestone} onChange={(event) => update({ milestone: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="number" min="0" max="100" step="any" value={row.percentage} onChange={(event) => update({ percentage: event.target.value })} /></td><td className={`${sheet.td} ${sheet.num} ${(computed?.effectiveAmount ?? 0) < 0 ? "bg-red-50 text-red-700" : ""}`}>{money(computed?.effectiveAmount ?? null)}{computed?.residueApplied ? <span className="ml-1 block text-[10px] text-amber-700">尾差 {computed.residueApplied > 0 ? "+" : ""}{computed.residueApplied.toLocaleString()}</span> : null}</td><td className={`${sheet.td} !p-1`}><MoneyInput className={sheet.input} value={row.overrideAmount} onValueChange={(v) => update({ overrideAmount: v })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.overrideReason} onChange={(event) => update({ overrideReason: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="date" value={row.plannedOn} onChange={(event) => update({ plannedOn: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.note} onChange={(event) => update({ note: event.target.value })} /></td><td className={`${sheet.td} text-center`}><button type="button" className="px-2 text-xs text-red-500 disabled:cursor-not-allowed disabled:text-slate-300" disabled={draft.billings.length <= 1} title={draft.billings.length <= 1 ? "至少保留一期" : `移除第 ${row.installmentNo} 期（其餘期別自動重新編號）`} onClick={() => setDraft((current) => removeProjectApplicationBilling(current, row.installmentNo))}>移除</button></td></tr>;
               })}</tbody>
             </table>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-500">期數不限：新增的期別排在技師公會代墊之前，期別自動編號；移除後其餘期別重新編號。</p>
+            <Button type="button" variant="secondary" size="sm" onClick={() => setDraft((current) => addProjectApplicationBilling(current))}>＋ 新增一期</Button>
           </div>
         </Section>
       ) : null}

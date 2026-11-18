@@ -246,9 +246,13 @@ export interface DesignScopeItem {
 
 /* ------------------------------------------------- 建案（新欄位）與取號 -- */
 
+export { PROJECT_NO_MAX, normalizeProjectNo } from "./project-no"
+
 export interface CreateProjectExtBody {
   name: string
   code?: string | null
+  /** 專案編號（自由輸入，≠ code 專案序號）；空字串／null＝清空。 */
+  projectNo?: string | null
   fiscalYear?: number | null
   description?: string | null
   deptId?: string | null
@@ -519,6 +523,10 @@ export function invoiceBilling(id: string, body: { invoiceNo: string; invoicedOn
 export function uninvoiceBilling(id: string, reason: string) {
   return apiFetch<BillingScheduleExt>(`/billings/${id}/uninvoice`, { method: "POST", body: JSON.stringify({ reason }) })
 }
+/** 修正開票（2026-11-18）：同一請求內撤銷舊登記並寫入新號碼／日期；理由必填，備註與稽核留新舊值。 */
+export function reinvoiceBilling(id: string, body: { invoiceNo: string; invoicedOn: string; reason: string }) {
+  return apiFetch<BillingScheduleExt>(`/billings/${id}/reinvoice`, { method: "POST", body: JSON.stringify(body) })
+}
 export function receiveBilling(id: string, body: { receivedOn?: string; receivedAmount?: number | null } = {}) {
   return apiFetch<BillingScheduleExt>(`/billings/${id}/receive`, { method: "POST", body: JSON.stringify(body) })
 }
@@ -534,6 +542,7 @@ export const BILLING_ERRORS: Record<string, string> = {
   unknown_billing: "有期別已不在本案期程裡（可能已被移除），請重新整理後再存。",
   duplicate_billing_id: "同一期別在期程裡出現兩次，請重新整理後再存。",
   billed_installment_not_removable: "已請款的期別不能移除。",
+  invoiced_installment_not_removable: "已開發票的期別不能移除，請先撤銷開票。",
   received: "已入帳的期別金額已凍結，不能移除或改百分比／覆寫金額。",
   duplicate_installment_no: "期別編號重複。",
   installment_no_taken: "期別編號已存在。",
@@ -976,6 +985,8 @@ export function putBillingShares(projectId: string, billings: BillingShareSetInp
 
 export interface UpdateProjectExtBody {
   name?: string
+  /** 專案編號（自由輸入，≠ code 專案序號）；空字串／null＝清空。 */
+  projectNo?: string | null
   fiscalYear?: number | null
   description?: string | null
   status?: ProjectStatus

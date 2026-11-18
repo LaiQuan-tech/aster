@@ -56,6 +56,7 @@ import {
   applicationSubcontractRows,
   subcontractHasPaid,
   latestOrderDocument,
+  stageRemoveBlockReason,
   stageRowKey,
   type ApplicationSheetDraft,
   type ApplicationStageRow,
@@ -262,8 +263,8 @@ export function stageLocks(row: ApplicationStageRow) {
     amount: received || row.billed,
     /** 已入帳的要先撤銷入帳（要理由）。 */
     receivedOn: received,
-    /** 已開票的要先撤銷開票（要理由）；公會代墊列那格在 Word 上是「審迄還款」。 */
-    invoiceNo: !!row.invoiceNo || row.kind === "guild_advance",
+    /** 已開票（號碼或日期任一有值）→ 鎖住，改用格子旁的「修正」（POST /billings/:id/reinvoice）；公會代墊列那格在 Word 上是「審迄還款」。 */
+    invoiceNo: !!row.invoiceNo || !!row.invoicedOn || row.kind === "guild_advance",
     /** 發票日期跟著開票走：已開票的要先撤銷開票；公會代墊列沒有發票。 */
     invoicedOn: !!row.invoiceNo || !!row.invoicedOn || row.kind === "guild_advance",
   };
@@ -289,6 +290,11 @@ export interface StagePlan {
   errors: SheetError[];
   /** 草稿裡對不到任何列的修改（那一列已被別處新增／移除）：不送出，提醒使用者。 */
   warnings: string[];
+}
+
+/** 申請單上實際畫出的付款階段列：既有／補版面的列＋「＋ 新增一期」多開的空白列（含標記移除的列）。 */
+export function sheetStageRows(billings: readonly BillingExt[], draft: Pick<ApplicationSheetDraft, "stageExtraRows">): ApplicationStageRow[] {
+  return applicationStageRows(billings, draft.stageExtraRows ?? 0);
 }
 
 function stageLabel(row: ApplicationStageRow): string {
@@ -351,7 +357,8 @@ function stageAmountMode(rows: readonly ApplicationStageRow[], draft: Applicatio
  */
 export function pinStageScreenAmounts(ctx: SheetSaveContext, draft: ApplicationSheetDraft): ApplicationSheetDraft {
   if (!ctx.canFinance) return draft;
-  const rows = applicationStageRows(ctx.billings);
+  const removedIds = new Set(draft.stageRemovedIds ?? []);
+  const rows = sheetStageRows(ctx.billings, draft).filter((r) => !(r.id && removedIds.has(r.id)));
   const total = stageContractTotal(ctx.money, ctx.contracts, draft);
   const savedTotal = ctx.money?.amountSource === "contract" ? (ctx.money.amountUntaxed ?? null) : null;
   if (!stageAmountMode(rows, draft, total, total !== null && total !== savedTotal)) return draft;
@@ -370,7 +377,8 @@ export function pinStageScreenAmounts(ctx: SheetSaveContext, draft: ApplicationS
 export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): StagePlan {
   const out: StagePlan = { installments: null, created: [], removed: [], autoShells: [], invoices: [], receipts: [], needsReason: [], changes: 0, errors: [], warnings: [] };
   if (!ctx.canFinance) return out;
-  const rows = applicationStageRows(ctx.billings);
+  const allRows = sheetStageRows(ctx.billings, draft);
+  const removedIds = new Set(draft.stageRemovedIds ?? []);
   const byId = new Map(ctx.billings.map((b) => [b.id, b]));
   const payload: InstallmentInputExt[] = ctx.billings.map((b) => ({
     id: b.id,
@@ -383,6 +391,26 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     overrideReason: b.overrideReason,
     note: b.note,
   }));
+  // 「移除」標記的既有期別（2026-11-18）：整批 PUT 不帶＝後端軟刪。已請款／開票／入帳的擋下（後端同樣 409）；
+  // 有分潤的由 sharePlan 決定（草稿已清空分潤＝先清再刪，否則擋存）。其餘列的修改照常處理。
+  let removedByMark = false;
+  for (const r of allRows) {
+    if (!r.id || !removedIds.has(r.id)) continue;
+    const key = stageRowKey(r);
+    const label = stageLabel(r);
+    const reason = stageRemoveBlockReason(r);
+    if (reason) {
+      out.errors.push({ field: `stage:${key}:milestone`, message: `付款階段${label}：${reason}` });
+      continue;
+    }
+    const target = payload.find((p) => p.id === r.id);
+    if (!target) continue;
+    payload.splice(payload.indexOf(target), 1);
+    out.removed.push({ key, label });
+    out.changes += 1;
+    removedByMark = true;
+  }
+  const rows = allRows.filter((r) => !(r.id && removedIds.has(r.id)));
   // 金額為主：有合約總額時，金額換成剛好算回同一金額的 % 存（後端以 % 試算），不必人工指定、不要理由。
   const total = stageContractTotal(ctx.money, ctx.contracts, draft);
   const savedTotal = ctx.money?.amountSource === "contract" ? (ctx.money.amountUntaxed ?? null) : null;
@@ -448,8 +476,8 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     }
   }
   let nextNo = ctx.billings.reduce((m, b) => Math.max(m, b.installmentNo), 0) + 1;
-  let scheduleChanged = false;
-  const rowKeys = new Set(rows.map(stageRowKey));
+  let scheduleChanged = removedByMark;
+  const rowKeys = new Set(allRows.map(stageRowKey));
   const orphans = Object.entries(draft.stageEdits).filter(
     ([key, edit]) => !rowKeys.has(key) && Object.values(edit).some((v) => trimmed(v) !== ""),
   );
@@ -845,7 +873,7 @@ export function sharePlan(
   const removedKeys = new Set(stages.removed.map((r) => r.key));
   const createdKeys = new Set(stages.created.map((c) => c.key));
   const predicted = predictedStageAmounts(ctx, draft, stages);
-  for (const row of applicationStageRows(ctx.billings)) {
+  for (const row of sheetStageRows(ctx.billings, draft)) {
     const key = stageRowKey(row);
     const set = shareSetOf(view, row.id);
     const label = stageLabel(row);
@@ -1247,6 +1275,8 @@ export async function runApplicationSheetSave(
       const nextShares: Record<string, ShareEdit> = {};
       for (const [key, edit] of Object.entries(residual.shareEdits ?? {})) nextShares[idOf.get(key) ?? key] = edit;
       residual = { ...residual, shareEdits: nextShares };
+      // 新增的期別已存成正式期別、標記移除的已刪：多開的空白列與移除標記歸零（重新載入後由期程本身畫出）。
+      residual = { ...residual, stageExtraRows: 0, stageRemovedIds: [] };
     }
   }
 

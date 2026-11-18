@@ -55,8 +55,10 @@ export function statusLabel(s: string | null): string {
 export interface Project {
   id: string
   name: string
-  /** 專案編號（識別碼，建立後不可變更）。 */
+  /** 專案序號（系統識別碼，如 AT-115-004；可經 PATCH /projects/:id/code 手動調整）。 */
   code: string | null
+  /** 專案編號（2026-11-18）：序號之外可自由輸入的另一套編號（業主／客戶或內部），選填、不唯一、≤100 字。舊版 API 沒回＝缺席。 */
+  projectNo?: string | null
   /** 歸屬年度（分析維度，可調整）。 */
   fiscalYear: number | null
   description: string | null

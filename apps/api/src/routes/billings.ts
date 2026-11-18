@@ -82,6 +82,21 @@ const invoiceSchema = z.object({
   invoicedOn: z.string().regex(dateRe).optional(),
 })
 
+/** 修正開票（2026-11-18）：新號碼、新日期、理由全部必填。 */
+const reinvoiceSchema = z.object({
+  invoiceNo: z.string().trim().min(1).max(40),
+  invoicedOn: z.string().regex(dateRe),
+  reason: z.string().trim().min(1).max(500),
+})
+
+/**
+ * 這一期算不算「已開票」：發票號碼或發票日期任一有值（2026-11-18）。
+ * 舊資料可能只有號碼沒有日期（或反過來）；只看日期會讓「有號無日期」的期別既撤銷不了、也修正不了。
+ */
+export function isInvoicedBilling(row: { invoice_no: string | null; invoiced_on: string | null }): boolean {
+  return !!row.invoiced_on || (row.invoice_no ?? "").trim() !== ""
+}
+
 const receiveSchema = z.object({
   receivedOn: z.string().regex(dateRe).optional(),
   /** 省略時＝該期有效金額（未稅）。部分收款／折讓要明確帶。 */
@@ -231,7 +246,7 @@ billingsRouter.get(
  * 語意：
  *   • 有 id → 更新
  *   • 無 id → 新增
- *   • 既有列不在 payload 裡 → 軟刪除；**已請款的不可移除**（409）
+ *   • 既有列不在 payload 裡 → 軟刪除；**已請款的不可移除**（409）；已開發票的也不可移除（409 `invoiced_installment_not_removable`）
  *   • **已入帳的期別不可改金額也不可移除**（409 `received`）——錢已經進來了，
  *     那一期的金額就是對帳的依據，改了等於改歷史。
  *   • 已設定每期獎金分潤／發獎金日的期別不可移除（409 `billing_has_bonus_shares`，2026-11-11）。
@@ -321,6 +336,15 @@ billingsRouter.put(
         res.status(409).json({
           error: "billed_installment_not_removable",
           installmentNo: billedRemoval.installment_no,
+        })
+        return
+      }
+      // 已開發票（含先開票、尚未請款）的期別也不可移除：發票已經開出去，移掉會讓那張發票對不到期別（2026-11-18）。
+      const invoicedRemoval = removing.find((r) => r.invoiced_on !== null || (r.invoice_no ?? "") !== "")
+      if (invoicedRemoval) {
+        res.status(409).json({
+          error: "invoiced_installment_not_removable",
+          installmentNo: invoicedRemoval.installment_no,
         })
         return
       }
@@ -632,7 +656,7 @@ billingsRouter.post(
         return
       }
       const row = loaded.row
-      if (row.invoiced_on) {
+      if (isInvoicedBilling(row)) {
         res.status(409).json({ error: "already_invoiced" })
         return
       }
@@ -699,13 +723,13 @@ billingsRouter.post(
         return
       }
       const row = loaded.row
-      if (!row.invoiced_on) {
+      if (!isInvoicedBilling(row)) {
         res.status(409).json({ error: "not_invoiced" })
         return
       }
       const note = appendNote(
         row.note,
-        `撤銷開票（原 ${row.invoiced_on} 發票 ${row.invoice_no ?? "-"}）：${parsed.data.reason}`,
+        `撤銷開票（原 ${row.invoiced_on ?? "-"} 發票 ${row.invoice_no ?? "-"}）：${parsed.data.reason}`,
       )
       const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
@@ -733,6 +757,97 @@ billingsRouter.post(
         newRow: { invoice_no: null, invoiced_on: null, reason: parsed.data.reason },
         actorEmpId: loaded.self.id,
         context: "POST /billings/:id/uninvoice",
+      })
+      await respondSchedule(tenantId, row.project_id, res)
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// ── POST /billings/:id/reinvoice — 修正開票（撤銷＋重新登記一次完成），必填理由 ──
+/**
+ * 2026-11-18 業主：申請單上已開票的發票號碼／日期被鎖住，不知道怎麼改。系統沒有電子發票串接，發票號碼只是
+ * 手動登記（project_billings.invoice_no／invoiced_on），所以「修正」＝同一個請求內撤銷舊登記並寫入新號碼／日期：
+ *   • 權限同 uninvoice（loadBillingForWrite：本期所屬專案的 finance）。
+ *   • 必須已開票（號碼或日期任一有值）→ 否則 409 not_invoiced；新值與舊值完全相同 → 400 unchanged。
+ *   • 條件寫入：只在發票號碼／日期仍是讀到的舊值時更新；期間被別人改過（並發）→ 409 invoice_changed，不覆蓋。
+ *   • 該期備註追加一行「修正開票（原 日期 發票 號碼 → 新 日期 發票 號碼）：理由」，稽核留新舊值與理由。
+ */
+billingsRouter.post(
+  "/billings/:id/reinvoice",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    const parsed = reinvoiceSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      const missingReason = !parsed.error.issues.some((i) => i.path[0] !== "reason")
+      res.status(400).json(missingReason ? { error: "reason_required" } : { error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const loaded = await loadBillingForWrite(tenantId, userId, req.params.id as string)
+      if (!loaded.ok) {
+        res.status(loaded.status).json({ error: loaded.error })
+        return
+      }
+      const row = loaded.row
+      if (!isInvoicedBilling(row)) {
+        res.status(409).json({ error: "not_invoiced" })
+        return
+      }
+      const { invoiceNo, invoicedOn, reason } = parsed.data
+      if (invoiceNo === (row.invoice_no ?? "").trim() && invoicedOn === row.invoiced_on) {
+        res.status(400).json({ error: "unchanged" })
+        return
+      }
+      const note = appendNote(
+        row.note,
+        `修正開票（原 ${row.invoiced_on ?? "-"} 發票 ${row.invoice_no ?? "-"} → 新 ${invoicedOn} 發票 ${invoiceNo}）：${reason}`,
+      )
+      let query = supabaseAdmin
+        .from("project_billings")
+        .update({ invoice_no: invoiceNo, invoiced_on: invoicedOn, note })
+        .eq("tenant_id", tenantId)
+        .eq("project_id", row.project_id)
+        .eq("id", row.id)
+        .is("deleted_at", null)
+      // 並發保護：發票欄位仍是讀到的舊值才寫（null 要用 is）。
+      query = row.invoice_no === null ? query.is("invoice_no", null) : query.eq("invoice_no", row.invoice_no)
+      query = row.invoiced_on === null ? query.is("invoiced_on", null) : query.eq("invoiced_on", row.invoiced_on)
+      const { data: updated, error } = await query.select("id")
+      if (error) {
+        next(new Error(`POST /billings/${req.params.id}/reinvoice: ${error.message}`))
+        return
+      }
+      if (!updated || updated.length === 0) {
+        // 0 列：被刪除 → 404；還在 → 發票欄位已被別人改過 → 409。
+        const { data: still } = await supabaseAdmin
+          .from("project_billings")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .eq("id", row.id)
+          .is("deleted_at", null)
+          .maybeSingle()
+        if (!still) res.status(404).json(BILLING_GONE_BODY)
+        else res.status(409).json({ error: "invoice_changed" })
+        return
+      }
+      await writeAuditLog({
+        tenantId,
+        tableName: "project_billings",
+        recordId: row.id,
+        action: "UPDATE",
+        oldRow: { invoice_no: row.invoice_no, invoiced_on: row.invoiced_on },
+        newRow: { invoice_no: invoiceNo, invoiced_on: invoicedOn, reason },
+        actorEmpId: loaded.self.id,
+        context: "POST /billings/:id/reinvoice",
       })
       await respondSchedule(tenantId, row.project_id, res)
     } catch (err) {

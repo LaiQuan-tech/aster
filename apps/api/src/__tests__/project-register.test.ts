@@ -8,6 +8,7 @@ function row(projectId: string, over: Partial<AnnualRow> = {}): AnnualRow {
     seq: 0,
     projectId,
     code: `XX-100-${projectId}`,
+    projectNo: null,
     dateRoc: "100.2.3",
     createdOn: "2011-02-03",
     clientName: "假客戶",

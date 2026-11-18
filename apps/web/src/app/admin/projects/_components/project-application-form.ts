@@ -1,6 +1,7 @@
 import type { ProjectMemberRole, ShareMode } from "@/lib/projects-api";
 // 相對路徑：vitest 沒設 `@/` 別名，純函式測試要能直接載入這支檔案。
 import { defaultActiveCompanyId } from "../../../../lib/company-options";
+import { PROJECT_NO_MAX } from "../../../../lib/project-no";
 import { parseRoleSharePctDraft, roleSharePctDraftOf, type RoleSharePct } from "../../../../lib/project-share-calculation";
 import type {
   BillingKind,
@@ -9,6 +10,8 @@ import type {
   PaymentMethod,
   ProjectKind,
 } from "@/lib/projects-ext-api";
+
+export { PROJECT_NO_MAX };
 
 export interface ProjectApplicationScopeDraft {
   discipline: string;
@@ -36,6 +39,8 @@ export interface ProjectApplicationEngineerDraft {
 export interface ProjectApplicationDraft {
   name: string;
   code: string;
+  /** 專案編號（≠ 專案序號 code）：自由輸入、選填；送出時去頭尾空白、空字串＝不送值（null）。 */
+  projectNo: string;
   /** 承接公司（申請單左上角）。"" ＝ 使用者還沒選，送出時用 `selectedCompanyId` 解出預設公司。 */
   companyId: string;
   openedOn: string;
@@ -77,6 +82,46 @@ const DEFAULT_STAGES: ReadonlyArray<Pick<ProjectApplicationBillingDraft, "kind" 
   { kind: "guild_advance", milestone: "技師公會代墊", percentage: "" },
 ];
 
+/** 預設付款階段數（訂金款…技師公會代墊）。付款階段不限期數（2026-11-18 業主），這只是起始模板。 */
+export const DEFAULT_STAGE_COUNT = DEFAULT_STAGES.length;
+
+/** 依陣列順序把期別重新編成 1…n（新增／移除後期別自動編號，不跳號）。 */
+function renumberBillings(rows: readonly ProjectApplicationBillingDraft[]): ProjectApplicationBillingDraft[] {
+  return rows.map((row, index) => (row.installmentNo === index + 1 ? row : { ...row, installmentNo: index + 1 }));
+}
+
+/**
+ * 付款階段「＋ 新增一期」：在技師公會代墊（guild_advance）之前插入一列空白的一般期款，期別依順序自動重編
+ * （公會代墊維持最後一列）。沒有公會代墊列就接在最後。期數不設上限（API 單次最多 100 期）。
+ */
+export function addProjectApplicationBilling(draft: ProjectApplicationDraft): ProjectApplicationDraft {
+  const blank: ProjectApplicationBillingDraft = {
+    installmentNo: 0,
+    kind: "installment",
+    milestone: "",
+    percentage: "",
+    plannedOn: "",
+    overrideAmount: "",
+    overrideReason: "",
+    note: "",
+  };
+  const guildIndex = draft.billings.findIndex((row) => row.kind === "guild_advance");
+  const next = [...draft.billings];
+  next.splice(guildIndex < 0 ? next.length : guildIndex, 0, blank);
+  return { ...draft, billings: renumberBillings(next) };
+}
+
+/**
+ * 付款階段「移除」：新建表單的期別都還沒有請款／開票／入帳／分潤，任何一列都可移除；移除後其餘期別重新編號。
+ * 至少保留一列（避免付款階段整張變成空表）。
+ */
+export function removeProjectApplicationBilling(draft: ProjectApplicationDraft, installmentNo: number): ProjectApplicationDraft {
+  if (draft.billings.length <= 1) return draft;
+  const next = draft.billings.filter((row) => row.installmentNo !== installmentNo);
+  if (next.length === draft.billings.length) return draft;
+  return { ...draft, billings: renumberBillings(next) };
+}
+
 export function emptyProjectApplicationDraft(
   openedOn: string,
   disciplines: readonly string[],
@@ -86,6 +131,7 @@ export function emptyProjectApplicationDraft(
   return {
     name: "",
     code: "",
+    projectNo: "",
     companyId: "",
     openedOn,
     fiscalYear: "",
@@ -222,6 +268,7 @@ function invalidNonnegative(value: string): boolean {
 export function projectApplicationErrors(draft: ProjectApplicationDraft): string[] {
   const errors: string[] = [];
   if (!draft.name.trim()) errors.push("請輸入專案名稱");
+  if ([...draft.projectNo.trim()].length > PROJECT_NO_MAX) errors.push(`專案編號最多 ${PROJECT_NO_MAX} 字`);
   // 母案是選填（業主 2026-09-30 會議）：變更設計／追加／代墊可以先開案、之後在專案明細補母案。
   if (invalidNonnegative(draft.siteAreaM2)) errors.push("設計面積須為 0 以上的數字");
   if (invalidNonnegative(draft.contractAmount)) errors.push("合約金額須為 0 以上的數字");
@@ -285,6 +332,7 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
   return {
     name: draft.name.trim(),
     code: optionalText(draft.code),
+    projectNo: optionalText(draft.projectNo),
     fiscalYear: optionalNumber(draft.fiscalYear),
     description: optionalText(draft.description),
     openedOn: optionalText(draft.openedOn),

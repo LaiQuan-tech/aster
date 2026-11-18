@@ -19,6 +19,7 @@ import type {
   UpdateProjectExtBody,
 } from "./projects-ext-api";
 import type { ShareEdit } from "./project-billing-shares";
+import { PROJECT_NO_MAX } from "./project-no";
 
 /* ============================================================ 版面 == */
 
@@ -202,6 +203,8 @@ export interface EngineerDraft {
 export interface ApplicationSheetDraft {
   /** 工程名稱（＝專案名稱）。必填。 */
   name: string;
+  /** 專案編號（≠ 抬頭的專案序號 code）：自由輸入、選填、≤100 字；空白＝清空（存 null）。 */
+  projectNo: string;
   /** 抬頭「民國　年　月　日」＝開案日期，'YYYY-MM-DD' 或 ""。 */
   openedOn: string;
   /** 抬頭左上角的承接公司。"" ＝沿用租戶預設公司（專案上 company_id 為 null）。 */
@@ -235,6 +238,10 @@ export interface ApplicationSheetDraft {
   amountUntaxed: string | null;
   /** 付款階段各列改過的格子；key 見 stageRowKey()。 */
   stageEdits: Record<string, StageEdit>;
+  /** 使用者按「＋ 新增一期」多開的空白一般期款列數（接在既有／補版面的列之後、技師公會代墊之前；2026-11-18 期數不限）。 */
+  stageExtraRows: number;
+  /** 標記要移除的既有期別 id（儲存時整批 PUT 不帶這些＝後端軟刪；已請款／開票／入帳／有分潤的不可標記）。 */
+  stageRemovedIds: string[];
   /** 發包各列改過的格子；key 見 applicationSubcontractRows()。 */
   subEdits: Record<string, SubEdit>;
   /** 使用者按「＋ 新增一列發包」多開的列數。 */
@@ -307,6 +314,7 @@ export function engineerDraftOf(
 export function applicationSheetDraftOf(project: ProjectDetail, disciplines: readonly string[]): ApplicationSheetDraft {
   return {
     name: project.name ?? "",
+    projectNo: project.projectNo ?? "",
     openedOn: project.openedOn ?? "",
     companyId: project.companyId ?? "",
     clientId: project.clientId ?? "",
@@ -324,6 +332,8 @@ export function applicationSheetDraftOf(project: ProjectDetail, disciplines: rea
     orderDocType: "",
     amountUntaxed: null,
     stageEdits: {},
+    stageExtraRows: 0,
+    stageRemovedIds: [],
     subEdits: {},
     subExtraRows: 0,
     subRemovedIds: [],
@@ -355,6 +365,7 @@ export interface SheetError {
 export function applicationSheetErrors(draft: ApplicationSheetDraft, opts: { canFinance: boolean }): SheetError[] {
   const errors: SheetError[] = [];
   if (!draft.name.trim()) errors.push({ field: "name", message: "工程名稱不可空白。" });
+  if ([...(draft.projectNo ?? "").trim()].length > PROJECT_NO_MAX) errors.push({ field: "projectNo", message: `專案編號最多 ${PROJECT_NO_MAX} 字。` });
   if (parseOptionalNumber(draft.siteAreaM2) === "invalid") errors.push({ field: "siteAreaM2", message: "設計面積必須是 0 以上的數字。" });
   if (opts.canFinance && parseOptionalNumber(draft.otherExpenses) === "invalid") errors.push({ field: "otherExpenses", message: "其他支出必須是 0 以上的數字。" });
   draft.designScope.forEach((row, idx) => {
@@ -412,6 +423,10 @@ export function applicationSheetPatch(
 
   const name = draft.name.trim();
   if (name && name !== project.name) patch.name = name;
+
+  // 專案編號：去頭尾空白、空白＝null；舊版 API 沒回 projectNo（undefined）視同 null。超過上限不送（errors 會擋）。
+  const projectNo = textOrNull(draft.projectNo);
+  if (projectNo !== textOrNull(project.projectNo) && [...(projectNo ?? "")].length <= PROJECT_NO_MAX) patch.projectNo = projectNo;
 
   const openedOn = draft.openedOn || null;
   if (openedOn !== (project.openedOn ?? null)) patch.openedOn = openedOn;
@@ -586,11 +601,12 @@ export function stageRowKey(row: Pick<ApplicationStageRow, "id" | "kind" | "no">
  * 付款階段：一般期別依期別編號排序，不足 7 期補空白列（Word 固定 1～7），
  * 最後一列固定是技師公會代墊。專案明細頁不截斷：超過 7 期全部列出。
  */
-export function applicationStageRows(billings: readonly BillingExt[]): ApplicationStageRow[] {
+export function applicationStageRows(billings: readonly BillingExt[], extraRows = 0): ApplicationStageRow[] {
   const installments = billings.filter((b) => b.kind === "installment").sort((a, b) => a.installmentNo - b.installmentNo);
   const guild = billings.find((b) => b.kind === "guild_advance") ?? null;
   const rows: ApplicationStageRow[] = [];
-  const count = Math.max(MIN_INSTALLMENT_ROWS, installments.length);
+  // 「＋ 新增一期」多開的空白列接在後面（期數不限，2026-11-18）；技師公會代墊仍固定最後一列。
+  const count = Math.max(MIN_INSTALLMENT_ROWS, installments.length) + Math.max(0, Math.floor(extraRows));
   for (let i = 0; i < count; i++) {
     const b = installments[i];
     rows.push({
@@ -627,6 +643,64 @@ export function applicationStageRows(billings: readonly BillingExt[]): Applicati
     note: guild?.note ?? "",
   });
   return rows;
+}
+
+/**
+ * 付款階段這一列為什麼不能移除（null＝可以）。已請款／已開發票／已入帳的期別帳已經出去，後端 PUT 也會 409；
+ * 已有每期獎金分潤或發獎金日（看得到分潤時才知道）要先清除（DB 觸發器 0093 擋刪）。技師公會代墊固定一列，不提供移除。
+ */
+export function stageRemoveBlockReason(
+  row: Pick<ApplicationStageRow, "kind" | "billed" | "invoiceNo" | "invoicedOn" | "receivedOn">,
+  opts: { hasShares?: boolean } = {},
+): string | null {
+  if (row.kind === "guild_advance") return "技師公會代墊固定一列，不能移除。";
+  if (row.receivedOn) return "已入帳的期別不能移除（要先撤銷入帳）。";
+  if (row.billed) return "已請款的期別不能移除（要先撤銷請款）。";
+  if (row.invoiceNo || row.invoicedOn) return "已開發票的期別不能移除（要先撤銷開票）。";
+  if (opts.hasShares) return "此期已有獎金分潤／發獎金日，請先清除再移除。";
+  return null;
+}
+
+/** 這一列是不是「＋ 新增一期」多開的空白列（沒有 id、列號超過既有／補版面的列數）。 */
+export function isExtraStageRow(rows: readonly ApplicationStageRow[], row: ApplicationStageRow, extraRows: number): boolean {
+  if (row.id || row.kind !== "installment" || extraRows <= 0) return false;
+  const installmentCount = rows.filter((r) => r.kind === "installment").length;
+  return row.no > installmentCount - extraRows;
+}
+
+/**
+ * 移除一列「＋ 新增一期」多開的空白列：後面的新增列往前遞補（草稿 key 依列號，stageEdits／shareEdits 一起平移），
+ * stageExtraRows 減一。不是新增列就原樣回傳。
+ */
+export function removeStageExtraRow(draft: ApplicationSheetDraft, rows: readonly ApplicationStageRow[], row: ApplicationStageRow): ApplicationSheetDraft {
+  if (!isExtraStageRow(rows, row, draft.stageExtraRows)) return draft;
+  const lastNo = rows.filter((r) => r.kind === "installment").length;
+  const keyOf = (no: number) => `new-installment-${no}`;
+  const shift = <T,>(src: Record<string, T> | undefined): Record<string, T> => {
+    const out: Record<string, T> = { ...(src ?? {}) };
+    for (let no = row.no; no < lastNo; no++) {
+      const next = out[keyOf(no + 1)];
+      if (next === undefined) delete out[keyOf(no)];
+      else out[keyOf(no)] = next;
+    }
+    delete out[keyOf(lastNo)];
+    return out;
+  };
+  return {
+    ...draft,
+    stageExtraRows: draft.stageExtraRows - 1,
+    stageEdits: shift(draft.stageEdits),
+    shareEdits: shift(draft.shareEdits),
+  };
+}
+
+/** 切換既有期別的「標記移除」（存檔時才真的移除；可復原）。 */
+export function toggleStageRemoved(draft: ApplicationSheetDraft, billingId: string): ApplicationSheetDraft {
+  const ids = draft.stageRemovedIds ?? [];
+  return {
+    ...draft,
+    stageRemovedIds: ids.includes(billingId) ? ids.filter((id) => id !== billingId) : [...ids, billingId],
+  };
 }
 
 export interface SubcontractSlot {

@@ -24,21 +24,24 @@ export interface ProjectRegisterCells {
   note: string
 }
 
-/** 原 Excel 第 4 列 A:P 的欄頭，一字不差。 */
+/**
+ * 原 Excel 第 4 列 A:P 的欄頭，一字不差；2026-11-18 業主要「再多一個專案編號」：接在「專案單號」後面（C 欄），
+ * 之後各欄往右移一欄（後端 Excel 同步）。
+ */
 export const REGISTER_FIXED_HEADERS = [
-  "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+  "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
   "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
 ] as const
 
 /** 原 Excel 的欄寬（字元寬，A:P）；科別欄原檔一律 13。畫面換算成 px 用。 */
-export const REGISTER_FIXED_WIDTHS = [5.18, 13, 11.18, 15.82, 25.45, 13.82, 13.18, 14.45, 12.82, 13.45, 12.82, 6.91, 11.45, 10.82, 8.63, 19] as const
+export const REGISTER_FIXED_WIDTHS = [5.18, 13, 13, 11.18, 15.82, 25.45, 13.82, 13.18, 14.45, 12.82, 13.45, 12.82, 6.91, 11.45, 10.82, 8.63, 19] as const
 export const REGISTER_DISCIPLINE_WIDTH = 13
 
-/** 原檔預設隱藏的欄（0 起算）：I 已收帳款、J 應收帳款、K 已開發票、L 合約、M 簽證、N 發包。 */
-export const REGISTER_HIDDEN_COLUMNS: readonly number[] = [8, 9, 10, 11, 12, 13]
+/** 原檔預設隱藏的欄（0 起算；專案編號插入後）：已收帳款、應收帳款、已開發票、合約、簽證、發包。 */
+export const REGISTER_HIDDEN_COLUMNS: readonly number[] = [9, 10, 11, 12, 13, 14]
 
-/** 凍結窗格：原檔 F5 → 凍結 A:E（項次、專案單號、日期、客戶、工程名稱）與表頭。 */
-export const REGISTER_FROZEN_COLUMNS = 5
+/** 凍結窗格：原檔 F5 → 凍結項次、專案單號、（新增的）專案編號、日期、客戶、工程名稱與表頭。 */
+export const REGISTER_FROZEN_COLUMNS = 6
 
 export type RegisterAlign = "center" | "left" | "right"
 
@@ -59,8 +62,8 @@ export function registerColumns(disciplines: string[]): RegisterColumn[] {
     header,
     width: REGISTER_FIXED_WIDTHS[i],
     // 原檔除了備註（靠左）其餘置中；畫面上金額改靠右比較好對位數。
-    align: header === "備註" ? "left" : i >= 5 && i <= 10 || header === "發包" ? "right" : "center",
-    money: (i >= 5 && i <= 10) || header === "發包" || header === "備註",
+    align: header === "備註" ? "left" : i >= 6 && i <= 11 || header === "發包" ? "right" : "center",
+    money: (i >= 6 && i <= 11) || header === "發包" || header === "備註",
     hidden: REGISTER_HIDDEN_COLUMNS.includes(i),
     index: i,
   }))
@@ -126,6 +129,8 @@ export function formatRegisterMoney(value: number | null | undefined): string {
 export interface RegisterInput {
   seq: number
   code: string | null
+  /** 專案編號（自由輸入，≠ code 專案序號）；舊版 API 沒回＝缺席。 */
+  projectNo?: string | null
   clientName: string | null
   name: string
   register: ProjectRegisterCells | null | undefined
@@ -141,6 +146,7 @@ export function registerRowCells(item: RegisterInput, disciplines: string[]): st
   return [
     String(item.seq),
     item.code ?? "",
+    item.projectNo ?? "",
     r?.dateRoc ?? "",
     item.clientName ?? "",
     item.name,

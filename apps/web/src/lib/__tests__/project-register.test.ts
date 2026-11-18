@@ -30,15 +30,15 @@ const cells: ProjectRegisterCells = {
 };
 
 describe("專案列表＝專案申請單總表欄位", () => {
-  it("欄頭與原 Excel 第 4 列一字不差（A:P），科別從 Q 欄起", () => {
+  it("欄頭＝原 Excel 第 4 列＋「專案單號」後的「專案編號」（2026-11-18），科別接在備註後", () => {
     expect([...REGISTER_FIXED_HEADERS]).toEqual([
-      "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+      "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
       "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
     ]);
-    expect(registerColumns(["空調", "消防", "汙水"]).map((c) => c.header).slice(16)).toEqual(["空調", "消防", "汙水"]);
-    // 凍結窗格 F5：A:E（含專案單號、工程名稱）。
+    expect(registerColumns(["空調", "消防", "汙水"]).map((c) => c.header).slice(17)).toEqual(["空調", "消防", "汙水"]);
+    // 凍結窗格：項次…工程名稱（含專案單號、專案編號）。
     expect(registerColumns([]).slice(0, REGISTER_FROZEN_COLUMNS).map((c) => c.header)).toEqual([
-      "項次", "專案單號", "日期", "客戶", "工程名稱",
+      "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱",
     ]);
   });
 
@@ -46,20 +46,20 @@ describe("專案列表＝專案申請單總表欄位", () => {
     const disc = ["電機", "空調", "消防", "汙水", "未分類"];
     const hidden = visibleRegisterColumns(disc, false);
     expect(hidden.map((c) => c.header)).toEqual([
-      "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註",
+      "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註",
     ]);
-    expect(hidden.map((c) => c.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 14, 15]);
+    expect(hidden.map((c) => c.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 15, 16]);
     expect(visibleRegisterColumns(disc, true).map((c) => c.header)).toEqual([...REGISTER_FIXED_HEADERS.slice(1)]);
     // 沒有原檔以外的系統欄（狀態等）；項次、科別只在畫面移除（registerColumns 仍完整）。
-    expect(visibleRegisterColumns(disc, true)).toHaveLength(15);
-    expect(registerColumns(disc)).toHaveLength(21);
+    expect(visibleRegisterColumns(disc, true)).toHaveLength(16);
+    expect(registerColumns(disc)).toHaveLength(22);
   });
 
   it("項次移除後凍結欄＝專案單號…工程名稱（顯示／隱藏 I:N 都一樣）", () => {
     for (const showHidden of [false, true]) {
       const cols = visibleRegisterColumns(["空調"], showHidden);
       expect(cols.slice(0, frozenRegisterColumnCount(cols)).map((c) => c.header)).toEqual([
-        "專案單號", "日期", "客戶", "工程名稱",
+        "專案單號", "專案編號", "日期", "客戶", "工程名稱",
       ]);
     }
   });
@@ -73,9 +73,9 @@ describe("專案列表＝專案申請單總表欄位", () => {
   });
 
   it("看得到金額：一列依欄位順序帶出", () => {
-    const row = registerRowCells({ seq: 3, code: "XX-100-001", clientName: "假客戶", name: "假工程", register: cells }, ["空調", "消防"]);
+    const row = registerRowCells({ seq: 3, code: "XX-100-001", projectNo: "客-甲-7", clientName: "假客戶", name: "假工程", register: cells }, ["空調", "消防"]);
     expect(row).toEqual([
-      "3", "XX-100-001", "100.2.3", "假客戶", "假工程",
+      "3", "XX-100-001", "客-甲-7", "100.2.3", "假客戶", "假工程",
       "1,234,567", "61,728", "1,296,295", "-", "1,234,567", "",
       "已簽約", "空調：甲技師", "30,000", "假業務", "累計請款 50%",
       "30,000", "",
@@ -90,11 +90,12 @@ describe("專案列表＝專案申請單總表欄位", () => {
       unreceived: null, invoicedTotal: null, subcontractTotal: null, subcontractByDiscipline: {}, note: "",
     };
     const row = registerRowCells({ seq: 1, code: "XX-100-002", clientName: "假客戶", name: "假工程", register: masked }, ["空調"]);
-    expect(row.slice(5, 11)).toEqual(Array(6).fill(MASKED));
-    expect(row[13]).toBe(MASKED);
-    expect(row[15]).toBe("");
-    expect(row[16]).toBe(MASKED);
-    expect(row.slice(11, 13)).toEqual(["已簽約", "空調：甲技師"]);
-    expect(row[14]).toBe("假業務");
+    expect(row[2]).toBe("");
+    expect(row.slice(6, 12)).toEqual(Array(6).fill(MASKED));
+    expect(row[14]).toBe(MASKED);
+    expect(row[16]).toBe("");
+    expect(row[17]).toBe(MASKED);
+    expect(row.slice(12, 14)).toEqual(["已簽約", "空調：甲技師"]);
+    expect(row[15]).toBe("假業務");
   });
 });

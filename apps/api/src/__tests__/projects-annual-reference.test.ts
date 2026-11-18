@@ -17,6 +17,7 @@ const table: AnnualTable = {
       seq: 1,
       projectId: "p1",
       code: "XX-114-001",
+      projectNo: "客-甲-0099",
       dateRoc: "114.1.3",
       createdOn: "2025-01-03",
       clientName: "範例客戶有限公司",
@@ -82,20 +83,21 @@ const table: AnnualTable = {
 }
 
 describe("年度總表參考格式", () => {
-  it("專案列表（layout=register）：欄位與原表完全一致，A:P＋科別、無系統欄；I:N 比照原檔隱藏", async () => {
+  it("專案列表（layout=register）：原表欄位＋「專案單號」後的「專案編號」（2026-11-18），A:Q＋科別、無系統欄；已收帳款…發包比照原檔隱藏", async () => {
     const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04", layout: "register" })
     const ws = wb.worksheets[0]
     const headers = ws.getRow(4).values as unknown[]
 
     expect(headers.slice(1)).toEqual([
-      "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+      "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
       "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
       "空調", "消防", "汙水",
     ])
-    expect(ws.views[0]).toMatchObject({ state: "frozen", xSplit: 5, ySplit: 4 })
-    expect(["I", "J", "K", "L", "M", "N"].map((c) => ws.getColumn(c).hidden)).toEqual(Array(6).fill(true))
-    expect(["H", "O", "P", "Q"].map((c) => ws.getColumn(c).hidden)).toEqual(Array(4).fill(false))
-    expect(ws.getColumn("E").width).toBeCloseTo(25.45, 1)
+    expect(ws.views[0]).toMatchObject({ state: "frozen", xSplit: 6, ySplit: 4 })
+    expect(["J", "K", "L", "M", "N", "O"].map((c) => ws.getColumn(c).hidden)).toEqual(Array(6).fill(true))
+    expect(["C", "I", "P", "Q", "R"].map((c) => ws.getColumn(c).hidden)).toEqual(Array(5).fill(false))
+    expect(ws.getColumn("F").width).toBeCloseTo(25.45, 1)
+    expect(ws.getColumn("C").width).toBeCloseTo(13, 1)
   })
 
   it("專案列表（layout=register）明細、小計與年度總計帶正確金額、原檔會計格式與全黑框", async () => {
@@ -105,23 +107,28 @@ describe("年度總表參考格式", () => {
     expect(ws.getCell("A1").value).toBe("專案申請單")
     expect(ws.getCell("A2").value).toContain("亞斯特設計顧問有限公司")
     expect(ws.getCell("A2").value).toContain("114年度總表")
-    expect(ws.getCell("H3").value).toBe("日期：115.3.4")
-    expect(ws.getCell("I5").value).toBe(300_000)
-    expect(ws.getCell("J5").value).toBe(700_000)
-    expect(ws.getCell("K5").value).toBe(500_000)
-    expect(ws.getCell("L5").value).toBe("已簽約")
-    expect(ws.getCell("M5").value).toBe("空調：範例技師")
-    expect(ws.getCell("N5").value).toBe(450_000)
-    expect(ws.getCell("O5").value).toBe("範例業務")
-    expect(ws.getCell("Q5").value).toBe(200_000)
-    expect(ws.getCell("F5").numFmt).toBe('_-* #,##0_-;\\-* #,##0_-;_-* "-"??_-;_-@_-')
+    expect(ws.getCell("I3").value).toBe("日期：115.3.4")
+    expect(ws.getCell("J3").value).toBe("已入帳")
+    expect(ws.getCell("K3").value).toBe("未入帳")
+    expect(ws.getCell("B5").value).toBe("XX-114-001")
+    expect(ws.getCell("C5").value).toBe("客-甲-0099")
+    expect(ws.getCell("F5").value).toBe("範例住宅新建工程")
+    expect(ws.getCell("J5").value).toBe(300_000)
+    expect(ws.getCell("K5").value).toBe(700_000)
+    expect(ws.getCell("L5").value).toBe(500_000)
+    expect(ws.getCell("M5").value).toBe("已簽約")
+    expect(ws.getCell("N5").value).toBe("空調：範例技師")
+    expect(ws.getCell("O5").value).toBe(450_000)
+    expect(ws.getCell("P5").value).toBe("範例業務")
+    expect(ws.getCell("R5").value).toBe(200_000)
+    expect(ws.getCell("G5").numFmt).toBe('_-* #,##0_-;\\-* #,##0_-;_-* "-"??_-;_-@_-')
     expect(ws.getCell("A4").border.top?.style).toBe("thin")
-    expect(ws.getCell("S5").border.right?.style).toBe("thin")
-    expect(ws.getCell("T4").value).toBeNull()
-    expect(ws.getCell("I6").value).toBe(300_000)
-    expect(ws.getCell("K6").value).toBe(500_000)
-    expect(ws.getCell("I7").value).toBe(300_000)
-    expect(ws.getCell("K7").value).toBe(500_000)
+    expect(ws.getCell("T5").border.right?.style).toBe("thin")
+    expect(ws.getCell("U4").value).toBeNull()
+    expect(ws.getCell("J6").value).toBe(300_000)
+    expect(ws.getCell("L6").value).toBe(500_000)
+    expect(ws.getCell("J7").value).toBe(300_000)
+    expect(ws.getCell("L7").value).toBe(500_000)
   })
 
   it("年度總表頁（預設 layout=annual）：維持原本行為，科別後接請款進度%／收款進度%／狀態／期數，不隱藏欄", async () => {
@@ -129,19 +136,20 @@ describe("年度總表參考格式", () => {
       const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04", layout })
       const ws = wb.worksheets[0]
       expect((ws.getRow(4).values as unknown[]).slice(1)).toEqual([
-        "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+        "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
         "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
         "空調", "消防", "汙水", "請款進度%", "收款進度%", "狀態", "期數",
       ])
-      expect(["I", "J", "K", "L", "M", "N"].some((c) => ws.getColumn(c).hidden)).toBe(false)
-      expect(ws.getCell("T5").value).toBe(58.3)
-      expect(ws.getCell("U5").value).toBe(35)
-      expect(ws.getCell("V5").value).toBe("進行中")
-      expect(ws.getCell("W5").value).toBe("1/2")
-      expect(ws.getCell("F5").numFmt).toBe("#,##0")
-      expect(ws.getCell("W5").border.right?.style).toBe("thin")
+      expect(["J", "K", "L", "M", "N", "O"].some((c) => ws.getColumn(c).hidden)).toBe(false)
+      expect(ws.getCell("C5").value).toBe("客-甲-0099")
+      expect(ws.getCell("U5").value).toBe(58.3)
+      expect(ws.getCell("V5").value).toBe(35)
+      expect(ws.getCell("W5").value).toBe("進行中")
+      expect(ws.getCell("X5").value).toBe("1/2")
+      expect(ws.getCell("G5").numFmt).toBe("#,##0")
+      expect(ws.getCell("X5").border.right?.style).toBe("thin")
       // 小計／總計列的期數欄留空。
-      expect(ws.getCell("W6").value).toBeNull()
+      expect(ws.getCell("X6").value).toBeNull()
     }
   })
 })

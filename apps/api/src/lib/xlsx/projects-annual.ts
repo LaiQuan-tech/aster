@@ -21,14 +21,19 @@ const STATUS_LABEL: Record<string, string> = {
 const REGISTER_MONEY_FMT = '_-* #,##0_-;\\-* #,##0_-;_-* "-"??_-;_-@_-'
 const ANNUAL_MONEY_FMT = "#,##0"
 const PCT_FMT = "0.0"
-/** 原檔隱藏的欄：已收帳款、應收帳款、已開發票、合約、簽證、發包。 */
-const HIDDEN_COLUMNS = [9, 10, 11, 12, 13, 14]
+/**
+ * 原檔隱藏的欄：已收帳款、應收帳款、已開發票、合約、簽證、發包。
+ * 2026-11-18 起「專案單號」後面多一欄「專案編號」（C 欄），之後各欄往右移一欄。
+ */
+const HIDDEN_COLUMNS = [10, 11, 12, 13, 14, 15]
+/** 固定欄數（項次…備註，含 2026-11-18 新增的專案編號）。 */
+const FIXED_COLUMN_COUNT = 17
 const FONT_NAME = "標楷體"
 const BLACK = "FF000000"
 
 export type BuildAnnualWorkbookOptions = {
   companyName: string
-  /** 'YYYY-MM-DD'（租戶當地今天），H3 用民國寫法。 */
+  /** 'YYYY-MM-DD'（租戶當地今天），I3 用民國寫法。 */
   today: string
   /** 省略＝"annual"（年度總表頁的原本行為）。 */
   layout?: AnnualWorkbookLayout
@@ -44,7 +49,7 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
   const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet(`${table.rocYear}年度總表`, {
-    views: [{ state: "frozen", xSplit: 5, ySplit: 4 }],
+    views: [{ state: "frozen", xSplit: 6, ySplit: 4 }],
   })
 
   const register = opts.layout === "register"
@@ -52,36 +57,37 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
   const money = (cell: ExcelJS.Cell, value: number | null) => writeMoney(cell, value, moneyFmt)
   const disciplines = table.disciplines
   const headers = [
-    "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+    "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
     "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
     ...disciplines,
     ...(register ? [] : ["請款進度%", "收款進度%", "狀態", "期數"]),
   ]
   const colCount = headers.length
   const C = {
-    seq: 1, code: 2, date: 3, client: 4, name: 5, amount: 6, tax: 7, total: 8,
-    received: 9, receivable: 10, invoiced: 11, contract: 12, signature: 13,
-    subcontract: 14, lead: 15, note: 16, discFirst: 17,
-    billing: 17 + disciplines.length,
-    receipt: 18 + disciplines.length,
-    status: 19 + disciplines.length,
-    installments: 20 + disciplines.length,
+    seq: 1, code: 2, projectNo: 3, date: 4, client: 5, name: 6, amount: 7, tax: 8, total: 9,
+    received: 10, receivable: 11, invoiced: 12, contract: 13, signature: 14,
+    subcontract: 15, lead: 16, note: 17, discFirst: 18,
+    billing: 18 + disciplines.length,
+    receipt: 19 + disciplines.length,
+    status: 20 + disciplines.length,
+    installments: 21 + disciplines.length,
   }
 
-  ws.mergeCells(1, 1, 1, 16)
+  ws.mergeCells(1, 1, 1, FIXED_COLUMN_COUNT)
   ws.getCell("A1").value = "專案申請單"
   ws.getCell("A1").font = { name: FONT_NAME, size: 18 }
   ws.getCell("A1").alignment = { horizontal: "center", vertical: "middle" }
 
-  ws.mergeCells(2, 1, 2, 16)
+  ws.mergeCells(2, 1, 2, FIXED_COLUMN_COUNT)
   ws.getCell("A2").value = `${opts.companyName} ${table.rocYear}年度總表`
   ws.getCell("A2").font = { name: FONT_NAME, size: 18 }
   ws.getCell("A2").alignment = { horizontal: "left", vertical: "middle" }
 
-  ws.getCell("H3").value = `日期：${rocToday(opts.today)}`
-  ws.getCell("I3").value = "已入帳"
-  ws.getCell("J3").value = "未入帳"
-  for (const address of ["H3", "I3", "J3"]) {
+  // 日期／已入帳／未入帳分別在「含稅」「已收帳款」「應收帳款」上方（專案編號插入後為 I3:K3）。
+  ws.getCell("I3").value = `日期：${rocToday(opts.today)}`
+  ws.getCell("J3").value = "已入帳"
+  ws.getCell("K3").value = "未入帳"
+  for (const address of ["I3", "J3", "K3"]) {
     ws.getCell(address).font = { name: FONT_NAME, size: 12 }
     ws.getCell(address).alignment = { horizontal: "center", vertical: "middle" }
   }
@@ -92,7 +98,7 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
   })
   headerRow.height = 26.25
 
-  const referenceWidths = [5.18, 13, 11.18, 15.82, 25.45, 13.82, 13.18, 14.45, 12.82, 13.45, 12.82, 6.91, 11.45, 10.82, 8.63, 19]
+  const referenceWidths = [5.18, 13, 13, 11.18, 15.82, 25.45, 13.82, 13.18, 14.45, 12.82, 13.45, 12.82, 6.91, 11.45, 10.82, 8.63, 19]
   referenceWidths.forEach((width, index) => {
     ws.getColumn(index + 1).width = width
   })
@@ -138,6 +144,7 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
       const row = ws.getRow(rowNumber)
       row.getCell(C.seq).value = item.seq
       row.getCell(C.code).value = item.code ?? ""
+      row.getCell(C.projectNo).value = item.projectNo ?? ""
       row.getCell(C.date).value = item.dateRoc ?? ""
       row.getCell(C.client).value = item.clientName ?? ""
       row.getCell(C.name).value = item.name

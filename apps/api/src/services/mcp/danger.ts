@@ -142,6 +142,7 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "POST", path: "/billings/:id/unreceive", label: "取消請款入帳" },
   { method: "POST", path: "/billings/:id/unbill", label: "取消請款" },
   { method: "POST", path: "/billings/:id/uninvoice", label: "取消開立發票" },
+  { method: "POST", path: "/billings/:id/reinvoice", tier: "high", label: "修正已開立的發票號碼／日期" },
   { method: "PUT", path: "/projects/:id/share-revision", label: "修訂專案分潤" },
   { method: "PUT", path: "/projects/:id/subcontracts/:sid/payments", label: "修改複委託付款" },
   // 獎金批次

@@ -9,6 +9,9 @@ import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 import { MoneyInput } from "@/components/MoneyInput";
 import { AddDisciplineOptionButton, DesignDisciplineDatalist } from "@/components/DesignDisciplineInput";
 import { ProjectCodeField } from "./ProjectCodeField";
+import { ReinvoiceDialog, type ReinvoiceTarget } from "./ReinvoiceDialog";
+import { isBillingInvoiced } from "@/lib/billing-invoice";
+import { PROJECT_NO_MAX } from "@/lib/project-no";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
 import { createContract, updateContract, type Contract } from "@/lib/projects-api";
@@ -55,9 +58,12 @@ import {
   CLIENT_SHEET_FIELD_LABELS,
   applicationSheetDraftOf,
   applicationSheetErrors,
-  applicationStageRows,
   applicationSubcontractRows,
+  isExtraStageRow,
   removeNewSubcontractRow,
+  removeStageExtraRow,
+  stageRemoveBlockReason,
+  toggleStageRemoved,
   subcontractHasPaid,
   designScopeText,
   latestOrderDocument,
@@ -85,6 +91,7 @@ import {
   stageLocks,
   stageScreenAmount,
   sharesOverLimit,
+  sheetStageRows,
   type SheetSaveApi,
   type SheetSaveStep,
 } from "@/lib/project-application-sheet-save";
@@ -369,6 +376,8 @@ export function ApplicationSheet({
   const sharesEditable = editable && !!shareView?.canEdit;
   /** 正在展開分潤明細的付款階段列（stageRowKey）。 */
   const [openShareKey, setOpenShareKey] = useState<string | null>(null);
+  /** 「修正」已登記發票的視窗（2026-11-18）：null＝收起。 */
+  const [reinvoiceTarget, setReinvoiceTarget] = useState<ReinvoiceTarget | null>(null);
   const blockOn = (key: PrintBlockKey) => printChecked?.[key] ?? true;
   /** 未勾選的列印區塊：螢幕淡化、列印時文字透明（格線與標題照印）。 */
   const blankCls = (key: PrintBlockKey) => (blockOn(key) ? "" : "opacity-40 print:opacity-100 print:text-transparent print:**:text-transparent");
@@ -497,7 +506,10 @@ export function ApplicationSheet({
   // 名冊讀不到（或還沒載入）時至少放進本案目前的客戶，免得客戶名稱格看起來是空的。
   const clientChoices = project.client && !clients.some((c) => c.id === project.client?.id) ? [project.client, ...clients] : clients;
   const orderDoc = latestDocument !== undefined ? latestDocument : latestOrderDocument(contracts);
-  const stageRows = applicationStageRows(billings);
+  // 付款階段列（2026-11-18 期數不限）：「＋ 新增一期」多開的空白列只在可編輯時畫；標記移除的列仍畫（可復原），但不算進合計。
+  const stageRows = sheetStageRows(billings, { stageExtraRows: editable ? (draft.stageExtraRows ?? 0) : 0 });
+  const stageRemovedIds = new Set(editable ? (draft.stageRemovedIds ?? []) : []);
+  const stageRowsKept = stageRows.filter((s) => !(s.id && stageRemovedIds.has(s.id)));
   const subRows = applicationSubcontractRows(subcontracts, editable ? draft.subExtraRows : 0, editable ? draft.subEdits : {});
   const subRemoved = new Set(editable ? draft.subRemovedIds : []);
   const companyChoices = companyOptions(companies, draft.companyId, { markDefault: true });
@@ -904,6 +916,12 @@ export function ApplicationSheet({
     const pctText = stagePctDisplay(s, rowEdit, stageTotal);
     const rowLabel = guild ? "技師公會代墊" : `付款階段第 ${s.no} 列`;
     const shareSet = shareSetOf(shareView, s.id);
+    const markedRemoved = !!s.id && stageRemovedIds.has(s.id);
+    /** 已登記發票的期別（號碼或日期任一有值）：鎖住的發票格旁給「修正」鈕（要能重新載入才顯示）。 */
+    const canReinvoice = editable && !guild && !!s.id && !!load && isBillingInvoiced(s);
+    const openReinvoice = () => s.id && setReinvoiceTarget({ billingId: s.id, label: rowLabel, invoiceNo: s.invoiceNo, invoicedOn: s.invoicedOn });
+    /** 不能移除的原因（已請款／開票／入帳；看得到分潤時，已有分潤或發獎金日）；null＝可以移除。 */
+    const removeBlock = stageRemoveBlockReason(s, { hasShares: !!shareSet && (shareSet.shares.length > 0 || !!shareSet.bonusPaidOn) });
     const shareEdit: ShareEdit | undefined = sharesEditable ? draft.shareEdits?.[key] : undefined;
     const shareLines = currentShareLines(shareSet, shareEdit);
     const shareSummary = shareSummaryText(shareLines);
@@ -915,10 +933,42 @@ export function ApplicationSheet({
       showShares && !guild && (sharesOverLimit(shareLinesTotal(filledShareLines(shareLines)), shareLimit) || (!shareEdit?.lines && !!shareSet?.overLimit));
     stageCells.push(
       <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={S[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
-        {editable ? (
+        {editable && markedRemoved ? (
+          <span className="flex w-full min-w-0 items-center gap-1" data-testid={`sheet-stage-${s.no}-removed`}>
+            <span className="min-w-0 truncate text-gray-400 line-through">{`${s.no}.${s.milestone}`}</span>
+            <span className="shrink-0 text-[11px] text-red-600">存檔後移除</span>
+            <button type="button" className="shrink-0 text-[11px] text-[var(--brand)] underline print:hidden" onClick={() => setDraft((d) => toggleStageRemoved(d, s.id as string))}>
+              復原
+            </button>
+          </span>
+        ) : editable ? (
           <span className="flex w-full min-w-0 items-center gap-0.5">
             <span className="shrink-0">{s.no}.</span>
             <input aria-label={`${rowLabel}項目說明`} className={cellInput} maxLength={200} placeholder="項目說明" title="名稱、金額、%、備註都清空並儲存＝移除這一期（已請款／開票／入帳的不能移除）" value={val("milestone")} onChange={(e) => setStage(key, "milestone", e.target.value)} />
+            {guild ? null : s.id ? (
+              <button
+                type="button"
+                className="shrink-0 px-0.5 text-[11px] text-red-500 disabled:cursor-not-allowed disabled:text-gray-300 print:hidden"
+                aria-label={`移除${rowLabel}`}
+                disabled={removeBlock !== null}
+                title={removeBlock ?? "移除這一期（存檔後生效，存檔前可復原）"}
+                data-testid={`sheet-stage-${s.no}-remove`}
+                onClick={() => setDraft((d) => toggleStageRemoved(d, s.id as string))}
+              >
+                移除
+              </button>
+            ) : isExtraStageRow(stageRows, s, draft.stageExtraRows ?? 0) ? (
+              <button
+                type="button"
+                className="shrink-0 px-0.5 text-[11px] text-red-500 print:hidden"
+                aria-label={`移除${rowLabel}`}
+                title="移除這一列新增的空白期別"
+                data-testid={`sheet-stage-${s.no}-remove`}
+                onClick={() => setDraft((d) => removeStageExtraRow(d, stageRows, s))}
+              >
+                移除
+              </button>
+            ) : null}
           </span>
         ) : (
           <span className="truncate" title={`${s.no}.${s.milestone}`}>{`${s.no}.${s.milestone}`}</span>
@@ -977,7 +1027,14 @@ export function ApplicationSheet({
           {editable && !locks.invoiceNo ? (
             <input aria-label={`${rowLabel}發票號碼`} title="儲存時登記開票（發票日期未填＝今天，可到下方卡片撤銷重開）" className={cellInput} maxLength={40} value={val("invoiceNo")} onChange={(e) => setStage(key, "invoiceNo", e.target.value)} />
           ) : (
-            <span className="min-w-0 truncate" title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{s.invoiceNo ?? ""}</span>
+            <span className="flex w-full min-w-0 items-center gap-1">
+              <span className="min-w-0 truncate" title={editable ? "已開票；要改號碼或日期請按「修正」" : undefined}>{s.invoiceNo ?? ""}</span>
+              {canReinvoice ? (
+                <button type="button" className="shrink-0 rounded border border-gray-300 bg-white px-1 text-[11px] text-[var(--brand)] hover:bg-gray-50 print:hidden" aria-label={`修正${rowLabel}發票`} data-testid={`sheet-stage-${s.no}-reinvoice`} onClick={openReinvoice}>
+                  修正
+                </button>
+              ) : null}
+            </span>
           )}
         </Cell>
       ),
@@ -989,7 +1046,7 @@ export function ApplicationSheet({
               {editable && !locks.invoicedOn ? (
                 <input aria-label={`${rowLabel}發票日期`} title="未填＝登記開票當天" className={`${cellInput} px-0.5`} type="date" value={val("invoicedOn")} onChange={(e) => setStage(key, "invoicedOn", e.target.value)} />
               ) : (
-                <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{s.invoicedOn ? rocDots(s.invoicedOn) : ""}</span>
+                <span title={editable ? "已開票；要改號碼或日期請按發票號碼旁的「修正」" : undefined}>{s.invoicedOn ? rocDots(s.invoicedOn) : ""}</span>
               )}
             </Cell>,
           ]),
@@ -1152,8 +1209,18 @@ export function ApplicationSheet({
   } else {
     row = srow;
   }
+  if (editable) {
+    cells.push(
+      <Cell key="stage-add" col={1} span={16} row={row++} kind="full" testId="sheet-stage-add" className="justify-between gap-2 text-xs text-gray-500 print:hidden">
+        <span>期數不限：新增的期別排在最後一期之後、技師公會代墊之前；存檔後自動編號。已請款／開票／入帳或已有分潤的期別不能移除。</span>
+        <button type="button" className="shrink-0 text-sm text-[var(--brand)] hover:underline" onClick={() => set("stageExtraRows", (draft.stageExtraRows ?? 0) + 1)}>
+          ＋ 新增一期
+        </button>
+      </Cell>,
+    );
+  }
   if (editable && stageTotal !== null && stageTotal > 0) {
-    const sum = stageScheduleSummary(stageRows, draft.stageEdits, stageRowKey, stageTotal);
+    const sum = stageScheduleSummary(stageRowsKept, draft.stageEdits, stageRowKey, stageTotal);
     if (sum.amountTotal > 0 && sum.diff !== 0) {
       cells.push(
         <Cell key="stage-sum-hint" col={1} span={16} row={row++} kind="full" testId="sheet-stage-sum-hint" className="text-xs text-amber-800 print:hidden">
@@ -1368,6 +1435,15 @@ export function ApplicationSheet({
           </label>
           {/* 2026-11-12 序號可手動調整：鉛筆鈕只給能編輯本案基本資料的人（editable＝access.finance 且非列印／舊版檢視）；外層 fieldset 存檔中會一併鎖住 */}
           <ProjectCodeField projectId={project.id} code={project.code ?? null} canEdit={editable && !!load} onSaved={load ? () => load() : undefined} />
+          {/* 2026-11-18 專案編號：序號之外可自由輸入的另一套編號（選填），跟著申請單一起存（PATCH projectNo，版本快照一併保存）。 */}
+          <label className="flex min-w-0 items-center gap-1" data-testid="sheet-project-no">
+            <span className="shrink-0 text-gray-600">專案編號：</span>
+            {editable ? (
+              <input aria-label="專案編號" data-err-field="projectNo" className={`${cellInput} w-48 text-sm ${isBad("projectNo") ? INVALID_INPUT_CLS : ""}`} maxLength={PROJECT_NO_MAX} placeholder="選填" value={draft.projectNo ?? ""} onChange={(e) => set("projectNo", e.target.value)} />
+            ) : (
+              <span className="font-medium text-gray-900">{draft.projectNo || "—"}</span>
+            )}
+          </label>
         </div>
 
         {/* 專案明細表：外框 gray-300、內框 1px gray-200（gap-px 露出底色當格線）。
@@ -1499,6 +1575,7 @@ export function ApplicationSheet({
           </div>
         </div>
       )}
+      <ReinvoiceDialog target={reinvoiceTarget} onClose={() => setReinvoiceTarget(null)} onDone={async () => { if (load) await load(); }} />
     </section>
   );
 }

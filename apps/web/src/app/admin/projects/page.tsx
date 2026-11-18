@@ -429,7 +429,7 @@ export default function AdminProjectsPage() {
               <tbody>
                 {shown.map((p, index) => {
                   const cells = registerRowCells(
-                    { seq: index + 1, code: p.code, clientName: p.clientName ?? null, name: p.name || "（未命名）", register: p.register },
+                    { seq: index + 1, code: p.code, projectNo: p.projectNo ?? null, clientName: p.clientName ?? null, name: p.name || "（未命名）", register: p.register },
                     registerDisciplines,
                   );
                   const href = `/admin/projects/${p.id}`;

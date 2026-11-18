@@ -99,7 +99,7 @@ export const projectsRouter = Router()
 // ⚠️ 必須是單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別，
 // 相接後會退化成 GenericStringError，下游的 as ProjectRow 全數失效。
 const PROJECT_COLS =
-  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, archive_reason, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, bonus_rate_pct, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers, company_id"
+  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, archive_reason, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, bonus_rate_pct, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers, company_id, project_no"
 
 /**
  * 舊的預先取號空列的占位名稱。預先取號功能已移除（業主 2026-10-07），不再有建立途徑；
@@ -161,6 +161,15 @@ const sharePctByRoleSchema = z.object({
   member: sharePctValue,
 })
 
+/** 專案編號：去頭尾空白、空字串＝null、≤100 字（DB CHECK projects_project_no_len_chk 同步）。 */
+export const PROJECT_NO_MAX = 100
+const projectNoSchema = z
+  .string()
+  .trim()
+  .max(PROJECT_NO_MAX)
+  .nullish()
+  .transform((v) => (v === undefined ? undefined : v === null || v === "" ? null : v))
+
 const applicationFields = {
   /**
    * 開案日期（A5）。事後補 K 單的案子不該用建立日／K 單當天當日期，
@@ -172,6 +181,8 @@ const applicationFields = {
   parentProjectId: z.string().uuid().nullish(),
   kind: z.enum(PROJECT_KINDS).optional(),
   siteAddress: z.string().trim().max(300).nullish(),
+  /** 專案編號（≠ code 專案序號）：自由輸入、選填、不唯一、去頭尾空白後 ≤100 字；空字串＝null。 */
+  projectNo: projectNoSchema,
   siteAreaM2: z.number().nonnegative().max(1e9).nullish(),
   designScope: z.array(designScopeItem).max(50).optional(),
   invoiceType: z.enum(INVOICE_TYPES).nullish(),
@@ -351,6 +362,8 @@ type ProjectRow = {
   engineers: unknown
   /** 承接公司（companies.id）；null＝沿用租戶預設公司（見 services/project-company.ts）。 */
   company_id: string | null
+  /** 專案編號（2026-11-18，migration 0117）：code（專案序號）之外可自由輸入的另一套編號；選填、不唯一、≤100 字。 */
+  project_no?: string | null
 }
 
 type DesignScopeItem = z.infer<typeof designScopeItem>
@@ -545,6 +558,8 @@ function serializeProject(
     engineers: engineersOf(row.engineers),
     /** 承接公司：存的值（null＝沿用租戶預設公司）。顯示用的公司名稱由呼叫端以 `companyName` 另補。 */
     companyId: row.company_id ?? null,
+    /** 專案編號（自由輸入，≠ code 專案序號）。全員可見；未設定＝null。 */
+    projectNo: row.project_no ?? null,
   }
 }
 
@@ -1258,6 +1273,8 @@ projectsRouter.post(
         other_expenses: b.otherExpenses ?? 0,
         engineers: b.engineers ?? {},
         company_id: companyId,
+        // 專案編號（migration 0117 建案函式才認得；之前的版本會忽略這個鍵）。
+        project_no: b.projectNo ?? null,
         // migration 0075 之前的建案函式不認得這個鍵，會直接忽略（不會失敗）。
         share_pct_by_role: sharePctByRole,
       }
@@ -1767,6 +1784,7 @@ projectsRouter.patch(
         patch.company_id = b.companyId
       }
       if (b.siteAddress !== undefined) patch.site_address = b.siteAddress
+      if (b.projectNo !== undefined) patch.project_no = b.projectNo
       if (b.siteAreaM2 !== undefined) patch.site_area_m2 = b.siteAreaM2
       if (b.designScope !== undefined) patch.design_scope = b.designScope
       if (b.invoiceType !== undefined) patch.invoice_type = b.invoiceType

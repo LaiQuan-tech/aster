@@ -25,6 +25,7 @@ import {
   type ProjectMoney,
 } from "@/lib/projects-ext-api";
 import { billingRowTag, receiptSummaryText } from "@/lib/project-application-sheet";
+import { isBillingInvoiced } from "@/lib/billing-invoice";
 import {
   billingUpdateFailedIds,
   billingSaveNotices,
@@ -349,12 +350,12 @@ export function BillingsCard({
                       <td colSpan={4} className="py-1.5 pl-8 pr-2">
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
                           {/* 開票 */}
-                          {saved.invoicedOn ? (
+                          {/* 已開票＝號碼或日期任一有值（2026-11-18：有號無日期的舊資料也撤銷得了）；
+                              未請款也可以先標記開票（先開票再請款在工程業會發生，後端只提醒不擋）。 */}
+                          {isBillingInvoiced(saved) ? (
                             <button type="button" className="text-green-700 hover:underline" onClick={() => cancelInvoice(saved.id)}>
-                              已開票 {saved.invoiceNo}／{saved.invoicedOn}（點取消）
+                              已開票 {saved.invoiceNo || "（未填號碼）"}／{saved.invoicedOn || "（未填日期）"}（點取消）
                             </button>
-                          ) : !billed ? (
-                            <span className="text-gray-300">未請款，尚無法開票</span>
                           ) : invoiceFormId === saved.id ? (
                             <span className="flex flex-wrap items-center gap-1.5">
                               <input className="w-28 rounded border border-gray-300 px-1.5 py-0.5" placeholder="發票號碼" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} />
@@ -368,7 +369,7 @@ export function BillingsCard({
                               className="rounded border border-gray-200 bg-white px-2 py-0.5 text-gray-600 hover:bg-gray-50"
                               onClick={() => { setInvoiceFormId(saved.id); setInvoiceNo(""); setInvoicedOn(todayKey()); }}
                             >
-                              標記開票
+                              標記開票{billed ? "" : "（尚未請款）"}
                             </button>
                           )}
                           {/* 入帳 */}
