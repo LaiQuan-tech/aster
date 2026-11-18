@@ -10,6 +10,9 @@ import { MoneyInput } from "@/components/MoneyInput";
 import { AddDisciplineOptionButton, DesignDisciplineDatalist } from "@/components/DesignDisciplineInput";
 import { ProjectCodeField } from "./ProjectCodeField";
 import { ReinvoiceDialog, type ReinvoiceTarget } from "./ReinvoiceDialog";
+import { useInvoicedAck } from "@/components/InvoicedAckDialog";
+import { billingScheduleVersion } from "@/lib/billing-version";
+import type { InvoicedAckBody } from "@/lib/invoiced-ack";
 import { isBillingInvoiced } from "@/lib/billing-invoice";
 import { PROJECT_NO_MAX } from "@/lib/project-no";
 import type { Vendor } from "@/lib/company-api";
@@ -378,6 +381,7 @@ export function ApplicationSheet({
   const [openShareKey, setOpenShareKey] = useState<string | null>(null);
   /** 「修正」已登記發票的視窗（2026-11-18）：null＝收起。 */
   const [reinvoiceTarget, setReinvoiceTarget] = useState<ReinvoiceTarget | null>(null);
+  const invoicedAck = useInvoicedAck();
   const blockOn = (key: PrintBlockKey) => printChecked?.[key] ?? true;
   /** 未勾選的列印區塊：螢幕淡化、列印時文字透明（格線與標題照印）。 */
   const blankCls = (key: PrintBlockKey) => (blockOn(key) ? "" : "opacity-40 print:opacity-100 print:text-transparent print:**:text-transparent");
@@ -445,13 +449,31 @@ export function ApplicationSheet({
   const patchShare = (key: string, next: ShareEdit) =>
     setDraft((d) => ({ ...d, shareEdits: { ...(d.shareEdits ?? {}), [key]: { ...(d.shareEdits?.[key] ?? {}), ...next } } }));
 
+  /**
+   * 期程樂觀鎖（2026-11-18）：整批存期程帶「這張申請單讀到的期程版本」。同一次存檔裡若先確認了「已開票期別金額變動」
+   * （後端會在該期備註留紀錄、版本跟著變），改用確認後重新讀到的版本，免得自己的上一步被當成別人的修改。
+   */
+  let expectedVersion = billingScheduleVersion(billings);
+  /** 銷售金額／期程會讓已開票期別金額改變（409）→ 跳確認視窗、填理由後帶 ack 重送。 */
+  const withInvoicedAck = async <T,>(call: (ack?: InvoicedAckBody) => Promise<T>): Promise<T> => {
+    let acked = false;
+    const result = await invoicedAck.run((ack) => {
+      if (ack) acked = true;
+      return call(ack);
+    });
+    if (acked) {
+      const fresh = await getBillingSchedule(project.id);
+      expectedVersion = fresh.version ?? billingScheduleVersion(fresh.installments);
+    }
+    return result;
+  };
   const api: SheetSaveApi = {
     updateProject: (body) => updateProjectFields(project.id, body),
     updateClient: async (id, body) => clientSaveWarningText(await updateClient(id, body)),
-    upsertMainContract: (body) => upsertMainContract(project.id, body),
-    updateContract: (id, body) => updateContract(id, body),
-    createQuotation: (body) => createContract(project.id, { docType: "quotation", title: "報價單", amount: body.amount }),
-    saveBillingSchedule: (installments) => saveBillingSchedule(project.id, installments),
+    upsertMainContract: (body) => withInvoicedAck((ack) => upsertMainContract(project.id, body, ack)),
+    updateContract: (id, body) => withInvoicedAck((ack) => updateContract(id, body, ack)),
+    createQuotation: (body) => withInvoicedAck((ack) => createContract(project.id, { docType: "quotation", title: "報價單", amount: body.amount }, ack)),
+    saveBillingSchedule: (installments) => invoicedAck.run((ack) => saveBillingSchedule(project.id, installments, { expectedVersion, ack })),
     invoiceBilling: (id, invoiceNo, invoicedOn) => invoiceBilling(id, invoicedOn ? { invoiceNo, invoicedOn } : { invoiceNo }),
     receiveBilling: (id, receivedOn) => receiveBilling(id, { receivedOn }),
     // 第六輪：改綁另一家名冊廠商且有未付期款 → 跳輸入框問原因後重送。
@@ -1575,6 +1597,7 @@ export function ApplicationSheet({
           </div>
         </div>
       )}
+      {invoicedAck.dialog}
       <ReinvoiceDialog target={reinvoiceTarget} onClose={() => setReinvoiceTarget(null)} onDone={async () => { if (load) await load(); }} />
     </section>
   );

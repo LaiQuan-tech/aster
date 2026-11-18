@@ -52,6 +52,12 @@ export function statusLabel(s: string | null): string {
     : (s ?? "—")
 }
 
+/**
+ * 確認「已開票期別金額會變動」（2026-11-18）：合約金額、請款／取消請款、整批改期程會讓已開票但未請款的期別金額變動時，
+ * 後端回 409 invoiced_amount_would_change；使用者確認並填理由後，帶這兩個欄位重送（該期備註與稽核會留紀錄）。
+ */
+export type InvoicedAckBody = { acknowledgeInvoicedChange: true; invoicedChangeReason: string }
+
 export interface Project {
   id: string
   name: string
@@ -359,10 +365,12 @@ export function createContract(
     /** 合約內容／說明（最長 2000 字）。只有 canSeeContractDocs 的人能帶，否則 403 forbidden_contract_content。 */
     contentNote?: string | null
   },
+  /** 已確認「已開票期別金額會變動」（409 invoiced_amount_would_change 後重送）。 */
+  ack?: InvoicedAckBody,
 ) {
   return apiFetch<{ contract: Contract }>(`/projects/${projectId}/contracts`, {
     method: "POST",
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, ...(ack ?? {}) }),
   })
 }
 
@@ -387,17 +395,18 @@ export function updateContract(
     /** 合約內容／說明；null 或空字串＝清空。權限同 createContract。 */
     contentNote?: string | null
   },
+  ack?: InvoicedAckBody,
 ) {
   return apiFetch<{ contract: Contract }>(`/contracts/${id}`, {
     method: "PATCH",
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, ...(ack ?? {}) }),
   })
 }
 
-export function deleteContract(id: string, reason: string) {
+export function deleteContract(id: string, reason: string, ack?: InvoicedAckBody) {
   return apiFetch<{ id: string }>(`/contracts/${id}`, {
     method: "DELETE",
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify({ reason, ...(ack ?? {}) }),
   })
 }
 

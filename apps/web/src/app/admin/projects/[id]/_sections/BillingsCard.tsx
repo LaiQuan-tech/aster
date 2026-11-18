@@ -2,6 +2,8 @@
 
 import { Fragment } from "react";
 import { MoneyInput } from "@/components/MoneyInput";
+import { useInvoicedAck } from "@/components/InvoicedAckDialog";
+import { billingScheduleVersion } from "@/lib/billing-version";
 import { Button, Card, PrimaryButton, ErrorText, inputCls } from "@/components/admin-ui";
 import {
   saveBillingSchedule,
@@ -94,6 +96,8 @@ export function BillingsCard({
   money,
 }: BillingsCardProps) {
   const receiptSummary = receiptSummaryText(money);
+  /** 請款／取消請款／改人工金額會讓已開票期別金額改變時（409），跳確認視窗、填理由後重送。 */
+  const invoicedAck = useInvoicedAck();
   function patchDraft(idx: number, patch: Partial<InstallmentInputExt>) {
     setDraft((d) => d.map((row, i) => (i === idx ? { ...row, ...patch } : row)));
   }
@@ -110,7 +114,9 @@ export function BillingsCard({
     try {
       // 整批端點：draft 是由已存檔的期程建出來的（含期別、說明、百分比、預定日原值），這裡只改了人工指定金額與理由。
       const sent = draft;
-      const res = await saveBillingSchedule(projectId, sent);
+      // 樂觀鎖：帶讀取時的期程版本（別人剛改過期程 → 409 conflict_retry，不會把對方新增的期別刪掉）。
+      const expectedVersion = schedule ? (schedule.version ?? billingScheduleVersion(schedule.installments)) : undefined;
+      const res = await invoicedAck.run((ack) => saveBillingSchedule(projectId, sent, { expectedVersion, ack }));
       setSchedule(res);
       await load();
       // 後端回 update_failed 的期別沒寫成：load() 會用已存檔的值重建草稿，這幾期要把剛才的輸入放回去。
@@ -129,7 +135,7 @@ export function BillingsCard({
   async function markBilled(id: string) {
     setError(null);
     try {
-      setSchedule(await billInstallmentExt(id));
+      setSchedule(await invoicedAck.run((ack) => billInstallmentExt(id, {}, ack)));
       await load();
     } catch (err) {
       setError(humanizeBillingError(err, humanError(err, "標記請款失敗")));
@@ -141,7 +147,7 @@ export function BillingsCard({
     if (!reason?.trim()) return;
     setError(null);
     try {
-      setSchedule(await unbillInstallmentExt(id, reason.trim()));
+      setSchedule(await invoicedAck.run((ack) => unbillInstallmentExt(id, reason.trim(), ack)));
       await load();
     } catch (err) {
       setError(humanizeBillingError(err, "取消請款失敗"));
@@ -243,7 +249,8 @@ export function BillingsCard({
               const saved = schedule?.installments.find((i) => i.id === rowDraft.id);
               const billed = !!saved?.billedOn;
               const received = !!saved?.receivedOn;
-              const locked = billed || received;
+              // 已開票（號碼或日期任一有值）也鎖：發票金額已開出，百分比／人工金額不能改（後端 409 invoiced_frozen）。
+              const locked = billed || received || (!!saved && isBillingInvoiced(saved));
               // B5：同一套三段狀態＋逾期 badge（跟 /admin/projects/receivables 共用顏色）。
               // API 有回 state 就用 API 的（後端依租戶逾期基準＋收足規則算好）；沒有才在前端算，
               // 前端版固定 'billed' 基準，並帶實收／有效金額讓部分入帳不被當成已收
@@ -463,6 +470,7 @@ export function BillingsCard({
         </span>
       </div>
       <ErrorText>{error}</ErrorText>
+      {invoicedAck.dialog}
     </Card>
   );
 }

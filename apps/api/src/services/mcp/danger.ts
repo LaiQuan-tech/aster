@@ -114,7 +114,24 @@ export const HIGH_RISK_DELETE_PREFIXES = [
 /** 員工資料裡屬於「角色／權限／帳號狀態」的欄位（PATCH /employees/:id 帶到任一個＝最高風險）。 */
 const EMPLOYEE_PRIVILEGE_KEYS = ["role", "status", "user_id", "userId", "features", "terminatedAt", "terminated_at", "companyId", "company_id"]
 
+/** body 帶 acknowledgeInvoicedChange: true（確認已開票期別金額變動，2026-11-18）。 */
+const acknowledgesInvoicedChange = (body: unknown): boolean =>
+  !!body && typeof body === "object" && !Array.isArray(body) && (body as Record<string, unknown>).acknowledgeInvoicedChange === true
+
+/** 確認「已開票期別金額變動」的請求一律最高風險（放最前面：dangerOf 取第一條符合的規則）。 */
+const INVOICED_ACK_LABEL = "確認已開發票的期別金額變動（發票金額與系統不一致）"
+const INVOICED_ACK_RULES: readonly DangerRule[] = [
+  { method: "PUT", path: "/projects/:id/main-contract", tier: "high", label: INVOICED_ACK_LABEL, when: acknowledgesInvoicedChange },
+  { method: "POST", path: "/projects/:id/contracts", tier: "high", label: INVOICED_ACK_LABEL, when: acknowledgesInvoicedChange },
+  { method: "PATCH", path: "/contracts/:id", tier: "high", label: INVOICED_ACK_LABEL, when: acknowledgesInvoicedChange },
+  { method: "DELETE", path: "/contracts/:id", tier: "high", label: INVOICED_ACK_LABEL, when: acknowledgesInvoicedChange },
+  { method: "PUT", path: "/projects/:id/billings", tier: "high", label: INVOICED_ACK_LABEL, when: acknowledgesInvoicedChange },
+  { method: "POST", path: "/billings/:id/bill", tier: "high", label: INVOICED_ACK_LABEL, when: acknowledgesInvoicedChange },
+  { method: "POST", path: "/billings/:id/unbill", tier: "high", label: INVOICED_ACK_LABEL, when: acknowledgesInvoicedChange },
+]
+
 export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
+  ...INVOICED_ACK_RULES,
   // 薪資結算／執行、期間鎖定
   { method: "POST", path: "/payroll/run", tier: "high", label: "執行薪資計算（產生／覆寫薪資單）" },
   { method: "POST", path: "/payslips/:id/finalize", tier: "high", label: "薪資單定案" },

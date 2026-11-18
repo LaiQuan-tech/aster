@@ -17,6 +17,15 @@ import { loadProjectScope } from "../services/project-scope.js"
 import { BILLING_KINDS, computeSchedule, effectiveBillingAmount } from "../services/project-money.js"
 import { serializeBilling } from "../services/project-application-store.js"
 import { writeAuditLog } from "../services/audit.js"
+import {
+  diffInvoicedAmounts,
+  invoicedAckOf,
+  invoicedAmountChanges,
+  invoicedChangeConflictBody,
+  isInvoicedBilling,
+  recordInvoicedChanges,
+} from "../services/invoiced-guard.js"
+import { billingScheduleVersion } from "../lib/billing-version.js"
 import { scheduleBonusRecompute } from "../services/bonus-run-store.js"
 import { logger } from "../lib/logger.js"
 import {
@@ -65,6 +74,8 @@ const installmentSchema = z.object({
 
 const saveSchema = z.object({
   installments: z.array(installmentSchema).max(100),
+  /** 樂觀鎖（2026-11-18）：讀取時的期程版本（GET 回的 version）。省略＝不檢查（舊版前端／MCP 相容）。 */
+  expectedVersion: z.string().max(40).optional(),
 })
 
 const billSchema = z.object({
@@ -83,8 +94,6 @@ const invoiceSchema = z.object({
 })
 
 const INVOICED_FROZEN_MESSAGE = "這一期已開發票，百分比與金額不能改；要改請先撤銷開票或用「修正」換發票。"
-const INVOICED_AMOUNT_CHANGE_MESSAGE =
-  "這次修改會讓已開發票的期別金額變動（例如它在吸收尾差）；請調整其他期別讓已開票期別金額不變，或先撤銷該期開票。"
 
 /** 修正開票（2026-11-18）：新號碼、新日期、理由全部必填。 */
 const reinvoiceSchema = z.object({
@@ -93,13 +102,8 @@ const reinvoiceSchema = z.object({
   reason: z.string().trim().min(1).max(500),
 })
 
-/**
- * 這一期算不算「已開票」：發票號碼或發票日期任一有值（2026-11-18）。
- * 舊資料可能只有號碼沒有日期（或反過來）；只看日期會讓「有號無日期」的期別既撤銷不了、也修正不了。
- */
-export function isInvoicedBilling(row: { invoice_no: string | null; invoiced_on: string | null }): boolean {
-  return !!row.invoiced_on || (row.invoice_no ?? "").trim() !== ""
-}
+/** 已開票判斷移到 services/invoiced-guard.ts（號碼或日期任一有值）；保留匯出相容。 */
+export { isInvoicedBilling }
 
 const receiveSchema = z.object({
   receivedOn: z.string().regex(dateRe).optional(),
@@ -152,6 +156,8 @@ async function respondSchedule(
     // 分母的組成攤開顯示，不藏起來——看不到組成就會有人去試算表對帳。
     contract: { total, base, changeOrders },
     installments,
+    /** 期程版本（樂觀鎖）：整批 PUT 帶回 expectedVersion。 */
+    version: billingScheduleVersion(installments),
     summary: {
       /** 只算 installment；guild_advance 不進百分比。 */
       percentageTotal: result.percentageTotal,
@@ -322,6 +328,11 @@ billingsRouter.put(
       }
 
       const existing = await loadBillings(tenantId, projectId)
+      // 樂觀鎖：讀取之後期程被別人改過（新增／移除／改百分比…）→ 409 conflict_retry，不拿舊畫面覆蓋（2026-11-18）。
+      if (parsed.data.expectedVersion !== undefined && billingScheduleVersion(existing.map(serializeBilling)) !== parsed.data.expectedVersion) {
+        res.status(409).json({ error: "conflict_retry", message: "期程已被其他人更新，請重新整理後再存。" })
+        return
+      }
       const byId = new Map(existing.map((r) => [r.id.toLowerCase(), r]))
       // 權限：帶 id 的項目必須是**本專案**現有（未刪）的期別。否則對 A 案有財務權的人可帶同租戶 B 案的
       // 期別 id 改掉它（還繞過已入帳凍結檢查）。在任何寫入前整批擋下。
@@ -375,47 +386,43 @@ billingsRouter.put(
         if (!row || row.received_on !== null || !isInvoicedBilling(row)) continue
         const pctChanged = (item.percentage ?? null) !== num(row.percentage)
         const overrideChanged = (item.overrideAmount ?? null) !== num(row.override_amount)
-        if (pctChanged || overrideChanged) {
+        // 類型也凍結：已開票的一般期別不可改成代墊款（代墊款不開發票），反之亦然。
+        const kindChanged = item.kind !== undefined && item.kind !== (row.kind ?? "installment")
+        if (pctChanged || overrideChanged || kindChanged) {
           res.status(409).json({ error: "invoiced_frozen", installmentNo: row.installment_no, message: INVOICED_FROZEN_MESSAGE })
           return
         }
       }
-      // 新增／移除其他期別、改其他期別百分比，會讓「已開票但未請款」期別的有效金額變動（例：它在吸收尾差）→ 擋下。
-      // 已請款的期別金額本來就凍結在請款金額，不會變；已入帳的上面已處理。
-      {
-        const watched = existing.filter((r) => isInvoicedBilling(r) && r.billed_on === null && keepIds.has(r.id.toLowerCase()))
-        if (watched.length > 0) {
-          const { total } = await contractTotal(tenantId, projectId)
-          const before = computeSchedule(existing.map(toScheduleInput), total)
-          const after = computeSchedule(
-            payload.map((item) => {
-              const saved = item.id ? byId.get(item.id) : undefined
-              return {
-                installmentNo: item.installmentNo,
-                kind: item.kind ?? saved?.kind ?? "installment",
-                percentage: item.percentage ?? null,
-                overrideAmount: item.overrideAmount ?? null,
-                billedAmount: saved ? num(saved.billed_amount) : null,
-                billed: !!saved && saved.billed_on !== null,
-              }
-            }),
-            total,
-          )
-          const beforeByNo = new Map(before.rows.map((r) => [r.installmentNo, r.effectiveAmount]))
-          const afterByNo = new Map(after.rows.map((r) => [r.installmentNo, r.effectiveAmount]))
-          for (const r of watched) {
-            const nextNo = payload.find((item) => item.id === r.id.toLowerCase())?.installmentNo ?? r.installment_no
-            if ((beforeByNo.get(r.installment_no) ?? null) !== (afterByNo.get(nextNo) ?? null)) {
-              res.status(409).json({
-                error: "invoiced_amount_would_change",
-                installmentNo: r.installment_no,
-                before: beforeByNo.get(r.installment_no) ?? null,
-                after: afterByNo.get(nextNo) ?? null,
-                message: INVOICED_AMOUNT_CHANGE_MESSAGE,
-              })
-              return
+      // 新增／移除其他期別、改其他期別百分比，會讓「已開票但未請款」期別的有效金額變動（例：它在吸收尾差）→ 409，
+      // 除非帶 acknowledgeInvoicedChange＋理由（寫入後在該期備註與稽核留紀錄）。已請款的期別金額凍結在請款金額，不會變。
+      const ack = invoicedAckOf(req.body)
+      if ("error" in ack) {
+        res.status(400).json({ error: ack.error })
+        return
+      }
+      let invoicedChanges: ReturnType<typeof diffInvoicedAmounts> = []
+      if (existing.some((r) => isInvoicedBilling(r) && r.billed_on === null)) {
+        const { total } = await contractTotal(tenantId, projectId)
+        invoicedChanges = diffInvoicedAmounts(
+          existing,
+          total,
+          payload.map((item) => {
+            const saved = item.id ? byId.get(item.id) : undefined
+            return {
+              installmentNo: item.installmentNo,
+              kind: item.kind ?? saved?.kind ?? "installment",
+              percentage: item.percentage ?? null,
+              overrideAmount: item.overrideAmount ?? null,
+              billedAmount: saved ? num(saved.billed_amount) : null,
+              billed: !!saved && saved.billed_on !== null,
             }
-          }
+          }),
+          total,
+          (r) => (keepIds.has(r.id.toLowerCase()) ? (payload.find((item) => item.id === r.id.toLowerCase())?.installmentNo ?? null) : null),
+        )
+        if (invoicedChanges.length > 0 && !ack.ack) {
+          res.status(409).json(invoicedChangeConflictBody(invoicedChanges))
+          return
         }
       }
 
@@ -550,6 +557,9 @@ billingsRouter.put(
         }
       }
       await recomputeBillings(tenantId, projectId)
+      if (invoicedChanges.length > 0 && ack.ack) {
+        await recordInvoicedChanges(tenantId, invoicedChanges, ack.reason, scope.self.id, "PUT /projects/:id/billings（確認已開票期別金額變動）")
+      }
       // 期別金額變小 → 已設定的每期分潤可能超額：不擋（分潤只是紀錄），回 warnings 讓前端顯示黃色提示。
       const over = await billingsOverShareLimit(tenantId, projectId)
       await respondSchedule(tenantId, projectId, res, {
@@ -601,6 +611,19 @@ billingsRouter.post(
         res.status(400).json({ error: "amount_unknown" })
         return
       }
+      // 這一期凍結後尾差改落到別期：若會讓「已開票但未請款」的期別金額變動 → 409（帶 ack＋理由才放行）。
+      const ack = invoicedAckOf(req.body)
+      if ("error" in ack) {
+        res.status(400).json({ error: ack.error })
+        return
+      }
+      const invoicedChanges = await invoicedAmountChanges(tenantId, row.project_id, {
+        rows: (rows) => rows.map((r) => (r.id === row.id ? { ...toScheduleInput(r), billed: true, billedAmount } : toScheduleInput(r))),
+      })
+      if (invoicedChanges.length > 0 && !ack.ack) {
+        res.status(409).json(invoicedChangeConflictBody(invoicedChanges))
+        return
+      }
 
       const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
@@ -624,6 +647,9 @@ billingsRouter.post(
       }
       // 這一期凍結後，尾差要改落到下一個未請款的期別。
       await recomputeBillings(tenantId, row.project_id)
+      if (invoicedChanges.length > 0 && ack.ack) {
+        await recordInvoicedChanges(tenantId, invoicedChanges, ack.reason, loaded.self.id, "POST /billings/:id/bill（確認已開票期別金額變動）")
+      }
       await respondSchedule(tenantId, row.project_id, res)
     } catch (err) {
       next(err)
@@ -660,6 +686,20 @@ billingsRouter.post(
         return
       }
 
+      // 取消請款後這一期回到試算、尾差可能改落點：若會讓「已開票但未請款」的期別金額變動 → 409（帶 ack＋理由才放行）。
+      const ack = invoicedAckOf(req.body)
+      if ("error" in ack) {
+        res.status(400).json({ error: ack.error })
+        return
+      }
+      const invoicedChanges = await invoicedAmountChanges(tenantId, row.project_id, {
+        rows: (rows) => rows.map((r) => (r.id === row.id ? { ...toScheduleInput(r), billed: false, billedAmount: null } : toScheduleInput(r))),
+      })
+      if (invoicedChanges.length > 0 && !ack.ack) {
+        res.status(409).json(invoicedChangeConflictBody(invoicedChanges))
+        return
+      }
+
       const note = appendNote(row.note, `取消請款（原 ${row.billed_on}）：${parsed.data.reason}`)
       const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
@@ -679,6 +719,9 @@ billingsRouter.post(
         return
       }
       await recomputeBillings(tenantId, row.project_id)
+      if (invoicedChanges.length > 0 && ack.ack) {
+        await recordInvoicedChanges(tenantId, invoicedChanges, ack.reason, loaded.self.id, "POST /billings/:id/unbill（確認已開票期別金額變動）")
+      }
       await respondSchedule(tenantId, row.project_id, res)
     } catch (err) {
       next(err)

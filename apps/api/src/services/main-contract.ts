@@ -80,7 +80,7 @@ export async function loadMainContract(tenantId: string, projectId: string): Pro
  * 舊資料沒有 is_primary：只在承攬合約版本鏈恰有一個 active leaf 時採用。
  * 多分支或多份無關合約都不猜，呼叫端會另建明確的主合約。
  */
-async function adoptableLegacyContract(tenantId: string, projectId: string): Promise<MainContractRow | null> {
+export async function adoptableLegacyContract(tenantId: string, projectId: string): Promise<MainContractRow | null> {
   const { data, error } = await supabaseAdmin
     .from("contracts")
     .select(MAIN_CONTRACT_COLS)

@@ -2,6 +2,7 @@
 
 import { Fragment, useId, type RefObject } from "react";
 import { MoneyInput } from "@/components/MoneyInput";
+import { useInvoicedAck } from "@/components/InvoicedAckDialog";
 import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   uploadProjectDocument,
@@ -104,6 +105,8 @@ export function ContractsCard({
   load,
 }: ContractsCardProps) {
   const addPanelId = useId();
+  /** 合約金額變動會讓已開票期別金額改變時（409），跳確認視窗、填理由後重送。 */
+  const invoicedAck = useInvoicedAck();
 
   async function addContract() {
     if (!cTitle.trim()) {
@@ -113,7 +116,7 @@ export function ContractsCard({
     setSavingContract(true);
     setError(null);
     try {
-      await createContract(projectId, {
+      await invoicedAck.run((ack) => createContract(projectId, {
         docType: cDocType,
         ourRole: cOurRole,
         title: cTitle.trim(),
@@ -123,7 +126,7 @@ export function ContractsCard({
         copies: Number(cCopies) || 1,
         // 內容欄位只有有權者能寫（沒權限的人表單上根本沒有這欄；帶了後端也回 403）。
         ...(canSeeContractDocs && cContentNote.trim() ? { contentNote: cContentNote.trim() } : {}),
-      });
+      }, ack));
       setCTitle("");
       setCCounterparty("");
       setCAmount("");
@@ -154,7 +157,7 @@ export function ContractsCard({
     if (ourRole === c.ourRole) return;
     setError(null);
     try {
-      await updateContract(c.id, { ourRole });
+      await invoicedAck.run((ack) => updateContract(c.id, { ourRole }, ack));
       await load();
     } catch (err) {
       setError(humanError(err, "更新失敗"));
@@ -191,7 +194,7 @@ export function ContractsCard({
     if (!reason?.trim()) return;
     setError(null);
     try {
-      await deleteContract(c.id, reason.trim());
+      await invoicedAck.run((ack) => deleteContract(c.id, reason.trim(), ack));
       await load();
     } catch (err) {
       setError(humanError(err, "作廢失敗"));
@@ -519,6 +522,7 @@ export function ContractsCard({
         </div>
       </div>
       <ErrorText>{error}</ErrorText>
+      {invoicedAck.dialog}
     </Card>
   );
 }

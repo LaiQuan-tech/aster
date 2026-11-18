@@ -15,11 +15,20 @@ import {
   resolveStampDutyRequired,
 } from "../services/stamp-duty.js"
 import { recomputeBillings } from "../services/billing-store.js"
+import {
+  invoicedAckOf,
+  invoicedAmountChanges,
+  invoicedChangeConflictBody,
+  predictContractTotal,
+  recordInvoicedChanges,
+  type InvoicedAmountChange,
+} from "../services/invoiced-guard.js"
 import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
 import {
   loadMainContract,
   serializeMainContract,
   upsertMainContract,
+  adoptableLegacyContract,
   MainContractGoneError,
 } from "../services/main-contract.js"
 import { withApplicationVersioning } from "../services/application-versions.js"
@@ -232,6 +241,32 @@ contractsRouter.get(
   },
 )
 
+/**
+ * 合約金額變動前的「已開票期別」守門（2026-11-18）：預測新分母下已開票未請款期別的有效金額，會變 → 409
+ * invoiced_amount_would_change（帶 acknowledgeInvoicedChange＋invoicedChangeReason 才放行，寫入後記備註與稽核）。
+ * 回傳 null＝已回應（呼叫端直接 return）；否則回傳要在寫入後記錄的變動（ack 時才有內容）。
+ */
+async function guardInvoicedByContract(
+  req: Request,
+  res: Response,
+  tenantId: string,
+  projectId: string,
+  mutate: Parameters<typeof predictContractTotal>[2],
+): Promise<{ changes: InvoicedAmountChange[]; reason: string } | null> {
+  const ack = invoicedAckOf(req.body)
+  if ("error" in ack) {
+    res.status(400).json({ error: ack.error })
+    return null
+  }
+  const total = await predictContractTotal(tenantId, projectId, mutate)
+  const changes = await invoicedAmountChanges(tenantId, projectId, { total })
+  if (changes.length > 0 && !ack.ack) {
+    res.status(409).json(invoicedChangeConflictBody(changes))
+    return null
+  }
+  return { changes: ack.ack ? changes : [], reason: ack.ack ? ack.reason : "" }
+}
+
 contractsRouter.put(
   "/projects/:id/main-contract",
   requireAuth,
@@ -246,6 +281,16 @@ contractsRouter.put(
       const scope = await loadProjectScope(tenantId, userId, req.params.id as string)
       if (!scope.ok) return res.status(scope.status).json({ error: scope.error })
       if (!scope.finance) return res.status(403).json({ error: "forbidden" })
+      // 已開票期別守門：主合約金額變了，分母跟著變。
+      const projectId = req.params.id as string
+      const existingMain = await loadMainContract(tenantId, projectId)
+      const legacy = existingMain ? null : await adoptableLegacyContract(tenantId, projectId)
+      const guard = await guardInvoicedByContract(req, res, tenantId, projectId, (rows) => {
+        const targetId = existingMain?.id ?? legacy?.id ?? null
+        if (targetId) return rows.map((r) => (r.id === targetId ? { ...r, amount: parsed.data.amount, is_primary: true } : r))
+        return [...rows, { id: "__new_main__", doc_type: "contract", our_role: "contractor", amount: parsed.data.amount, is_primary: true }]
+      })
+      if (!guard) return
       // 2026-11-10 申請單版本：合約金額（未稅）有變 → 同一流程內建版（services/application-versions.ts）。
       let contract: Awaited<ReturnType<typeof upsertMainContract>>
       let versioning: Awaited<ReturnType<typeof withApplicationVersioning>>["versioning"]
@@ -260,6 +305,9 @@ contractsRouter.put(
           return res.status(404).json({ error: "not_found", message: "主合約已被刪除（或專案已刪除），請重新整理" })
         }
         throw err
+      }
+      if (guard.changes.length > 0) {
+        await recordInvoicedChanges(tenantId, guard.changes, guard.reason, scope.self.id, "PUT /projects/:id/main-contract（確認已開票期別金額變動）")
       }
       // 分潤改版 #3：合約額變動 → 草稿獎金批次重算（best-effort）。
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/main-contract")
@@ -321,6 +369,12 @@ contractsRouter.post(
       const copies = b.copies ?? 1
       const duty = dutiable ? computeStampDuty({ amount: b.amount ?? null, rate, copies }) : null
 
+      // 已開票期別守門：新增合約／追加減會改變分母。
+      const guard = await guardInvoicedByContract(req, res, tenantId, req.params.id as string, (rows) => [
+        ...rows,
+        { id: "__new__", doc_type: b.docType, our_role: ourRole, amount: b.amount ?? null, is_primary: false },
+      ])
+      if (!guard) return
       // 2026-11-10 申請單版本：新增合約／追加減／報價單讓銷售金額（未稅）變了 → 同一流程內建版。
       const { result: inserted, versioning } = await withApplicationVersioning(
         { tenantId, projectId: req.params.id as string, empId: scope.self.id, source: "POST /projects/:id/contracts" },
@@ -363,6 +417,9 @@ contractsRouter.post(
         return
       }
       const data = inserted.data
+      if (guard.changes.length > 0) {
+        await recordInvoicedChanges(tenantId, guard.changes, guard.reason, scope.self.id, "POST /projects/:id/contracts（確認已開票期別金額變動）")
+      }
       // 分潤改版 #3：新增合約／追加減（change_order）→ 草稿獎金批次重算（best-effort）。
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "POST /projects/:id/contracts")
       res.status(201).json({ contract: serialize(data as ContractRow, canSeeContent), applicationVersion: versioning })
@@ -490,6 +547,17 @@ contractsRouter.patch(
       // project_billings.calculated_amount 停在舊值（驗收抓到的 B 批次問題 1）。
       // docType 也是分母條件，但 PATCH 刻意不開放改（見 updateSchema），不必列。
       const amountTouched = b.amount !== undefined || b.ourRole !== undefined
+      // 已開票期別守門：金額或我方角色變了，分母可能跟著變。
+      const guard = amountTouched
+        ? await guardInvoicedByContract(req, res, tenantId, row.project_id, (rows) =>
+            rows.map((r) =>
+              r.id === row.id
+                ? { ...r, ...(b.amount !== undefined ? { amount: b.amount } : {}), ...(b.ourRole !== undefined ? { our_role: b.ourRole } : {}) }
+                : r,
+            ),
+          )
+        : { changes: [], reason: "" }
+      if (!guard) return
       const write = async () => {
         const { data, error } = await supabaseAdmin
           .from("contracts")
@@ -522,6 +590,9 @@ contractsRouter.patch(
         return
       }
       const data = written.data
+      if (guard.changes.length > 0) {
+        await recordInvoicedChanges(tenantId, guard.changes, guard.reason, scope.self.id, "PATCH /contracts/:id（確認已開票期別金額變動）")
+      }
       if (amountTouched) {
         // 分潤改版 #3：合約額（或是否算我方營收）變動 → 草稿獎金批次重算（best-effort）。
         await recomputeDraftRunsAfterWrite(tenantId, [row.project_id], "PATCH /contracts/:id")
@@ -590,6 +661,11 @@ contractsRouter.delete(
         res.status(409).json({ error: "primary_contract_requires_main_endpoint" })
         return
       }
+      // 已開票期別守門：作廢合約會改變分母。
+      const guard = await guardInvoicedByContract(req, res, tenantId, current.project_id as string, (rows) =>
+        rows.filter((r) => r.id !== req.params.id),
+      )
+      if (!guard) return
       // 金額憑證不實體刪除（sql/0018 同一套理由）——已貼花的合約更是如此，
       // 刪掉等於把「這筆稅貼過了」的證據一起刪掉。
       // 2026-11-10 申請單版本：作廢合約／報價單讓銷售金額（未稅）變了 → 同一流程內建版。
@@ -615,6 +691,9 @@ contractsRouter.delete(
       if (deleteError) {
         next(deleteError)
         return
+      }
+      if (guard.changes.length > 0) {
+        await recordInvoicedChanges(tenantId, guard.changes, guard.reason, scope.self.id, "DELETE /contracts/:id（確認已開票期別金額變動）")
       }
       await recomputeDraftRunsAfterWrite(tenantId, [current.project_id as string], "DELETE /contracts/:id")
       res.status(200).json({ id: req.params.id, applicationVersion: versioning })

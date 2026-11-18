@@ -15,7 +15,7 @@ import { apiFetch, apiDownload } from "./api-client"
 import type { ProjectRegisterCells } from "./project-register"
 import type {
   Project, ProjectStatus, ShareMode, Installment, InstallmentInput, DocType, OurRole, Contract,
-  ProjectSort, SortDir, ProjectMemberRole,
+  ProjectSort, SortDir, ProjectMemberRole, InvoicedAckBody,
 } from "./projects-api"
 
 /* ============================================================== 通用列舉 == */
@@ -321,10 +321,10 @@ export function getMainContract(projectId: string) {
   return apiFetch<{ contract: MainContract | null }>(`/projects/${projectId}/main-contract`)
 }
 
-export function upsertMainContract(projectId: string, body: MainContractInput) {
+export function upsertMainContract(projectId: string, body: MainContractInput, ack?: InvoicedAckBody) {
   return apiFetch<{ contract: MainContract }>(`/projects/${projectId}/main-contract`, {
     method: "PUT",
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, ...(ack ?? {}) }),
   })
 }
 
@@ -476,6 +476,8 @@ export interface BillingExt extends Installment {
 export interface BillingScheduleExt {
   contract: { total: number | null; base: number; changeOrders: number }
   installments: BillingExt[]
+  /** 期程版本（樂觀鎖，2026-11-18）；舊版 API 沒回＝缺席。 */
+  version?: string
   summary: {
     percentageTotal: number
     effectiveTotal: number
@@ -505,17 +507,24 @@ export function getBillingSchedule(projectId: string) {
   return apiFetch<BillingScheduleExt>(`/projects/${projectId}/billings`)
 }
 /** 整批存：跟原本 saveBillings 同一個端點，型別多帶 kind。 */
-export function saveBillingSchedule(projectId: string, installments: InstallmentInputExt[]) {
+/**
+ * opts.expectedVersion：讀取時的期程版本（樂觀鎖；不符 → 409 conflict_retry）；opts.ack：確認已開票期別金額變動後重送。
+ */
+export function saveBillingSchedule(
+  projectId: string,
+  installments: InstallmentInputExt[],
+  opts: { expectedVersion?: string; ack?: InvoicedAckBody } = {},
+) {
   return apiFetch<BillingScheduleExt>(`/projects/${projectId}/billings`, {
     method: "PUT",
-    body: JSON.stringify({ installments }),
+    body: JSON.stringify({ installments, ...(opts.expectedVersion ? { expectedVersion: opts.expectedVersion } : {}), ...(opts.ack ?? {}) }),
   })
 }
-export function billInstallmentExt(id: string, body: { billedOn?: string; billedAmount?: number | null } = {}) {
-  return apiFetch<BillingScheduleExt>(`/billings/${id}/bill`, { method: "POST", body: JSON.stringify(body) })
+export function billInstallmentExt(id: string, body: { billedOn?: string; billedAmount?: number | null } = {}, ack?: InvoicedAckBody) {
+  return apiFetch<BillingScheduleExt>(`/billings/${id}/bill`, { method: "POST", body: JSON.stringify({ ...body, ...(ack ?? {}) }) })
 }
-export function unbillInstallmentExt(id: string, reason: string) {
-  return apiFetch<BillingScheduleExt>(`/billings/${id}/unbill`, { method: "POST", body: JSON.stringify({ reason }) })
+export function unbillInstallmentExt(id: string, reason: string, ack?: InvoicedAckBody) {
+  return apiFetch<BillingScheduleExt>(`/billings/${id}/unbill`, { method: "POST", body: JSON.stringify({ reason, ...(ack ?? {}) }) })
 }
 export function invoiceBilling(id: string, body: { invoiceNo: string; invoicedOn?: string }) {
   return apiFetch<BillingScheduleExt>(`/billings/${id}/invoice`, { method: "POST", body: JSON.stringify(body) })
@@ -546,6 +555,8 @@ export const BILLING_ERRORS: Record<string, string> = {
   invoiced_frozen: "已開發票的期別金額已凍結，不能改百分比／金額；要改請先撤銷開票或用「修正」換發票。",
   invoiced_amount_would_change: "這次修改會讓已開發票的期別金額變動（例如它在吸收尾差），請調整其他期別讓該期金額不變，或先撤銷該期開票。",
   advance_not_invoiceable: "技師公會代墊（代墊款）不開發票。",
+  invoiced_change_reason_required: "確認已開票期別金額變動時必須填理由。",
+  conflict_retry: "期程已被其他人更新，這次沒有儲存；請重新整理後再存。",
   received: "已入帳的期別金額已凍結，不能移除或改百分比／覆寫金額。",
   duplicate_installment_no: "期別編號重複。",
   installment_no_taken: "期別編號已存在。",
