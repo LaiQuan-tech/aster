@@ -169,7 +169,7 @@ export function shareLimitOf(billingAmount: number | null, bonusAmount: number |
  * bonusAmount undefined＝沿用已存的（沒改）。
  */
 export function paidBillingChanged(
-  saved: Pick<BillingShareSet, "bonusPaidOn" | "bonusAmount" | "shares">,
+  saved: { bonusPaidOn: string | null; bonusAmount: number | null; shares: ReadonlyArray<{ employeeId: string; amount: number }> },
   next: { bonusPaidOn: string | null; bonusAmount?: number | null; shares: readonly ShareInput[] },
 ): boolean {
   if ((saved.bonusPaidOn ?? null) !== (next.bonusPaidOn ?? null)) return true

@@ -726,9 +726,9 @@ export type PreviewResult = {
    * 2026-11-19：自動帶入的每期款獎金（發獎金日 ≤ 本季季末、尚未發放；services/billing-bonus.ts）。
    * 與季獎金比例制明細（items）並列、分開算；items／totals.amount 的算法與改前完全相同。
    */
-  billingItems: SerializedRunBillingItem[]
-  /** 內部：寫入用的每期分潤列。 */
-  billingCalc: RunBillingItemCalc[]
+  billingItems?: SerializedRunBillingItem[]
+  /** 內部：寫入用的每期分潤列（舊呼叫端／測試建構的結果可省略＝沒有）。 */
+  billingCalc?: RunBillingItemCalc[]
 }
 
 /**
@@ -990,8 +990,8 @@ export type RunDetail = {
   run: SerializedRun
   items: SerializedItem[]
   snapshot: Record<string, unknown> | null
-  /** 2026-11-19：本批帶入的每期款獎金（來源「每期款獎金：專案X第N期」）；沒有＝空陣列。 */
-  billingItems: SerializedRunBillingItem[]
+  /** 2026-11-19：本批帶入的每期款獎金（來源「每期款獎金：專案X第N期」）；getRun 一定帶（沒有＝空陣列）。 */
+  billingItems?: SerializedRunBillingItem[]
 }
 
 export async function getRun(tenantId: string, id: string): Promise<RunDetail | null> {
@@ -1043,9 +1043,9 @@ export async function createRun(tenantId: string, actor: Actor, input: CreateRun
       throw new Error(`bonus-run createRun (items): ${iErr.message}`)
     }
   }
-  if (preview.billingCalc.length > 0) {
+  if ((preview.billingCalc ?? []).length > 0) {
     try {
-      await replaceRunBillingItems(tenantId, runRow.id, billingRowsOf(preview.billingCalc))
+      await replaceRunBillingItems(tenantId, runRow.id, billingRowsOf(preview.billingCalc ?? []))
     } catch (bErr) {
       await supabaseAdmin
         .from("bonus_runs")
@@ -1059,7 +1059,7 @@ export async function createRun(tenantId: string, actor: Actor, input: CreateRun
     tableName: "bonus_runs",
     recordId: runRow.id,
     action: "INSERT",
-    newRow: { label: input.label, as_of: input.asOf, note: input.note ?? null, totals: preview.totals, item_count: rows.length, billing_item_count: preview.billingCalc.length },
+    newRow: { label: input.label, as_of: input.asOf, note: input.note ?? null, totals: preview.totals, item_count: rows.length, billing_item_count: (preview.billingCalc ?? []).length },
     actorEmpId: actor.empId,
     context: "POST /bonus-runs",
   })
@@ -1120,7 +1120,7 @@ export async function updateRun(
     // 退回落地後 payRun 的 WHERE status='approved' 必然 0 列；payRun 先落地則這裡 0 列 → 409，明細不動。
     const fp = amountFingerprint([
       ...preview.calc.map((i) => ({ projectId: i.projectId, employeeId: i.employeeId, amount: i.amount })),
-      ...billingFingerprintEntries(preview.billingCalc),
+      ...billingFingerprintEntries(preview.billingCalc ?? []),
     ])
     const after = statusAfterRecompute(current.status, current.approved_fingerprint ?? null, fp)
     if (after.returned) {
@@ -1162,7 +1162,7 @@ export async function updateRun(
     }
     // 每期款獎金列：未發放批次整批換掉（paid 批次 DB 觸發器擋 → 409）。
     try {
-      await replaceRunBillingItems(tenantId, id, billingRowsOf(preview.billingCalc))
+      await replaceRunBillingItems(tenantId, id, billingRowsOf(preview.billingCalc ?? []))
     } catch (bErr) {
       if (isPaidFrozen(bErr as { code?: string; message?: string })) throw new BonusRunError(409, "not_draft", { status: "paid" })
       throw bErr

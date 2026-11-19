@@ -360,10 +360,10 @@ describe("季獎金批次自動帶入每期款獎金", () => {
     expect((rev.body.billingItems as Row[]).map((b) => b.amount).sort((a: number, b: number) => a - b)).toEqual([-600, -400, -100])
     expect(rev.body.run.totals.billingAmount).toBe(-1100)
     // 沖銷還沒發放：仍算已發，Q4 不帶 Q3 那期
-    expect((await previewRun(TENANT_ID, "2026-12-31", null, "2026-Q4")).billingItems.map((b) => b.billingId)).toEqual([BQ4])
+    expect((await previewRun(TENANT_ID, "2026-12-31", null, "2026-Q4")).billingItems!.map((b) => b.billingId)).toEqual([BQ4])
     await approveAndPay(rev.body.run.id as string, "2026-10-06")
     const again = await previewRun(TENANT_ID, "2026-12-31", null, "2026-Q4")
-    expect(again.billingItems.map((b) => b.billingId).sort()).toEqual([BQ3, BQ3, BQ4, BQ2].sort())
+    expect(again.billingItems!.map((b) => b.billingId).sort()).toEqual([BQ3, BQ3, BQ4, BQ2].sort())
   })
 
   it("草稿重算：改了每期分潤後重算，帶入列整批換掉；發獎金日移到下一季 → 移除", async () => {
