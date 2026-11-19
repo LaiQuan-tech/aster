@@ -413,3 +413,124 @@ describe("2026-11-11 驗收修正 2", () => {
     expect(ok.errors).toEqual([])
   })
 })
+
+/* ── 2026-11-19 本期獎金／算法說明／獎金上限／已發鎖定（migration 0119） ── */
+import {
+  currentBonusAmount,
+  currentFormulaNote,
+  overviewCells,
+  parseCapPct,
+  shareCapOf,
+  shareCellSummary,
+} from "../project-billing-shares"
+
+describe("2026-11-19 本期獎金與專案獎金總覽", () => {
+  const ready = (over: Partial<NonNullable<BillingSharesView>> = {}) =>
+    view({
+      quarterReady: true,
+      overview: { contractTotal: 1_000_000, capPct: 10, cap: 100_000, paidBilling: 20_000, paidQuarterly: 5_000, paidTotal: 25_000, paidPct: 2.5, setUnpaid: 30_000, available: 45_000, dualSource: false },
+      ...over,
+    })
+
+  it("純函式：本期獎金／算法說明的目前值、分配上限、格子摘要、上限比例解析", () => {
+    const set = { billingId: "b1", billingAmount: 100000, bonusPaidOn: null, bonusAmount: 5000, formulaNote: "50萬×1%", total: 0, shares: [] }
+    expect(currentBonusAmount(set, undefined)).toBe("5000")
+    expect(currentBonusAmount(set, { bonusAmount: "" })).toBe("")
+    expect(currentBonusAmount({ ...set, bonusAmount: null }, undefined)).toBe("")
+    expect(currentFormulaNote(set, undefined)).toBe("50萬×1%")
+    expect(shareCapOf("5000", 100000)).toEqual({ cap: 5000, byBonus: true })
+    expect(shareCapOf("0", 100000)).toEqual({ cap: 0, byBonus: true })
+    expect(shareCapOf("", 100000)).toEqual({ cap: 100000, byBonus: false })
+    expect(shareCapOf("abc", 100000)).toEqual({ cap: 100000, byBonus: false })
+    expect(shareCellSummary([{ employeeId: EMP_A, amount: "3000" }], "5000")).toBe("本期 5,000 · 1 人 · 3,000")
+    expect(shareCellSummary([], "")).toBe("")
+    expect(parseCapPct("12.5")).toBe(12.5)
+    expect(parseCapPct("10%")).toBe(10)
+    expect(parseCapPct("")).toBeNull()
+    expect(parseCapPct("101")).toBe("invalid")
+    expect(parseCapPct("1.2345")).toBe("invalid")
+  })
+
+  it("總覽五格：合約（未稅）｜上限＝合約×比例｜已發（每期＋季獎金、占合約 %）｜可發餘額｜已設定未發；草稿比例即時重算、負數紅字", () => {
+    const o = ready().overview!
+    const cells = overviewCells(o)
+    expect(cells.map((c) => [c.key, c.value])).toEqual([
+      ["contract", "1,000,000"], ["cap", "100,000"], ["paid", "25,000"], ["available", "45,000"], ["setUnpaid", "30,000"],
+    ])
+    expect(cells.find((c) => c.key === "paid")!.hint).toBe("每期款 20,000＋季獎金 5,000；占合約 2.5%")
+    const lower = overviewCells(o, "5")
+    expect(lower.find((c) => c.key === "cap")!.value).toBe("50,000")
+    expect(lower.find((c) => c.key === "available")).toMatchObject({ value: "-5,000", danger: true })
+    expect(overviewCells(o, "").find((c) => c.key === "cap")).toMatchObject({ value: "—", hint: "未設上限比例" })
+  })
+
+  it("存檔計畫：分給成員合計 ≤ 本期獎金（不是該期金額）；只改本期獎金／算法說明也送，鍵只在有改時帶", () => {
+    const ctx = ctxOf({ billingShares: ready() })
+    const over = applicationSheetPlan(ctx, draftOf(ctx, { shareEdits: { b2: { bonusAmount: "1000", lines: [{ employeeId: EMP_A, amount: "1001" }] } } }))
+    expect(over.errors.find((e) => e.field === "stage:b2:shares")?.message).toContain("超過本期獎金 1,000")
+    const ok = sharePlan(ctx, draftOf(ctx, { shareEdits: { b2: { bonusAmount: "1000", formulaNote: " 10萬×1% ", lines: [{ employeeId: EMP_A, amount: "1000" }] } } }))
+    expect(ok.errors).toEqual([])
+    expect(ok.items).toEqual([{ key: "b2", label: "第 2 列", billingId: "b2", bonusPaidOn: null, shares: [{ employeeId: EMP_A, amount: 1000 }], bonusAmount: 1000, formulaNote: "10萬×1%" }])
+    // 只改說明：不帶 bonusAmount 鍵
+    const noteOnly = sharePlan(ctx, draftOf(ctx, { shareEdits: { b1: { formulaNote: "補說明" } } }))
+    expect(noteOnly.items).toEqual([{ key: "b1", label: "第 1 列", billingId: "b1", bonusPaidOn: "2026-12-20", shares: [{ employeeId: EMP_A, amount: 30000 }], formulaNote: "補說明" }])
+    // 本期獎金格式錯
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { shareEdits: { b2: { bonusAmount: "-1" } } })).errors.some((e) => e.field === "stage:b2:bonusAmount")).toBe(true)
+  })
+
+  it("migration 0119 未套用（quarterReady 不是 true）：本期獎金草稿不送、不檢查（舊行為）", () => {
+    const ctx = ctxOf()
+    const plan = sharePlan(ctx, draftOf(ctx, { shareEdits: { b2: { bonusAmount: "1", lines: [{ employeeId: EMP_A, amount: "500" }] } } }))
+    expect(plan.errors).toEqual([])
+    expect(plan.items[0]).not.toHaveProperty("bonusAmount")
+  })
+
+  it("已隨季獎金發放的期別：改人／金額／本期獎金／發獎金日 → 擋存；只改算法說明可以", () => {
+    const paidView = ready({
+      billings: [
+        { billingId: "b1", billingAmount: 100000, bonusPaidOn: "2026-12-20", bonusAmount: 30000, total: 30000, paid: true, paidAmount: 30000, shares: [{ id: "s1", employeeId: EMP_A, employeeName: "測試甲", amount: 30000, note: null }] },
+        { billingId: "b2", billingAmount: 100000, bonusPaidOn: null, total: 0, shares: [] },
+      ],
+    })
+    const ctx = ctxOf({ billingShares: paidView })
+    for (const edit of [{ lines: [{ employeeId: EMP_A, amount: "1" }] }, { bonusPaidOn: "2026-12-21" }, { bonusAmount: "40000" }]) {
+      const plan = applicationSheetPlan(ctx, draftOf(ctx, { shareEdits: { b1: edit } }))
+      expect(plan.errors.some((e) => e.field === "stage:b1:shares" && /已隨季獎金發放/.test(e.message)), JSON.stringify(edit)).toBe(true)
+    }
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { shareEdits: { b1: { formulaNote: "補" } } })).errors).toEqual([])
+  })
+
+  it("獎金上限比例：有改才送（PUT 帶 capPct）；不合法擋存；只改比例也會呼叫一次", async () => {
+    const ctx = ctxOf({ billingShares: ready() })
+    expect(sharePlan(ctx, draftOf(ctx, { billingCapPct: "10" })).capPct).toBeUndefined()
+    expect(sharePlan(ctx, draftOf(ctx, { billingCapPct: "12.5" })).capPct).toBe(12.5)
+    expect(sharePlan(ctx, draftOf(ctx, { billingCapPct: "" })).capPct).toBeNull()
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { billingCapPct: "120" })).errors.some((e) => e.field === "billingCapPct")).toBe(true)
+    const draft = draftOf(ctx, { billingCapPct: "8" })
+    const plan = applicationSheetPlan(ctx, draft)
+    const save = vi.fn(async () => {})
+    const api = {
+      updateProject: vi.fn(async () => {}), updateClient: vi.fn(async () => null), upsertMainContract: vi.fn(async () => {}),
+      updateContract: vi.fn(async () => {}), createQuotation: vi.fn(async () => {}), saveBillingSchedule: vi.fn(async () => ({ installments: [] })),
+      invoiceBilling: vi.fn(async () => {}), receiveBilling: vi.fn(async () => {}), putSubcontracts: vi.fn(async () => {}),
+      saveBillingShares: save, humanize: () => "錯誤",
+    } as unknown as SheetSaveApi
+    const res = await runApplicationSheetSave(plan, draft, api)
+    expect(save).toHaveBeenCalledWith([], { capPct: 8 })
+    expect(res.residual.billingCapPct).toBeUndefined()
+  })
+
+  it("要刪的期別只有本期獎金／算法說明：也算「有設定」，草稿清空後先送清除（帶 bonusAmount／formulaNote null）", () => {
+    const v = ready({
+      billings: [
+        { billingId: "b1", billingAmount: 100000, bonusPaidOn: null, bonusAmount: 500, formulaNote: "x", total: 0, shares: [] },
+        { billingId: "b2", billingAmount: 100000, bonusPaidOn: null, total: 0, shares: [] },
+      ],
+    })
+    const ctx = ctxOf({ billingShares: v })
+    const blocked = applicationSheetPlan(ctx, draftOf(ctx, { stageRemovedIds: ["b1"] }))
+    expect(blocked.errors.some((e) => /請先清除/.test(e.message))).toBe(true)
+    const cleared = sharePlan(ctx, draftOf(ctx, { stageRemovedIds: ["b1"], shareEdits: { b1: { bonusAmount: "", formulaNote: "" } } }))
+    expect(cleared.items).toEqual([{ key: "b1", label: "第 1 列", billingId: "b1", bonusPaidOn: null, shares: [], beforeSchedule: true, bonusAmount: null, formulaNote: null }])
+  })
+})

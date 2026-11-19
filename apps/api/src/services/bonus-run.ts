@@ -249,6 +249,14 @@ export type BonusTotals = {
   skipped: BonusSkipped[]
   /** 入帳超過合約等提醒（舊批次沒有這個鍵）。 */
   warnings?: BonusWarning[]
+  /**
+   * 2026-11-19：本批帶入的每期款獎金（services/billing-bonus.ts）。只有帶入時才有這些鍵；
+   * amount 仍只是季獎金比例制，本批實發＝amount＋billingAmount。
+   */
+  billingAmount?: number
+  billingItemCount?: number
+  billingEmployeeCount?: number
+  billingProjectCount?: number
 }
 
 export type BonusRunCalc = {

@@ -161,6 +161,8 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "POST", path: "/billings/:id/uninvoice", label: "取消開立發票" },
   { method: "POST", path: "/billings/:id/reinvoice", tier: "high", label: "修正已開立的發票號碼／日期" },
   { method: "PUT", path: "/projects/:id/share-revision", label: "修訂專案分潤" },
+  // 2026-11-19 每期款獎金（本期獎金／分潤／上限比例）會自動帶入季獎金批次發放：最高風險（原 2026-11-11 為中風險）。
+  { method: "PUT", path: "/projects/:id/billing-shares", tier: "high", label: "修改每期款獎金（本期獎金／分潤／上限）" },
   { method: "PUT", path: "/projects/:id/subcontracts/:sid/payments", label: "修改複委託付款" },
   // 獎金批次
   { method: "POST", path: "/bonus-runs/:id/approve", tier: "high", label: "核准獎金批次" },
@@ -278,8 +280,6 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "PUT", path: "/projects/:id/main-contract", label: "修改專案主合約" },
   // 2026-11-10 申請單手動另存新版本（只多一筆版本紀錄、不改任何資料）：中風險。
   { method: "POST", path: "/projects/:id/application-versions", label: "申請單另存新版本" },
-  // 2026-11-11 每期款獎金分潤（按期另外發的紀錄，不動薪資／季獎金）：中風險。
-  { method: "PUT", path: "/projects/:id/billing-shares", label: "修改每期款獎金分潤" },
   { method: "POST", path: "/projects/:id/members", label: "新增專案成員（影響分潤）" },
   { method: "PATCH", path: "/projects/:id/members/:memberId", label: "修改專案成員（影響分潤）" },
   { method: "POST", path: "/billings/:id/bill", label: "請款" },

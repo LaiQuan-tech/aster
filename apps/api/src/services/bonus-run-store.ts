@@ -14,6 +14,23 @@ import { actorIsInactive } from "../lib/actor-status.js"
 import { bonusRunsHaveApproval } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
 import {
+  BILLING_BONUS_PAID_ERRCODE,
+  billingFingerprintEntries,
+  billingNetKey,
+  compareBillingItems,
+  loadBillingNetPaid,
+  loadRunBillingCandidates,
+  loadRunBillingItemRows,
+  replaceRunBillingItems,
+  runQuarterOf,
+  serializeCandidate,
+  serializeRunBillingItem,
+  sourceLabelOf,
+  type RunBillingItemCalc,
+  type RunBillingItemRow,
+  type SerializedRunBillingItem,
+} from "./billing-bonus.js"
+import {
   AMOUNT_CHANGED_RETURN_REASON,
   amountFingerprint,
   archiveStageOf,
@@ -24,6 +41,7 @@ import {
   type BonusPoolBasis,
   buildBonusSummary,
   computeBonusRun,
+  defaultRunLabel,
   projectBonusBasisOf,
   type ArchiveStage,
   type BonusBasis,
@@ -704,15 +722,45 @@ export type PreviewResult = {
   calc: BonusItemCalc[]
   projectMeta: Map<string, ProjectMeta>
   employeeMeta: Map<string, EmployeeMeta>
+  /**
+   * 2026-11-19：自動帶入的每期款獎金（發獎金日 ≤ 本季季末、尚未發放；services/billing-bonus.ts）。
+   * 與季獎金比例制明細（items）並列、分開算；items／totals.amount 的算法與改前完全相同。
+   */
+  billingItems: SerializedRunBillingItem[]
+  /** 內部：寫入用的每期分潤列。 */
+  billingCalc: RunBillingItemCalc[]
 }
 
-export async function previewRun(tenantId: string, asOf: string, excludeRunId?: string | null): Promise<PreviewResult> {
-  const [inputs, paidBefore, previousReceived] = await Promise.all([
+/**
+ * 季獎金批次總計補上每期款獎金（有帶入才加鍵，沒有每期分潤的批次 totals 與改前相同）。
+ * totals.amount 仍只是季獎金比例制；billingAmount 是每期款獎金；兩者相加＝本批實發。
+ */
+export function withBillingTotals(totals: BonusTotals, billing: ReadonlyArray<{ employeeId: string; projectId: string; amount: number }>): BonusTotals {
+  if (billing.length === 0) return totals
+  const billingAmount = Math.round(billing.reduce((s, b) => s + Math.round(b.amount * 100), 0)) / 100
+  return {
+    ...totals,
+    billingAmount,
+    billingItemCount: billing.length,
+    billingEmployeeCount: new Set(billing.map((b) => b.employeeId.toLowerCase())).size,
+    billingProjectCount: new Set(billing.map((b) => b.projectId.toLowerCase())).size,
+  }
+}
+
+/** 本批實發合計＝季獎金比例制＋每期款獎金。 */
+export function runGrandAmount(totals: Partial<BonusTotals> | null | undefined): number {
+  return Math.round(((totals?.amount ?? 0) + (totals?.billingAmount ?? 0)) * 100) / 100
+}
+
+export async function previewRun(tenantId: string, asOf: string, excludeRunId?: string | null, label?: string | null): Promise<PreviewResult> {
+  const [inputs, paidBefore, previousReceived, billingCalc] = await Promise.all([
     loadInputs(tenantId, asOf),
     loadPaidBefore(tenantId, excludeRunId),
     loadPreviousReceived(tenantId, asOf, excludeRunId),
+    loadRunBillingCandidates(tenantId, { label: label ?? defaultRunLabel(asOf), asOf }, excludeRunId),
   ])
-  const { items, totals, settledArchived = [] } = computeBonusRun(inputs.projects, paidBefore, previousReceived)
+  const { items, totals: baseTotals, settledArchived = [] } = computeBonusRun(inputs.projects, paidBefore, previousReceived)
+  const totals = withBillingTotals(baseTotals, billingCalc)
   const settledSet = new Set(settledArchived)
   const skippedIds = new Set(totals.skipped.map((s) => s.projectId))
   const metaOf = (projectId: string) => inputs.projectMeta.get(projectId)
@@ -803,7 +851,12 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
     }
   })
   serialized.sort(compareItems)
-  return { asOf, items: serialized, totals, snapshot, calc: items, projectMeta: inputs.projectMeta, employeeMeta: inputs.employeeMeta }
+  const billingItems = billingCalc.map(serializeCandidate).sort(compareBillingItems)
+  return { asOf, items: serialized, totals, snapshot, calc: items, projectMeta: inputs.projectMeta, employeeMeta: inputs.employeeMeta, billingItems, billingCalc }
+}
+
+function billingRowsOf(calc: readonly RunBillingItemCalc[]) {
+  return calc.map((c) => ({ billingId: c.billingId, projectId: c.projectId, employeeId: c.employeeId, amount: c.amount, bonusPaidOn: c.bonusPaidOn, snapshot: c.snapshot }))
 }
 
 /** 成本／毛利欄只在毛利制輸出；Excel 含稅入帳制不扣成本，這些欄位一律 null（畫面不顯示毛利）。 */
@@ -933,14 +986,21 @@ async function reversalOf(tenantId: string, runId: string): Promise<{ id: string
   return data ? { id: data.id as string, status: data.status as string } : null
 }
 
-export type RunDetail = { run: SerializedRun; items: SerializedItem[]; snapshot: Record<string, unknown> | null }
+export type RunDetail = {
+  run: SerializedRun
+  items: SerializedItem[]
+  snapshot: Record<string, unknown> | null
+  /** 2026-11-19：本批帶入的每期款獎金（來源「每期款獎金：專案X第N期」）；沒有＝空陣列。 */
+  billingItems: SerializedRunBillingItem[]
+}
 
 export async function getRun(tenantId: string, id: string): Promise<RunDetail | null> {
   const row = await loadRun(tenantId, id)
   if (!row) return null
   const items = (await loadItemRows(tenantId, id)).filter((r) => !isStale(r)).map(serializeItem)
   items.sort(compareItems)
-  return { run: serializeRun(row, await reversalOf(tenantId, id)), items, snapshot: row.snapshot }
+  const billingItems = (await loadRunBillingItemRows(tenantId, [id])).map(serializeRunBillingItem).sort(compareBillingItems)
+  return { run: serializeRun(row, await reversalOf(tenantId, id)), items, snapshot: row.snapshot, billingItems }
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -950,7 +1010,7 @@ export async function getRun(tenantId: string, id: string): Promise<RunDetail | 
 export type CreateRunInput = { label: string; asOf: string; note?: string | null }
 
 export async function createRun(tenantId: string, actor: Actor, input: CreateRunInput): Promise<RunDetail> {
-  const preview = await previewRun(tenantId, input.asOf, null)
+  const preview = await previewRun(tenantId, input.asOf, null, input.label)
   const { data: run, error } = await supabaseAdmin
     .from("bonus_runs")
     .insert({
@@ -983,12 +1043,23 @@ export async function createRun(tenantId: string, actor: Actor, input: CreateRun
       throw new Error(`bonus-run createRun (items): ${iErr.message}`)
     }
   }
+  if (preview.billingCalc.length > 0) {
+    try {
+      await replaceRunBillingItems(tenantId, runRow.id, billingRowsOf(preview.billingCalc))
+    } catch (bErr) {
+      await supabaseAdmin
+        .from("bonus_runs")
+        .update({ deleted_at: new Date().toISOString(), deleted_by_emp_id: actor.empId, delete_reason: `billing items insert failed: ${(bErr as Error).message}` })
+        .eq("id", runRow.id)
+      throw bErr
+    }
+  }
   await writeAuditLog({
     tenantId,
     tableName: "bonus_runs",
     recordId: runRow.id,
     action: "INSERT",
-    newRow: { label: input.label, as_of: input.asOf, note: input.note ?? null, totals: preview.totals, item_count: rows.length },
+    newRow: { label: input.label, as_of: input.asOf, note: input.note ?? null, totals: preview.totals, item_count: rows.length, billing_item_count: preview.billingCalc.length },
     actorEmpId: actor.empId,
     context: "POST /bonus-runs",
   })
@@ -1000,10 +1071,12 @@ export type UpdateRunInput = { label?: string; asOf?: string; note?: string | nu
 /** 未發放（可重算）的狀態。 */
 const UNPAID_STATUSES = ["draft", "pending_approval", "approved"] as const
 
-function liveItemsFingerprint(rows: ItemRow[]): string {
-  return amountFingerprint(
-    rows.filter((r) => !isStale(r)).map((r) => ({ projectId: r.project_id, employeeId: r.employee_id, amount: num(r.amount) ?? 0 })),
-  )
+function liveItemsFingerprint(rows: ItemRow[], billingRows: readonly RunBillingItemRow[] = []): string {
+  return amountFingerprint([
+    ...rows.filter((r) => !isStale(r)).map((r) => ({ projectId: r.project_id, employeeId: r.employee_id, amount: num(r.amount) ?? 0 })),
+    // 每期款獎金列（沒有時指紋與改前相同）。
+    ...billingFingerprintEntries(billingRows.map((b) => ({ billingId: b.billing_id, employeeId: b.employee_id, amount: num(b.amount) ?? 0 }))),
+  ])
 }
 
 export type UpdateRunResult = RunDetail & { returnedToDraft: boolean }
@@ -1030,18 +1103,25 @@ export async function updateRun(
 
   const asOf = input.asOf ?? current.as_of
   const label = input.label ?? current.label
-  const recompute = opts.recompute === true || input.asOf !== undefined
+  // 2026-11-19：每期款獎金依「批次所屬季」帶入，標籤改到別季也要重算（同季改名不重算，行為同改前）。
+  const quarterChanged =
+    input.label !== undefined && input.label !== current.label &&
+    runQuarterOf({ label: input.label, asOf }).end !== runQuarterOf({ label: current.label, asOf: current.as_of }).end
+  const recompute = opts.recompute === true || input.asOf !== undefined || quarterChanged
   const patch: Record<string, unknown> = { label, as_of: asOf }
   if (input.note !== undefined) patch.note = input.note
   let returnedToDraft = false
 
   let expectStatus = current.status
   if (recompute) {
-    const preview = await previewRun(tenantId, asOf, id)
+    const preview = await previewRun(tenantId, asOf, id, label)
     // 送審中／已核准：先比金額指紋，變了就**先**把批次原子地退回 draft（WHERE status＝讀到的狀態），
     // 再寫明細。順序不能反：先寫明細的話，併發的 payRun 可能用舊明細比對通過、卻把新金額凍結成已發放。
     // 退回落地後 payRun 的 WHERE status='approved' 必然 0 列；payRun 先落地則這裡 0 列 → 409，明細不動。
-    const fp = amountFingerprint(preview.calc.map((i) => ({ projectId: i.projectId, employeeId: i.employeeId, amount: i.amount })))
+    const fp = amountFingerprint([
+      ...preview.calc.map((i) => ({ projectId: i.projectId, employeeId: i.employeeId, amount: i.amount })),
+      ...billingFingerprintEntries(preview.billingCalc),
+    ])
     const after = statusAfterRecompute(current.status, current.approved_fingerprint ?? null, fp)
     if (after.returned) {
       await transitionRow(tenantId, id, current.status, returnPatch(actor.empId, AMOUNT_CHANGED_RETURN_REASON), "updateRun (return to draft)")
@@ -1079,6 +1159,13 @@ export async function updateRun(
         if (isPaidFrozen(sErr)) throw new BonusRunError(409, "not_draft", { status: "paid" })
         throw new Error(`bonus-run updateRun (stale item): ${sErr.message}`)
       }
+    }
+    // 每期款獎金列：未發放批次整批換掉（paid 批次 DB 觸發器擋 → 409）。
+    try {
+      await replaceRunBillingItems(tenantId, id, billingRowsOf(preview.billingCalc))
+    } catch (bErr) {
+      if (isPaidFrozen(bErr as { code?: string; message?: string })) throw new BonusRunError(409, "not_draft", { status: "paid" })
+      throw bErr
     }
     patch.totals = preview.totals
     patch.snapshot = preview.snapshot
@@ -1253,6 +1340,7 @@ export async function submitRun(tenantId: string, actor: Actor, id: string): Pro
     assertTransition(latest.status, "submit")
   }
   const items = await loadItemRows(tenantId, id)
+  const billingRows = await loadRunBillingItemRows(tenantId, [id])
   const totals = (latest.totals ?? EMPTY_TOTALS) as BonusTotals
   const nowIso = new Date().toISOString()
   await transitionRow(
@@ -1265,8 +1353,8 @@ export async function submitRun(tenantId: string, actor: Actor, id: string): Pro
       submitted_by_emp_id: actor.empId,
       approved_at: null,
       approved_by_emp_id: null,
-      approved_amount: totals.amount ?? 0,
-      approved_fingerprint: liveItemsFingerprint(items),
+      approved_amount: runGrandAmount(totals),
+      approved_fingerprint: liveItemsFingerprint(items, billingRows),
     },
     "submitRun",
   )
@@ -1276,7 +1364,7 @@ export async function submitRun(tenantId: string, actor: Actor, id: string): Pro
     recordId: id,
     action: "UPDATE",
     oldRow: { status: "draft" },
-    newRow: { status: "pending_approval", submitted_by_emp_id: actor.empId, amount: totals.amount ?? 0 },
+    newRow: { status: "pending_approval", submitted_by_emp_id: actor.empId, amount: runGrandAmount(totals) },
     actorEmpId: actor.empId,
     context: "POST /bonus-runs/:id/submit",
   })
@@ -1285,7 +1373,7 @@ export async function submitRun(tenantId: string, actor: Actor, id: string): Pro
     employeeIds: approvers,
     type: "bonus_run",
     title: `待核准：獎金批次 ${current.label}${current.kind === "reversal" ? "（沖銷）" : ""}`,
-    body: `本批合計 ${moneyText(totals.amount ?? 0)}，${totals.employeeCount ?? 0} 人、${totals.projectCount ?? 0} 案。請至「待我簽核」或後台獎金批次頁核准。`,
+    body: `本批合計 ${moneyText(runGrandAmount(totals))}${totals.billingAmount ? `（含每期款獎金 ${moneyText(totals.billingAmount)}，${totals.billingEmployeeCount ?? 0} 人、${totals.billingProjectCount ?? 0} 案）` : ""}，${totals.billingAmount ? "季獎金 " : ""}${totals.employeeCount ?? 0} 人、${totals.projectCount ?? 0} 案。請至「待我簽核」或後台獎金批次頁核准。`,
     payload: { bonusRunId: id, event: "submitted", submittedByEmpId: actor.empId },
   })
   return getRun(tenantId, id)
@@ -1302,9 +1390,10 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
   // 核准前也用最新資料重算比對（與發放同一支）：送審後入帳／成本變了 → 退回草稿、409，老闆不會核准過期的金額。
   await recomputeOrReturn(tenantId, actor, current)
   const items = await loadItemRows(tenantId, id)
+  const billingRows = await loadRunBillingItemRows(tenantId, [id])
   const latest = (await loadRun(tenantId, id)) ?? current
   assertTransition(latest.status, "approve")
-  if (latest.approved_fingerprint && liveItemsFingerprint(items) !== latest.approved_fingerprint) {
+  if (latest.approved_fingerprint && liveItemsFingerprint(items, billingRows) !== latest.approved_fingerprint) {
     throw new BonusRunError(409, "amount_changed")
   }
   // 送審人不能自己核准（assertNotSubmitter 已擋）；selfApproved 只剩舊資料（2026-10-27 前）會是 true。
@@ -1417,7 +1506,8 @@ export async function payRun(tenantId: string, actor: Actor, id: string, paidOn:
   assertTransition(current.status, "pay")
 
   const allItems = await loadItemRows(tenantId, id)
-  if (current.approved_fingerprint && liveItemsFingerprint(allItems) !== current.approved_fingerprint) {
+  const billingRows = await loadRunBillingItemRows(tenantId, [id])
+  if (current.approved_fingerprint && liveItemsFingerprint(allItems, billingRows) !== current.approved_fingerprint) {
     throw new BonusRunError(409, "amount_changed")
   }
   const items = allItems.filter((r) => !isStale(r))
@@ -1427,6 +1517,17 @@ export async function payRun(tenantId: string, actor: Actor, id: string, paidOn:
     throw new BonusRunError(409, "stale_paid_before", {
       items: mismatched.map((r) => ({ projectId: r.project_id, employeeId: r.employee_id })),
     })
+  }
+  // 每期款獎金：同一（期別、員工）已在別批發放（淨額 ≠ 0）→ 不可再發（兩個未發放批次同時帶入同一期時，先發的那批算數）。
+  // 沖銷批次的負數列本來就是對已發的抵銷，不檢查。
+  if (current.kind !== "reversal" && billingRows.length > 0) {
+    const netPaid = await loadBillingNetPaid(tenantId, { excludeRunId: id, billingIds: billingRows.map((b) => b.billing_id) })
+    const dup = billingRows.filter((b) => Math.round((netPaid.get(billingNetKey(b.billing_id, b.employee_id)) ?? 0) * 100) !== 0)
+    if (dup.length > 0) {
+      throw new BonusRunError(409, "stale_billing_items", {
+        items: dup.map((b) => ({ billingId: b.billing_id, employeeId: b.employee_id })),
+      })
+    }
   }
 
   // 原子更新：WHERE 帶 status='approved' 且用 .select() 拿回受影響列數，取代先前的
@@ -1441,7 +1542,11 @@ export async function payRun(tenantId: string, actor: Actor, id: string, paidOn:
     .eq("id", id)
     .eq("status", "approved")
     .select("id")
-  if (error) throw new Error(`bonus-run payRun: ${error.message}`)
+  if (error) {
+    // migration 0120 觸發器：同一期同一人已在別批發放、或核准後每期分潤被改過 → 不發（請重算）。
+    if (error.code === BILLING_BONUS_PAID_ERRCODE) throw new BonusRunError(409, "stale_billing_items")
+    throw new Error(`bonus-run payRun: ${error.message}`)
+  }
   if (!updated || updated.length === 0) {
     throw new BonusRunError(409, "not_draft", { status: "paid" })
   }
@@ -1523,7 +1628,16 @@ export async function createReversalRun(tenantId: string, actor: Actor, runId: s
     overpaidBy: typeof r.snapshot?.overpaidBy === "number" ? (r.snapshot.overpaidBy as number) : 0,
   }))
   const reversed = reversalItemsOf(calc)
-  const totals = reversalTotalsOf((original.totals ?? EMPTY_TOTALS) as BonusTotals, calc)
+  const sourceBilling = await loadRunBillingItemRows(tenantId, [runId])
+  const reversedBilling = sourceBilling.map((b) => ({
+    billingId: b.billing_id,
+    projectId: b.project_id,
+    employeeId: b.employee_id,
+    amount: num(b.amount) === 0 ? 0 : -(num(b.amount) ?? 0),
+    bonusPaidOn: b.bonus_paid_on,
+    snapshot: { ...(b.snapshot ?? {}), reversalOfItemId: b.id },
+  }))
+  const totals = withBillingTotals(reversalTotalsOf((original.totals ?? EMPTY_TOTALS) as BonusTotals, calc), reversedBilling)
   const label = `${original.label}-沖銷`
 
   const { data: run, error } = await supabaseAdmin
@@ -1578,6 +1692,17 @@ export async function createReversalRun(tenantId: string, actor: Actor, runId: s
       throw new Error(`bonus-run createReversalRun (items): ${iErr.message}`)
     }
   }
+  if (reversedBilling.length > 0) {
+    try {
+      await replaceRunBillingItems(tenantId, newRunId, reversedBilling)
+    } catch (bErr) {
+      await supabaseAdmin
+        .from("bonus_runs")
+        .update({ deleted_at: new Date().toISOString(), deleted_by_emp_id: actor.empId, delete_reason: `reversal billing items insert failed: ${(bErr as Error).message}` })
+        .eq("id", newRunId)
+      throw bErr
+    }
+  }
   await writeAuditLog({
     tenantId,
     tableName: "bonus_runs",
@@ -1620,7 +1745,10 @@ export async function deleteRun(tenantId: string, actor: Actor, id: string, reas
  * 歷年彙總／ESS 個人紀錄（只看 paid 且未刪的批次）
  * ────────────────────────────────────────────────────────────────── */
 
-async function loadPaidRunsWithItems(tenantId: string, employeeId?: string | null): Promise<{ runs: RunRow[]; items: ItemRow[] }> {
+async function loadPaidRunsWithItems(
+  tenantId: string,
+  employeeId?: string | null,
+): Promise<{ runs: RunRow[]; items: ItemRow[]; billingItems: RunBillingItemRow[] }> {
   const { data: runRows, error } = await supabaseAdmin
     .from("bonus_runs")
     .select(await runCols())
@@ -1630,7 +1758,7 @@ async function loadPaidRunsWithItems(tenantId: string, employeeId?: string | nul
     .order("as_of", { ascending: true })
   if (error) throw new Error(`bonus-run loadPaidRuns: ${error.message}`)
   const runs = (runRows ?? []) as unknown as RunRow[]
-  if (runs.length === 0) return { runs, items: [] }
+  if (runs.length === 0) return { runs, items: [], billingItems: [] }
   const runIds = runs.map((r) => r.id)
   const itemRows = await fetchAll<ItemRow>(
     (from, to) => {
@@ -1640,20 +1768,32 @@ async function loadPaidRunsWithItems(tenantId: string, employeeId?: string | nul
     },
     "bonus-run loadPaidRuns (items)",
   )
-  return { runs, items: itemRows.filter((r) => !isStale(r)) }
+  const billingItems = await loadRunBillingItemRows(tenantId, runIds, employeeId)
+  return { runs, items: itemRows.filter((r) => !isStale(r)), billingItems }
 }
 
 export async function buildSummary(tenantId: string, filter: { year?: number | null; employeeId?: string | null }): Promise<BonusSummary> {
-  const { runs, items } = await loadPaidRunsWithItems(tenantId, null)
+  const { runs, items, billingItems } = await loadPaidRunsWithItems(tenantId, null)
   const runInputs: SummaryRunInput[] = runs.map((r) => ({ id: r.id, label: r.label, asOf: r.as_of, paidOn: r.paid_on }))
-  const itemInputs: SummaryItemInput[] = items.map((r) => ({
-    runId: r.run_id,
-    projectId: r.project_id,
-    employeeId: r.employee_id,
-    amount: num(r.amount) ?? 0,
-    employeeName: r.snapshot?.employeeName ?? null,
-    empNo: r.snapshot?.empNo ?? null,
-  }))
+  const itemInputs: SummaryItemInput[] = [
+    ...items.map((r) => ({
+      runId: r.run_id,
+      projectId: r.project_id,
+      employeeId: r.employee_id,
+      amount: num(r.amount) ?? 0,
+      employeeName: r.snapshot?.employeeName ?? null,
+      empNo: r.snapshot?.empNo ?? null,
+    })),
+    // 2026-11-19：季獎金批次帶入的每期款獎金也算進歷年／每季／每人合計。
+    ...billingItems.map((b) => ({
+      runId: b.run_id,
+      projectId: b.project_id,
+      employeeId: b.employee_id,
+      amount: num(b.amount) ?? 0,
+      employeeName: b.snapshot?.employeeName ?? null,
+      empNo: b.snapshot?.empNo ?? null,
+    })),
+  ]
   return buildBonusSummary(runInputs, itemInputs, filter)
 }
 
@@ -1685,11 +1825,14 @@ export type MyBonusHistoryRow = {
   paidCumulative: number
   /** 標籤：毛利制／舊制（手填獎金池）／固定金額；改版前的批次 null。 */
   basis: BonusBasis | null
+  /** 2026-11-19：來源。'quarterly'＝季獎金比例制；'billing'＝每期款獎金（sourceLabel「每期款獎金：專案X第N期」）。 */
+  source?: "quarterly" | "billing"
+  sourceLabel?: string | null
 }
 
 /** ESS：本人在各 paid 批次的明細（最新批次在前）。只回 MyBonusHistoryRow 白名單欄位。 */
 export async function myBonusHistory(tenantId: string, employeeId: string): Promise<{ rows: MyBonusHistoryRow[]; total: number }> {
-  const { runs, items } = await loadPaidRunsWithItems(tenantId, employeeId)
+  const { runs, items, billingItems } = await loadPaidRunsWithItems(tenantId, employeeId)
   const runById = new Map(runs.map((r) => [r.id, r]))
   const chronological = items
     .filter((r) => r.employee_id === employeeId)
@@ -1720,6 +1863,38 @@ export async function myBonusHistory(tenantId: string, employeeId: string): Prom
       basis: snap.basis ?? null,
     }
   })
+  // 每期款獎金（白名單同上：只有本人金額、案名、期別，不含本期獎金總額／算法說明）。
+  const billingChrono = billingItems
+    .filter((b) => b.employee_id === employeeId && runById.has(b.run_id))
+    .map((b) => ({ b, run: runById.get(b.run_id)! }))
+    .sort((a, b) => (a.run.paid_on ?? a.run.as_of).localeCompare(b.run.paid_on ?? b.run.as_of) || a.run.created_at.localeCompare(b.run.created_at))
+  for (const { b, run } of billingChrono) {
+    const amount = num(b.amount) ?? 0
+    const key = `billing:${b.project_id}`
+    const paidCumulative = (cumulative.get(key) ?? 0) + amount
+    cumulative.set(key, paidCumulative)
+    const snap = b.snapshot ?? {}
+    rows.push({
+      id: b.id,
+      runId: b.run_id,
+      label: run.label,
+      asOf: run.as_of,
+      paidOn: run.paid_on,
+      kind: (run.kind === "reversal" ? "reversal" : "regular") as BonusRunKind,
+      projectId: b.project_id,
+      projectCode: snap.projectCode ?? null,
+      projectName: snap.projectName ?? null,
+      roleInProject: null,
+      shareMode: "billing",
+      sharePct: null,
+      shareAmount: null,
+      amount,
+      paidCumulative,
+      basis: null,
+      source: "billing",
+      sourceLabel: sourceLabelOf(snap),
+    })
+  }
   rows.sort(
     (a, b) =>
       (b.paidOn ?? b.asOf).localeCompare(a.paidOn ?? a.asOf) ||

@@ -10,10 +10,14 @@ import {
   hasQuarterlyShares,
   isAdvanceBillingKind,
   isClearingShareSet,
+  loadBillingBonusOverview,
   loadBillingShares,
+  paidBillingChanged,
   saveBillingShareSets,
   validateBillingShares,
 } from "../services/billing-shares.js"
+import { BILLING_BONUS_PAID_ERRCODE, SHARES_EXCEED_BONUS_ERRCODE, billingBonusQuarterReady, saveCapPct } from "../services/billing-bonus.js"
+import { scheduleBonusRecompute } from "../services/bonus-run-store.js"
 
 /**
  * 專案申請單「每期款獎金分潤」（2026-11-11，migration 0091）。說明見 services/billing-shares.ts。
@@ -34,6 +38,16 @@ import {
  * 金額最多小數 2 位（400 invalid_body）。
  * 員工不屬本租戶 → 400 invalid_shares（整批不寫）。
  * migration 未套用：GET available=false、PUT 409 migration_required（不 500）。
+ *
+ * 2026-11-19（migration 0119）：
+ *   • 每期多 bonusAmount（本期獎金，可 0；null＝清掉）與 formulaNote（算法說明，200 字內）；鍵不帶＝沿用已存的。
+ *     本期獎金有填 → 分給成員的合計 ≤ 本期獎金（400 shares_exceed_bonus_amount）；未填 → 沿用「≤ 該期金額」。
+ *   • 頂層 capPct（專案獎金上限比例 %，0～100、小數 3 位；null＝清掉）：上限＝合約（未稅）× capPct。
+ *     projects.bonus_rate_pct 是含稅制比率，不拿來用（見 services/billing-bonus.ts）。
+ *   • 已隨季獎金批次發放的期別（paid）只能改說明：改人／金額／本期獎金／發獎金日 → 409 billing_bonus_paid。
+ *   • GET 另回 quarterReady 與 overview（合約未稅｜獎金上限｜已發＝每期分潤＋季獎金｜占合約 %｜已設定未發｜可發餘額）。
+ *   • 存檔後排程重算未發放的季獎金批次（讓新設定的每期分潤自動帶入）。
+ *   migration 0119 未套用時帶 bonusAmount／formulaNote／capPct → 409 migration_required（migration: "0119"）。
  */
 export const billingSharesRouter = Router()
 
@@ -55,11 +69,20 @@ const putSchema = z.object({
             }),
           )
           .max(100),
+        bonusAmount: z.number().finite().nonnegative().max(1e12).refine(hasAtMostTwoDecimals, { message: "at_most_2_decimals" }).nullable().optional(),
+        formulaNote: z.string().trim().max(200).nullable().optional(),
       }),
     )
-    .min(1)
     .max(100),
-})
+  capPct: z
+    .number()
+    .finite()
+    .min(0)
+    .max(100)
+    .refine((n) => /^\d+(\.\d{1,3})?$/.test(String(n)), { message: "at_most_3_decimals" })
+    .nullable()
+    .optional(),
+}).refine((b) => b.billings.length > 0 || b.capPct !== undefined, { message: "empty" })
 
 async function scopeOf(req: Request, res: Response) {
   const tenantId = res.locals.tenantId as string
@@ -92,7 +115,9 @@ async function respondState(tenantId: string, projectId: string, canEdit: boolea
     res.status(200).json({ available: false, canEdit: false, quarterlyShares, billings: [] })
     return
   }
-  res.status(200).json({ available: true, canEdit, quarterlyShares, billings })
+  const quarterReady = await billingBonusQuarterReady()
+  const overview = quarterReady ? await loadBillingBonusOverview(tenantId, projectId, billings, quarterlyShares) : null
+  res.status(200).json({ available: true, canEdit, quarterlyShares, quarterReady, overview, billings })
 }
 
 billingSharesRouter.get(
@@ -132,6 +157,12 @@ billingSharesRouter.put(
         res.status(409).json({ error: "migration_required", table: "project_billing_shares" })
         return
       }
+      const usesQuarterFields =
+        parsed.data.capPct !== undefined || parsed.data.billings.some((b) => b.bonusAmount !== undefined || b.formulaNote !== undefined)
+      if (usesQuarterFields && !(await billingBonusQuarterReady())) {
+        res.status(409).json({ error: "migration_required", migration: "0119" })
+        return
+      }
       const current = (await loadBillingShares(ctx.tenantId, ctx.projectId)) ?? []
       const byId = new Map(current.map((b) => [b.billingId.toLowerCase(), b]))
       const seen = new Set<string>()
@@ -148,14 +179,23 @@ billingSharesRouter.put(
           res.status(404).json({ error: "billing_not_found", billingId: item.billingId })
           return
         }
-        // 代墊款不可設分潤；但「清除」（shares 空＋日期 null）允許，讓舊資料能自救。
-        if (isAdvanceBillingKind(billing.kind) && !isClearingShareSet(item)) {
+        // 代墊款不可設分潤；但「清除」（shares 空＋日期 null、沒有本期獎金與說明）允許，讓舊資料能自救。
+        if (
+          isAdvanceBillingKind(billing.kind) &&
+          (!isClearingShareSet(item) || (item.bonusAmount ?? 0) > 0 || !!(item.formulaNote ?? "").trim())
+        ) {
           res.status(400).json({ error: "advance_billing_no_shares", billingId: item.billingId })
           return
         }
-        const invalid = validateBillingShares(item.billingId, billing.billingAmount, item.shares)
+        // 寫入後的本期獎金：有帶用帶的，沒帶沿用已存的。
+        const bonusAmount = item.bonusAmount !== undefined ? item.bonusAmount : billing.bonusAmount
+        const invalid = validateBillingShares(item.billingId, billing.billingAmount, item.shares, bonusAmount ?? null)
         if (invalid) {
           res.status(400).json(invalid)
+          return
+        }
+        if (billing.paid && paidBillingChanged(billing, { bonusPaidOn: item.bonusPaidOn ?? null, bonusAmount: item.bonusAmount, shares: item.shares })) {
+          res.status(409).json({ error: "billing_bonus_paid", billingId: item.billingId })
           return
         }
       }
@@ -168,16 +208,33 @@ billingSharesRouter.put(
         return
       }
       try {
-        await saveBillingShareSets(
-          ctx.tenantId,
-          ctx.projectId,
-          parsed.data.billings.map((b) => ({ billingId: byId.get(b.billingId.toLowerCase())!.billingId, bonusPaidOn: b.bonusPaidOn ?? null, shares: b.shares })),
-          ctx.scope.self.id,
-        )
+        if (parsed.data.billings.length > 0) {
+          await saveBillingShareSets(
+            ctx.tenantId,
+            ctx.projectId,
+            parsed.data.billings.map((b) => ({
+              billingId: byId.get(b.billingId.toLowerCase())!.billingId,
+              bonusPaidOn: b.bonusPaidOn ?? null,
+              shares: b.shares,
+              ...(b.bonusAmount !== undefined ? { bonusAmount: b.bonusAmount } : {}),
+              ...(b.formulaNote !== undefined ? { formulaNote: b.formulaNote?.trim() ? b.formulaNote.trim() : null } : {}),
+            })),
+            ctx.scope.self.id,
+          )
+        }
+        if (parsed.data.capPct !== undefined) await saveCapPct(ctx.tenantId, ctx.projectId, parsed.data.capPct, ctx.scope.self.id)
       } catch (err) {
         const code = (err as { code?: string }).code
         if (code === "P0002") {
           res.status(404).json({ error: "billing_not_found" })
+          return
+        }
+        if (code === BILLING_BONUS_PAID_ERRCODE) {
+          res.status(409).json({ error: "billing_bonus_paid" })
+          return
+        }
+        if (code === SHARES_EXCEED_BONUS_ERRCODE) {
+          res.status(400).json({ error: "shares_exceed_bonus_amount" })
           return
         }
         if (code === "22023" || code === "22007" || code === "22008" || code === "23505" || code === "23514" || code === "23503") {
@@ -186,6 +243,8 @@ billingSharesRouter.put(
         }
         throw err
       }
+      // 每期分潤有改 → 未發放的季獎金批次重算（自動帶入／移除；非同步、合併，不拖慢回應）。
+      if (parsed.data.billings.length > 0) scheduleBonusRecompute(ctx.tenantId, "PUT /projects/:id/billing-shares")
       await respondState(ctx.tenantId, ctx.projectId, ctx.canEdit, res)
     } catch (err) {
       next(err)

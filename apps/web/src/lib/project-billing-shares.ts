@@ -8,7 +8,7 @@
  * ⚠️ vitest 沒設 `@/` 別名：只能用相對路徑、且只 import 型別或不依賴 `@/` 的模組。
  */
 import { formatMoney } from "./money";
-import type { BillingShareSet, BillingSharesState } from "./projects-ext-api";
+import type { BillingBonusOverview, BillingShareSet, BillingSharesState } from "./projects-ext-api";
 
 /** 分潤編輯中的一列（字串保存，輸入中途不轉型）。 */
 export interface ShareLine {
@@ -22,6 +22,10 @@ export interface ShareEdit {
   lines?: ShareLine[];
   /** 發獎金日 'YYYY-MM-DD'；"" ＝清掉。undefined＝沿用已存的。 */
   bonusPaidOn?: string;
+  /** 2026-11-19 本期獎金（字串保存）；"" ＝清掉。undefined＝沿用已存的。 */
+  bonusAmount?: string;
+  /** 2026-11-19 算法說明；"" ＝清掉。undefined＝沿用已存的。 */
+  formulaNote?: string;
 }
 
 /** 申請單上分潤兩欄的資料來源；null＝看不到（無權限、migration 未套用或讀取失敗）＝不畫兩欄。 */
@@ -106,4 +110,78 @@ export function sameShareLines(a: readonly ShareLine[], b: readonly ShareLine[])
       return `${l.employeeId.trim().toLowerCase()}=${typeof n === "number" ? n : l.amount.trim()}`;
     });
   return JSON.stringify(norm(a)) === JSON.stringify(norm(b));
+}
+
+/* ── 2026-11-19 本期獎金／算法說明／專案獎金總覽（migration 0119） ── */
+
+/** 算法說明上限（同後端）。 */
+export const FORMULA_NOTE_MAX = 200;
+
+/** 畫面上目前的本期獎金（字串；有改用草稿，沒改用已存的）。 */
+export function currentBonusAmount(set: BillingShareSet | null, edit: ShareEdit | undefined): string {
+  if (edit?.bonusAmount !== undefined) return edit.bonusAmount;
+  return set?.bonusAmount === null || set?.bonusAmount === undefined ? "" : String(set.bonusAmount);
+}
+
+/** 畫面上目前的算法說明。 */
+export function currentFormulaNote(set: BillingShareSet | null, edit: ShareEdit | undefined): string {
+  return edit?.formulaNote ?? set?.formulaNote ?? "";
+}
+
+/**
+ * 分給成員的合計上限：本期獎金有填（合法數字）用它，否則用該期金額（舊規則）。
+ * 本期獎金填了但不合法 → 仍用該期金額比（格式錯誤另外報）。
+ */
+export function shareCapOf(bonusAmountText: string, stageAmount: number | null): { cap: number | null; byBonus: boolean } {
+  const n = parseShareAmount(bonusAmountText);
+  return typeof n === "number" ? { cap: n, byBonus: true } : { cap: stageAmount, byBonus: false };
+}
+
+/** 表格格子的摘要（含本期獎金）：「本期 1,000 · 2 人 · 1,000」。 */
+export function shareCellSummary(lines: readonly ShareLine[], bonusAmountText: string): string {
+  const people = shareSummaryText(lines);
+  const n = parseShareAmount(bonusAmountText);
+  const bonus = typeof n === "number" ? `本期 ${formatMoney(n)}` : "";
+  return [bonus, people].filter(Boolean).join(" · ");
+}
+
+/** "12.5" → 12.5；"" → null；不合法（< 0、> 100、小數超過 3 位）→ "invalid"。 */
+export function parseCapPct(value: string): number | null | "invalid" {
+  const t = value.trim().replace(/%$/, "").trim();
+  if (t === "") return null;
+  const n = Number(t);
+  if (!Number.isFinite(n) || n < 0 || n > 100 || !/^\d+(\.\d{1,3})?$/.test(String(n))) return "invalid";
+  return n;
+}
+
+export interface OverviewCell {
+  key: "contract" | "cap" | "paid" | "available" | "setUnpaid";
+  label: string;
+  value: string;
+  /** 補充說明（例：已發的來源拆分、占合約 %）。 */
+  hint?: string;
+  /** 可發餘額 < 0：紅字。 */
+  danger?: boolean;
+}
+
+const moneyOrDash = (n: number | null | undefined) => (n === null || n === undefined ? "—" : formatMoney(n));
+
+/** 專案獎金總覽列的五格（純函式，畫面與測試共用）。capPctText＝畫面上目前的上限比例（草稿優先）。 */
+export function overviewCells(o: BillingBonusOverview, capPctText?: string): OverviewCell[] {
+  const pct = capPctText !== undefined ? parseCapPct(capPctText) : o.capPct;
+  const capPct = typeof pct === "number" ? pct : null;
+  const cap = o.contractTotal !== null && capPct !== null ? Math.round((o.contractTotal * capPct) / 100) : null;
+  const available = cap === null ? null : Math.round((cap - o.paidTotal - o.setUnpaid) * 100) / 100;
+  return [
+    { key: "contract", label: "合約金額（未稅）", value: moneyOrDash(o.contractTotal) },
+    { key: "cap", label: "獎金上限", value: moneyOrDash(cap), hint: capPct === null ? "未設上限比例" : `合約 × ${capPct}%` },
+    {
+      key: "paid",
+      label: "已發",
+      value: formatMoney(o.paidTotal),
+      hint: `每期款 ${formatMoney(o.paidBilling)}＋季獎金 ${formatMoney(o.paidQuarterly)}${o.paidPct !== null ? `；占合約 ${o.paidPct}%` : ""}`,
+    },
+    { key: "available", label: "可發餘額", value: moneyOrDash(available), danger: available !== null && available < 0, hint: "上限 − 已發 − 已設定未發" },
+    { key: "setUnpaid", label: "已設定未發", value: formatMoney(o.setUnpaid) },
+  ];
 }

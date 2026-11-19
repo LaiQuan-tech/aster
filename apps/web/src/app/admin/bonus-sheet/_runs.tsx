@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
-import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "../bonus-runs/_components";
+import { BillingItemsTable, ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "../bonus-runs/_components";
 import {
   createBonusRun,
   defaultBonusLabel,
@@ -13,6 +13,7 @@ import {
   humanizeBonusError,
   listBonusRuns,
   previewBonusRun,
+  runGrandAmount,
   todayKey,
   type BonusRun,
   type BonusRunPreview,
@@ -247,7 +248,13 @@ export function BonusRunsSection({
                     </td>
                     <td className="py-1.5 pr-2 text-gray-600">{r.asOf}</td>
                     <td className="py-1.5 pr-2 text-gray-600">{r.paidOn ?? "—"}</td>
-                    <td className={`py-1.5 pr-2 text-right font-medium ${r.totals.amount < 0 ? "text-rose-700" : "text-gray-900"}`}>{fmtMoney(r.totals.amount)}</td>
+                    <td
+                      className={`py-1.5 pr-2 text-right font-medium ${runGrandAmount(r.totals) < 0 ? "text-rose-700" : "text-gray-900"}`}
+                      title={r.totals.billingAmount ? `季獎金 ${fmtMoney(r.totals.amount)}＋每期款獎金 ${fmtMoney(r.totals.billingAmount)}` : undefined}
+                    >
+                      {fmtMoney(runGrandAmount(r.totals))}
+                      {r.totals.billingAmount ? <span className="block text-[11px] font-normal text-gray-500">含每期款 {fmtMoney(r.totals.billingAmount)}</span> : null}
+                    </td>
                     <td className="py-1.5 pr-2 text-right text-gray-600">{r.totals.employeeCount}</td>
                     <td className="py-1.5 pr-2 text-right text-gray-600">{r.totals.projectCount}</td>
                     <td className={`py-1.5 pr-2 text-right ${r.totals.overpaidCount > 0 ? "font-medium text-red-600" : "text-gray-400"}`}>
@@ -320,7 +327,11 @@ export function BonusRunsSection({
             {preview && (
               <div className="mt-4 space-y-3">
                 <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                  <Stat label="本季應發合計" value={`${fmtMoney(preview.totals.amount)} 元`} />
+                  <Stat
+                    label={preview.totals.billingAmount ? "本批實發合計" : "本季應發合計"}
+                    value={`${fmtMoney(runGrandAmount(preview.totals))} 元`}
+                    hint={preview.totals.billingAmount ? `季獎金 ${fmtMoney(preview.totals.amount)}＋每期款獎金 ${fmtMoney(preview.totals.billingAmount)}` : undefined}
+                  />
                   <Stat label="人數／案數" value={`${preview.totals.employeeCount} 人／${preview.totals.projectCount} 案`} />
                   <Stat label="累計應發／已發" value={`${fmtMoney(preview.totals.entitledCumulative)}／${fmtMoney(preview.totals.paidBefore)}`} />
                   <Stat label="超發列" value={preview.totals.overpaidCount > 0 ? `${preview.totals.overpaidCount} 列` : "無"} tone={preview.totals.overpaidCount > 0 ? "down" : undefined} />
@@ -329,6 +340,12 @@ export function BonusRunsSection({
                 {/* 毛利表與獎金比例欄只給看得到集團財務的人（2026-10-26）；其他 HR 照常試算、建立、送審。 */}
                 {preview.canSeeProfit !== false && <GrossProfitTable items={preview.items} />}
                 <ItemsTable items={preview.items} label={fLabel} canSeeProfit={preview.canSeeProfit !== false} />
+                {(preview.billingItems?.length ?? 0) > 0 && (
+                  <div>
+                    <p className="mb-1 text-sm font-semibold text-gray-800">每期款獎金（發獎金日落在本季或之前未發，自動列入）</p>
+                    <BillingItemsTable items={preview.billingItems!} />
+                  </div>
+                )}
                 <SkippedList skipped={preview.totals.skipped.map((s) => ({ ...s, ...(preview.snapshot.skipped ?? []).find((x) => x.projectId === s.projectId) }))} />
                 <ExcludedArchivedList snapshot={preview.snapshot} />
               </div>

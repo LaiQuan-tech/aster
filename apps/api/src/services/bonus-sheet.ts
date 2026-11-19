@@ -30,6 +30,13 @@ import {
   type SerializedRun,
 } from "./bonus-run-store.js"
 import { buildManageRows, manageTotalsOf, type ManageRow, type ManageTotals } from "./bonus-manage.js"
+import {
+  billingBonusQuarterReady,
+  billingOverviewOf,
+  loadAllBillingNetPaidByProject,
+  loadAllBillingShares,
+  loadAllCapPct,
+} from "./billing-bonus.js"
 import { loadP3Settings } from "./project-application-store.js"
 import { DEFAULT_VAT_RATE } from "./project-money.js"
 import { isTerminal } from "./project-status.js"
@@ -492,6 +499,40 @@ export type BonusManageResult = {
   totals: { open: ManageTotals; closed: ManageTotals }
 }
 
+/**
+ * 2026-11-19：每列補上每期款獎金總覽（services/billing-bonus.ts billingOverviewOf）。
+ * 已發的季獎金＝該列 paid（季獎金比例制已發放，含沖銷）；合約用未稅（同 billing-store.contractTotal）。
+ * 只有「有每期分潤、有上限比例或發過每期分潤」的案才掛（其他案 null，畫面不顯示）。
+ */
+export async function attachBillingBonus(tenantId: string, rows: ManageRow[], projects: readonly BonusSheetProject[]): Promise<void> {
+  if (!(await billingBonusQuarterReady())) return
+  const [caps, shares, netByProject] = await Promise.all([loadAllCapPct(tenantId), loadAllBillingShares(tenantId), loadAllBillingNetPaidByProject(tenantId)])
+  const sharesByProject = new Map<string, Array<{ billingId: string; employeeId: string; amount: number }>>()
+  for (const s of shares) {
+    const list = sharesByProject.get(s.projectId) ?? []
+    list.push(s)
+    sharesByProject.set(s.projectId, list)
+  }
+  const contractOf = new Map(projects.map((p) => [p.projectId, p.contractTotal]))
+  for (const r of rows) {
+    const pShares = sharesByProject.get(r.projectId) ?? []
+    const net = netByProject.get(r.projectId) ?? new Map<string, number>()
+    const cap = caps.get(r.projectId) ?? null
+    if (pShares.length === 0 && net.size === 0 && cap === null) {
+      r.billingBonus = null
+      continue
+    }
+    r.billingBonus = billingOverviewOf({
+      contractTotal: contractOf.get(r.projectId) ?? null,
+      capPct: cap,
+      shares: pShares,
+      netPaid: net,
+      paidQuarterly: r.paid,
+      hasQuarterlyShares: r.members.some((m) => !m.removed && ((m.sharePct ?? 0) > 0 || (m.shareAmount ?? 0) > 0)),
+    })
+  }
+}
+
 export async function loadBonusManage(tenantId: string): Promise<BonusManageResult> {
   const warnings: string[] = []
   const vatRate = await loadP3Settings(tenantId)
@@ -518,6 +559,11 @@ export async function loadBonusManage(tenantId: string): Promise<BonusManageResu
     warn(warnings, "已發放紀錄讀取失敗，已發放暫以 0 計（未發放金額不可信）", err)
   }
   const rows = buildManageRows(projects, payments, vatRate)
+  try {
+    await attachBillingBonus(tenantId, rows, projects)
+  } catch (err) {
+    warn(warnings, "每期款獎金總覽讀取失敗，暫不顯示", err)
+  }
   const open = rows.filter((r) => !r.closed)
   const closed = rows.filter((r) => r.closed)
   return {

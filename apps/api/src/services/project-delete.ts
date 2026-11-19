@@ -51,6 +51,7 @@ export type DeleteBlockerKey =
   | "billing_shares"
   | "billing_bonus_dates"
   | "bonus_run_items"
+  | "bonus_run_billing_items"
   | "attendance_days"
   | "disbursements"
   | "documents"
@@ -63,8 +64,9 @@ export type DeleteBlockerKey =
 export const DELETE_BLOCKER_LABELS: Record<DeleteBlockerKey, string> = {
   billing_activity: "期程款已請款／開票／入帳",
   billing_shares: "每期款獎金分潤",
-  billing_bonus_dates: "每期款發獎金日",
+  billing_bonus_dates: "每期款獎金設定（本期獎金／發獎金日）",
   bonus_run_items: "獎金計算批次",
+  bonus_run_billing_items: "季獎金批次已帶入的每期款獎金",
   attendance_days: "出勤表工時（工作內容選了此專案）",
   disbursements: "請款／放款單",
   documents: "專案文件或合約掃描檔",
@@ -140,7 +142,7 @@ export type DeletePlan = {
 /** 盤點擋刪條件與要一併軟刪除的列（唯讀）。 */
 export async function planProjectDelete(tenantId: string, projectId: string): Promise<DeletePlan> {
   const ids = [projectId]
-  const [billings, shares, bonusDates, runItems, sheetDays, allocations, documents, contracts, subs, children] =
+  const [billings, shares, bonusDates, runItems, runBillingItems, sheetDays, allocations, documents, contracts, subs, children] =
     await Promise.all([
       rowsOf<BillingLite>(
         "project_billings",
@@ -150,6 +152,11 @@ export async function planProjectDelete(tenantId: string, projectId: string): Pr
       rowsOf<{ id: string }>("project_billing_shares", "id", tenantId, "project_id", ids),
       rowsOf<{ billing_id: string }>("project_billing_bonus_dates", "billing_id", tenantId, "project_id", ids),
       rowsOf<{ id: string }>("bonus_run_items", "id", tenantId, "project_id", ids),
+      // migration 0119（季獎金帶入的每期款獎金）；未套用的環境表不存在 → 當 0 筆（DB 函式同樣只在套用後才檢查）。
+      rowsOf<{ id: string }>("bonus_run_billing_items", "id", tenantId, "project_id", ids).catch((err: Error) => {
+        if (/bonus_run_billing_items/.test(err.message) && /(does not exist|Could not find|schema cache)/i.test(err.message)) return []
+        throw err
+      }),
       rowsOf<{ id: string }>("attendance_sheet_days", "id", tenantId, "project_id", ids),
       rowsOf<AllocationLite>("disbursement_allocations", "id, disbursement_id", tenantId, "project_id", ids),
       rowsOf<{ id: string }>("project_documents", "id", tenantId, "project_id", ids),
@@ -190,6 +197,7 @@ export async function planProjectDelete(tenantId: string, projectId: string): Pr
     ["billing_shares", shares.length],
     ["billing_bonus_dates", bonusDates.length],
     ["bonus_run_items", runItems.length],
+    ["bonus_run_billing_items", runBillingItems.length],
     ["attendance_days", sheetDays.length],
     ["disbursements", allocationIds.size],
     ["documents", documents.length],

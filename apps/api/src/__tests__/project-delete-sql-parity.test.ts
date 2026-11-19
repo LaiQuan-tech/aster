@@ -58,6 +58,7 @@ const BASE_FILES = [
   "docs/套用-2026-11-12-刪除專案-修正4.sql",
   "docs/套用-2026-11-12-刪除專案-修正5.sql",
   "docs/套用-2026-11-18-刪除專案-分潤異動不擋.sql",
+  "docs/套用-2026-11-19-每期獎金季發.sql",
 ]
 
 const T = "f0000000-0000-4000-8000-0000000000f1"
@@ -106,6 +107,10 @@ const SCENARIOS: Array<{ name: string; sql: string }> = [
     INSERT INTO project_share_adjustments (tenant_id, project_id, field) VALUES ('${T}', $P, 'pct');
     INSERT INTO bonus_runs (id, tenant_id, label, as_of) VALUES ($S, '${T}', '一致性測試批次', '2026-10-31');
     INSERT INTO bonus_run_items (tenant_id, run_id, project_id, employee_id, share_mode) VALUES ('${T}', $S, $P, '${EMP}', 'pct');` },
+  { name: "季獎金批次已帶入的每期款獎金（2026-11-19 起擋，同 bonus_run_items）", sql: `
+    INSERT INTO project_billings (id, tenant_id, project_id, installment_no) VALUES ($S, '${T}', $P, 1);
+    INSERT INTO bonus_runs (id, tenant_id, label, as_of) VALUES ($S, '${T}', '一致性測試每期批次', '2026-12-31');
+    INSERT INTO bonus_run_billing_items (tenant_id, run_id, project_id, billing_id, employee_id, amount) VALUES ('${T}', $S, $P, $S, '${EMP}', 100);` },
   { name: "未刪除的子案＋已刪除的子案", sql: `
     INSERT INTO projects (tenant_id, name, code, kind, parent_project_id) VALUES ('${T}', '子案', 'ZZ-PAR-' || substr($P::text, 33), 'change', $P);
     INSERT INTO projects (tenant_id, name, code, kind, parent_project_id, deleted_at) VALUES ('${T}', '刪掉的子案', 'ZZ-PAR-D-' || substr($P::text, 33), 'change', $P, now());` },
@@ -136,7 +141,7 @@ const SCENARIOS: Array<{ name: string; sql: string }> = [
 ]
 
 const FAKE_TABLES = [
-  "project_billings", "project_billing_shares", "project_billing_bonus_dates", "bonus_run_items", "project_share_adjustments",
+  "project_billings", "project_billing_shares", "project_billing_bonus_dates", "bonus_run_items", "bonus_run_billing_items", "project_share_adjustments",
   "attendance_sheet_days", "disbursement_allocations", "project_documents", "contracts", "project_subcontracts",
   "project_subcontract_payments", "projects", "disbursements",
 ]
@@ -234,7 +239,7 @@ describe.skipIf(!pglite)("刪除專案：TS 預檢 vs DB 函式（pglite）", ()
   it("情境確實有覆蓋到擋刪與放行兩種結果（不是全部空轉）", async () => {
     const results = await Promise.all(SCENARIOS.map((_, i) => planProjectDelete(T, pid(i))))
     const keys = new Set(results.flatMap((p) => p.blockers.map((b) => b.key)))
-    for (const k of ["billing_activity", "disbursements", "signed_contracts", "invoiced_subcontracts", "paid_subcontract_payments", "withheld_subcontracts", "documents", "billing_bonus_dates", "bonus_run_items", "child_projects"]) {
+    for (const k of ["billing_activity", "disbursements", "signed_contracts", "invoiced_subcontracts", "paid_subcontract_payments", "withheld_subcontracts", "documents", "billing_bonus_dates", "bonus_run_items", "bonus_run_billing_items", "child_projects"]) {
       expect(keys.has(k as never), k).toBe(true)
     }
     expect(results.some((p) => p.blockers.length === 0)).toBe(true)

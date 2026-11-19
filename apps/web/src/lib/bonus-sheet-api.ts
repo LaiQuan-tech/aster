@@ -1,6 +1,7 @@
 import { apiDownload, apiFetch } from "./api-client";
 import { formatMoney } from "@/lib/money";
 import type { StatementGrid } from "./statements-api";
+import type { BillingBonusOverview } from "./projects-ext-api";
 import { columnPx, rowPx } from "./statement-layout";
 
 /**
@@ -261,6 +262,11 @@ export type ManageRow = {
   unallocated: { pct: number; amount: number | null } | null;
   revisionNote: string | null;
   note: string | null;
+  /**
+   * 2026-11-19 每期款獎金總覽（合約未稅、上限、已發＝每期＋季獎金、占合約 %、已設定未發、可發餘額）；
+   * 這案沒有每期分潤／上限時 null，舊 API 沒有。上面 paid／unpaid 仍只是季獎金比例制。
+   */
+  billingBonus?: BillingBonusOverview | null;
 };
 
 export type ManageTotals = {
@@ -273,7 +279,27 @@ export type ManageTotals = {
   awaiting: number;
   /** 合計含毛利制估算（待收款不含毛利制）。 */
   includesEstimate?: boolean;
+  /** 2026-11-19 每期款獎金已發／已設定未發合計（有任何一案有每期款才有）。 */
+  billingPaid?: number;
+  billingSetUnpaid?: number;
 };
+
+/**
+ * 2026-11-19 管理檢視「每期款獎金」說明行（純函式）：沒有每期款資料 → 空陣列。
+ * 例：["每期款已發 30,000・已設定未發 10,000", "上限 100,000（合約未稅×10%）・已發合計 35,000（占合約 3.5%）・可發餘額 55,000"]
+ */
+export function billingBonusLines(r: Pick<ManageRow, "billingBonus">): string[] {
+  const b = r.billingBonus;
+  if (!b) return [];
+  const lines = [`每期款已發 ${moneyText(b.paidBilling)}・已設定未發 ${moneyText(b.setUnpaid)}`];
+  const total = `已發合計 ${moneyText(b.paidTotal)}${b.paidPct !== null ? `（占合約 ${b.paidPct}%）` : ""}`;
+  lines.push(
+    b.cap === null
+      ? `${total}・未設獎金上限`
+      : `上限 ${moneyText(b.cap)}（合約未稅×${b.capPct}%）・${total}・可發餘額 ${moneyText(b.available ?? 0)}`,
+  );
+  return lines;
+}
 
 export const SKIPPED_LABEL: Record<"no_contract" | "no_pool", string> = { no_contract: "缺合約", no_pool: "缺獎金池" };
 

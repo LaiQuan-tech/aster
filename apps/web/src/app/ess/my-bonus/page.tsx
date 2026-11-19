@@ -144,7 +144,9 @@ export default function MyBonusPage() {
                         </Link>
                       </td>
                       <td className="py-2 pr-3 text-gray-600">
-                        {r.shareMode === "fixed_amount" ? `固定 ${money(r.shareAmount)}` : r.sharePct == null ? "—" : `${r.sharePct}%`}
+                        {r.source === "billing"
+                          ? <span className="rounded-full bg-sky-50 px-1.5 py-0.5 text-xs text-sky-700">每期款獎金</span>
+                          : r.shareMode === "fixed_amount" ? `固定 ${money(r.shareAmount)}` : r.sharePct == null ? "—" : `${r.sharePct}%`}
                         {r.basis === "legacy_pool" && <span className="ml-1 rounded-full bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600">舊制</span>}
                         {r.kind === "reversal" && <span className="ml-1 rounded-full bg-rose-50 px-1.5 py-0.5 text-xs text-rose-700">沖銷</span>}
                       </td>

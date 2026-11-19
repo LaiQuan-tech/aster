@@ -259,13 +259,15 @@ describe("申請單表格：權限與提示", () => {
       { ...base, id: "b2", installmentNo: 2, milestone: "第二期簽證完成", percentage: 80, calculatedAmount: null, effectiveAmount: null, invoiceNo: "ZM00000002", invoicedOn: "2026-03-03" },
     ]
     const html = render({ money: quotationMoney, billings: invoiced })
-    expect(cell(html, "sheet-stage-1-amount")).toContain('placeholder="試算 70,000"')
-    expect(cell(html, "sheet-stage-2-amount")).toContain('placeholder="試算 280,000"')
+    // 2026-11-19：數字在前、「試算」在後（窄格不再只剩「試算」兩字）。
+    expect(cell(html, "sheet-stage-1-amount")).toContain('placeholder="70,000 試算"')
+    expect(cell(html, "sheet-stage-2-amount")).toContain('placeholder="280,000 試算"')
     expect(cell(html, "sheet-stage-1-amount")).toContain("需確認")
     expect(cell(html, "sheet-stage-1-amount")).toContain('aria-label="付款階段第 1 列金額"')
     const printed = render({ money: quotationMoney, billings: invoiced, mode: "print" })
-    expect(cell(printed, "sheet-stage-1-amount")).toContain("試算 70,000")
-    expect(cell(printed, "sheet-stage-2-amount")).toContain("試算 280,000")
+    // 唯讀／列印：數字整段不換行（whitespace-nowrap），「試算」小字放後面、可換到下一行。
+    expect(cell(printed, "sheet-stage-1-amount")).toMatch(/<span class="whitespace-nowrap">70,000<\/span><span class="whitespace-nowrap text-\[10px\]">試算<\/span>/)
+    expect(cell(printed, "sheet-stage-2-amount")).toMatch(/<span class="whitespace-nowrap">280,000<\/span><span class="whitespace-nowrap text-\[10px\]">試算<\/span>/)
   })
 
   it("表格包在 fieldset 裡（存檔中整張鎖住）", () => {
@@ -414,6 +416,31 @@ describe("每期款獎金分潤（2026-11-11）", () => {
     expect(cell(html, "sheet-stage-1-shares")).toContain("分潤超過本期金額")
     expect(cell(html, "sheet-stage-1-shares")).toContain("bg-red-50!")
     expect(cell(html, "sheet-stage-2-shares")).not.toContain("分潤超過本期金額")
+  })
+
+  it("2026-11-19：本期獎金摘要、已發放標記、專案獎金總覽列（合約未稅｜上限｜已發｜可發餘額｜已設定未發）＋上限比例輸入", () => {
+    const v = sharesView(true)
+    const ready = {
+      ...v,
+      quarterReady: true,
+      overview: { contractTotal: 1_000_000, capPct: 10, cap: 100_000, paidBilling: 30_000, paidQuarterly: 5_000, paidTotal: 35_000, paidPct: 3.5, setUnpaid: 0, available: 65_000, dualSource: true },
+      billings: [{ ...v.billings[0], bonusAmount: 30000, formulaNote: "30萬×10%", paid: true, paidAmount: 30000 }, v.billings[1]],
+    } as typeof v
+    const html = renderWith(ready)
+    expect(cell(html, "sheet-stage-1-shares")).toContain("本期 30,000 · 1 人 · 30,000")
+    expect(cell(html, "sheet-stage-1-shares")).toContain("已發放")
+    expect(html).toContain('data-testid="sheet-bonus-overview"')
+    expect(cell(html, "sheet-bonus-overview-contract")).toContain("1,000,000")
+    expect(cell(html, "sheet-bonus-overview-cap")).toContain("100,000")
+    expect(cell(html, "sheet-bonus-overview-paid")).toContain("35,000")
+    expect(cell(html, "sheet-bonus-overview-paid")).toContain("占合約 3.5%")
+    expect(cell(html, "sheet-bonus-overview-available")).toContain("65,000")
+    expect(html).toContain('aria-label="專案獎金上限比例（%）"')
+    expect(html).toContain('data-testid="sheet-bonus-overview-dual"')
+    // 已發放期別的發獎金日鎖住
+    expect(html).toMatch(/aria-label="付款階段第 1 列發獎金日"[^>]*disabled=""/)
+    // migration 未套用（quarterReady 沒有）：不畫總覽
+    expect(renderWith(sharesView(true))).not.toContain('data-testid="sheet-bonus-overview"')
   })
 
   it("看不到（null）或列印：維持原本 7 欄，沒有任何分潤內容", () => {

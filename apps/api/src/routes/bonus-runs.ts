@@ -136,8 +136,11 @@ export function maskProfit<T extends { items: SerializedItem[]; snapshot?: Recor
   canSeeProfit: boolean,
 ): T & { canSeeProfit: boolean } {
   if (canSeeProfit) return { ...detail, canSeeProfit }
+  // 每期款獎金的「算法說明」可能寫到合約／毛利規模（例「30萬＋20萬×10%」）：看不到毛利的人不回。
+  const billing = (detail as { billingItems?: Array<Record<string, unknown>> }).billingItems
   return {
     ...detail,
+    ...(Array.isArray(billing) ? { billingItems: billing.map((b) => ({ ...b, formulaNote: null })) } : {}),
     items: maskItems(detail.items),
     ...("snapshot" in detail ? { snapshot: maskSnapshot(detail.snapshot) } : {}),
     canSeeProfit,
@@ -174,13 +177,15 @@ bonusRunsRouter.post("/bonus-runs/preview", ...guards, async (req: Request, res:
   try {
     const { canSeeProfit } = await viewerOf(tenantId, req)
     const asOf = parsed.data.asOf ?? (await tenantToday(tenantId))
-    const preview = await previewRun(tenantId, asOf, null)
+    const label = parsed.data.label ?? defaultRunLabel(asOf)
+    const preview = await previewRun(tenantId, asOf, null, label)
     res.status(200).json(
       maskProfit(
         {
-          label: parsed.data.label ?? defaultRunLabel(asOf),
+          label,
           asOf,
           items: preview.items,
+          billingItems: preview.billingItems,
           totals: preview.totals,
           snapshot: preview.snapshot as Record<string, unknown>,
         },
@@ -266,7 +271,7 @@ bonusRunsRouter.get("/bonus-runs/:id/export.xlsx", ...guards, async (req: Reques
     }
     const detail = maskProfit(raw, canSeeProfit)
     // 看不到集團財務：毛利類欄位已遮成 null，xlsx 另外整欄移除「%／總獎金」（不是留空）。
-    const buffer = await bonusRunWorkbookBuffer(detail.run, detail.items, { showProfit: canSeeProfit })
+    const buffer = await bonusRunWorkbookBuffer(detail.run, detail.items, { showProfit: canSeeProfit, billingItems: detail.billingItems })
     sendXlsx(res, buffer, bonusRunFilename(detail.run))
   } catch (err) {
     handleError(err, res, next)

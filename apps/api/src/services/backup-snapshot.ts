@@ -153,6 +153,8 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   // 每期款獎金分潤＋發獎金日（sql/0081；未套用的環境記 skipped）。讀表列／下載要同「看分潤」權限（routes/internal-jobs.ts）。
   { name: "project_billing_shares" },
   { name: "project_billing_bonus_dates", keyColumn: "billing_id" }, // 沒有 id 欄：主鍵 billing_id
+  // 2026-11-19（sql/0109）：專案獎金上限比例（主鍵 project_id）；同「看分潤」權限。
+  { name: "project_billing_bonus_caps", keyColumn: "project_id" },
   { name: "payslips" },
   { name: "non_employee_income" },
   { name: "expense_categories" },
@@ -187,6 +189,7 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   { name: "disbursement_attachments" },
   { name: "bonus_runs" },
   { name: "bonus_run_items" },
+  { name: "bonus_run_billing_items" }, // 季獎金批次帶入的每期款獎金（sql/0109；同「看分潤」權限）
   { name: "announcements" },
   { name: "announcement_versions" },
   { name: "announcement_acknowledgements" },

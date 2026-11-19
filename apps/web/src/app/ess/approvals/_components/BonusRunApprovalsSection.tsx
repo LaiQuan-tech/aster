@@ -10,6 +10,7 @@ import {
   getMyBonusApprovals,
   humanizeBonusError,
   returnBonusRun,
+  runGrandAmount,
   SELF_SUBMITTED_NOTE,
   type BonusRunDetail,
   type BonusRunItem,
@@ -160,7 +161,7 @@ export function BonusRunApprovalsSection() {
                   {run.kind === "reversal" && <Pill tone="red" className="ml-2">沖銷</Pill>}
                 </p>
                 <p className="mt-0.5 text-sm text-gray-600">
-                  合計 {fmtMoney(run.totals.amount)} 元・{run.totals.employeeCount} 人・{run.totals.projectCount} 案・基準日 {run.asOf}
+                  合計 {fmtMoney(runGrandAmount(run.totals))} 元{run.totals.billingAmount ? `（含每期款獎金 ${fmtMoney(run.totals.billingAmount)} 元）` : ""}・{run.totals.employeeCount} 人・{run.totals.projectCount} 案・基準日 {run.asOf}
                 </p>
               </div>
               <Pill tone="amber">送審中</Pill>
@@ -237,7 +238,7 @@ export function BonusRunApprovalsSection() {
       <ConfirmDialog
         open={approving !== null}
         title={`核准獎金批次 ${approving?.run.label ?? ""}？`}
-        message={approving ? `本批合計 ${fmtMoney(approving.run.totals.amount)} 元。核准後 HR 才能發放；之後入帳或成本變動使金額改變，會自動退回重新送審。` : undefined}
+        message={approving ? `本批合計 ${fmtMoney(runGrandAmount(approving.run.totals))} 元。核准後 HR 才能發放；之後入帳或成本變動使金額改變，會自動退回重新送審。` : undefined}
         confirmLabel="核准"
         busy={busyId !== null}
         onConfirm={() => void doApprove()}

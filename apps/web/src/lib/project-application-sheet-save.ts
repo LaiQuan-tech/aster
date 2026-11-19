@@ -25,8 +25,12 @@ import { formatMoney } from "./money";
 import { vendorIdForTypedName } from "./vendor-name-binding";
 import { amountFromPct, formatStagePct, pctFromAmount, savedOverrideOf, stageAmountDisplay, stageScheduleSummary } from "./project-application-stage-amounts";
 import {
+  currentBonusAmount,
   currentBonusPaidOn,
+  currentFormulaNote,
   currentShareLines,
+  FORMULA_NOTE_MAX,
+  parseCapPct,
   filledShareLines,
   parseShareAmount,
   sameShareLines,
@@ -351,14 +355,20 @@ export function isEmptyShellBilling(b: BillingExt): boolean {
   );
 }
 
-/** 草稿（沒改就用已存的）裡該期的分潤名單與發獎金日是否都空了。 */
+/** 草稿（沒改就用已存的）裡該期的分潤名單、發獎金日、本期獎金（> 0）、算法說明是否都空了。 */
 export function draftClearsShares(set: BillingShareSet | null, edit: ShareEdit | undefined): boolean {
-  return filledShareLines(currentShareLines(set, edit)).length === 0 && trimmed(currentBonusPaidOn(set, edit)) === "";
+  const bonus = parseShareAmount(currentBonusAmount(set, edit));
+  return (
+    filledShareLines(currentShareLines(set, edit)).length === 0 &&
+    trimmed(currentBonusPaidOn(set, edit)) === "" &&
+    !(typeof bonus === "number" && bonus > 0) &&
+    trimmed(currentFormulaNote(set, edit)) === ""
+  );
 }
 
-/** 已存的這一期有獎金分潤或發獎金日（看得到分潤時才知道；看不到＝false）。 */
-function savedHasShares(set: BillingShareSet | null): boolean {
-  return !!set && (set.shares.length > 0 || !!set.bonusPaidOn);
+/** 已存的這一期有獎金分潤、發獎金日、本期獎金（> 0）或算法說明（看得到分潤時才知道；看不到＝false）。 */
+export function savedHasShares(set: BillingShareSet | null): boolean {
+  return !!set && (set.shares.length > 0 || !!set.bonusPaidOn || (set.bonusAmount ?? 0) > 0 || !!(set.formulaNote ?? "").trim());
 }
 
 /** 空殼期別要不要因為分潤保留：已存有分潤／發獎金日，且草稿沒有把它們清空。 */
@@ -819,6 +829,9 @@ export interface SharePlanItem {
   billingId: string | null;
   bonusPaidOn: string | null;
   shares: Array<{ employeeId: string; amount: number }>;
+  /** 2026-11-19 本期獎金／算法說明：只有改過才帶（undefined＝沿用已存的）；null＝清掉。 */
+  bonusAmount?: number | null;
+  formulaNote?: string | null;
   /**
    * 要刪的期別、草稿已把分潤與發獎金日清空：存檔時**先**送這筆清除，再送期程（刪期別），
    * 否則後端（API＋DB 觸發器）會因為該期還有分潤回 409。
@@ -835,6 +848,8 @@ export interface SharePlan {
    * 分潤編輯器的 % 與「超過該期金額」也用它，跟存檔檢查一致。
    */
   limits: Record<string, number | null>;
+  /** 2026-11-19 專案獎金上限比例（%）有改才帶；null＝清掉。 */
+  capPct?: number | null;
 }
 
 /** 該期在畫面上的金額（金額格有改用草稿，否則已存的有效金額）；空白或不合法＝null。 */
@@ -903,6 +918,16 @@ export function sharePlan(
   const out: SharePlan = { items: [], changes: 0, errors: [], limits: {} };
   const view = ctx.billingShares ?? null;
   if (!ctx.canFinance || !view || !view.available) return out;
+  const quarterReady = view.quarterReady === true;
+  // 專案獎金上限比例（老闆／platform_admin）：有改才送。
+  if (quarterReady && view.canEdit && draft.billingCapPct !== undefined) {
+    const n = parseCapPct(draft.billingCapPct);
+    if (n === "invalid") out.errors.push({ field: "billingCapPct", message: "獎金上限比例要是 0～100 的數字（最多小數 3 位）。" });
+    else if (n !== (view.overview?.capPct ?? null)) {
+      out.capPct = n;
+      out.changes += 1;
+    }
+  }
   const removedKeys = new Set(stages.removed.map((r) => r.key));
   const createdKeys = new Set(stages.created.map((c) => c.key));
   const predicted = predictedStageAmounts(ctx, draft, stages);
@@ -916,7 +941,11 @@ export function sharePlan(
       if (savedHasShares(set)) {
         if (view.canEdit && row.id && draftClearsShares(set, draft.shareEdits?.[key])) {
           out.changes += 1;
-          out.items.push({ key, label, billingId: row.id, bonusPaidOn: null, shares: [], beforeSchedule: true });
+          out.items.push({
+            key, label, billingId: row.id, bonusPaidOn: null, shares: [], beforeSchedule: true,
+            ...(quarterReady && (set?.bonusAmount !== null && set?.bonusAmount !== undefined) ? { bonusAmount: null } : {}),
+            ...(quarterReady && set?.formulaNote ? { formulaNote: null } : {}),
+          });
         } else {
           out.errors.push({ field, message: `付款階段${label}此期已有獎金分潤／發獎金日，請先清除。` });
         }
@@ -934,10 +963,28 @@ export function sharePlan(
     const date = trimmed(currentBonusPaidOn(set, edit));
     const dateChanged = edit?.bonusPaidOn !== undefined && date !== (set?.bonusPaidOn ?? "");
     const amountChanged = !!row.id && (limit === null ? savedAmount !== null : savedAmount === null || cents(limit) !== cents(savedAmount));
-    if (!linesChanged && !dateChanged) {
+    // 2026-11-19 本期獎金／算法說明（migration 0119 未套用時不送、不檢查）。
+    const bonusText = quarterReady ? currentBonusAmount(set, edit).trim() : "";
+    const bonusParsed = quarterReady ? parseShareAmount(bonusText) : null;
+    const savedBonus = set?.bonusAmount ?? null;
+    const bonusChanged =
+      quarterReady && edit?.bonusAmount !== undefined && bonusParsed !== "invalid" &&
+      (bonusParsed === null ? savedBonus !== null : savedBonus === null || cents(bonusParsed) !== cents(savedBonus));
+    const formula = quarterReady ? trimmed(currentFormulaNote(set, edit)) : "";
+    const formulaChanged = quarterReady && edit?.formulaNote !== undefined && formula !== (set?.formulaNote ?? "");
+    if (bonusParsed === "invalid") out.errors.push({ field: `stage:${key}:bonusAmount`, message: `付款階段${label}的本期獎金必須是 0 以上的數字（最多小數 2 位）。` });
+    if (formula.length > FORMULA_NOTE_MAX) out.errors.push({ field: `stage:${key}:bonusAmount`, message: `付款階段${label}的算法說明最多 ${FORMULA_NOTE_MAX} 字。` });
+    /** 分給成員的合計上限：本期獎金有填用它，否則用該期金額。 */
+    const byBonus = typeof bonusParsed === "number";
+    const shareCap = byBonus ? (bonusParsed as number) : limit;
+    if (set?.paid && (linesChanged || dateChanged || bonusChanged)) {
+      out.errors.push({ field, message: `付款階段${label}的每期款獎金已隨季獎金發放，不能修改人員、金額、本期獎金或發獎金日（算法說明仍可改；要改請先沖銷該季獎金批次）。` });
+    }
+    if (!linesChanged && !dateChanged && !bonusChanged && !formulaChanged) {
       // 分潤沒改、但這次存檔會讓該期金額變（含被尾差影響）：已存的分潤超過新金額 → 擋存（有分潤權限的人）。
+      // 本期獎金有填時上限是本期獎金，與期別金額無關。
       const total = set?.total ?? 0;
-      if (amountChanged && sharesOverLimit(total, limit)) {
+      if (!byBonus && amountChanged && sharesOverLimit(total, limit)) {
         out.errors.push({
           field,
           message:
@@ -948,7 +995,7 @@ export function sharePlan(
       }
       continue;
     }
-    out.changes += (linesChanged ? 1 : 0) + (dateChanged ? 1 : 0);
+    out.changes += (linesChanged ? 1 : 0) + (dateChanged ? 1 : 0) + (bonusChanged ? 1 : 0) + (formulaChanged ? 1 : 0);
 
     const shares: SharePlanItem["shares"] = [];
     const seen = new Set<string>();
@@ -962,7 +1009,11 @@ export function sharePlan(
       if (id && typeof n === "number") shares.push({ employeeId: l.employeeId, amount: n });
     });
     const total = shareLinesTotal(lines);
-    if (sharesOverLimit(total, limit)) {
+    if (byBonus) {
+      if (cents(total) > cents(shareCap as number)) {
+        out.errors.push({ field, message: `付款階段${label}分給成員的合計 ${formatMoney(total)} 超過本期獎金 ${formatMoney(shareCap as number)}。` });
+      }
+    } else if (sharesOverLimit(total, limit)) {
       out.errors.push({
         field,
         message:
@@ -975,7 +1026,11 @@ export function sharePlan(
     if (!row.id && !createdKeys.has(key)) {
       out.errors.push({ field, message: `付款階段${label}還沒有這一期：請先填項目說明或金額，再設定獎金分潤。` });
     }
-    out.items.push({ key, label, billingId: row.id, bonusPaidOn: date || null, shares });
+    out.items.push({
+      key, label, billingId: row.id, bonusPaidOn: date || null, shares,
+      ...(bonusChanged ? { bonusAmount: typeof bonusParsed === "number" ? bonusParsed : null } : {}),
+      ...(formulaChanged ? { formulaNote: formula || null } : {}),
+    });
   }
   return out;
 }
@@ -1061,7 +1116,7 @@ export interface SheetSaveApi {
   fetchBillings?(): Promise<BillingExt[]>;
   fetchSubcontracts?(): Promise<Subcontract[]>;
   /** 每期款獎金分潤（只換掉有帶到的期別）；省略＝不送（分潤修改留在草稿）。 */
-  saveBillingShares?(billings: BillingShareSetInput[]): Promise<unknown>;
+  saveBillingShares?(billings: BillingShareSetInput[], extra?: { capPct?: number | null }): Promise<unknown>;
   humanize(section: SheetSaveSection, err: unknown): string;
 }
 
@@ -1238,7 +1293,7 @@ export async function runApplicationSheetSave(
     const save = api.saveBillingShares;
     const ok = save
       ? await attempt("shares", "付款階段（先清除要刪期別的獎金分潤／發獎金日）", () =>
-          save(preClear.map((i) => ({ billingId: i.billingId!, bonusPaidOn: null, shares: [] }))).then(() => undefined),
+          save(preClear.map((i) => ({ billingId: i.billingId!, bonusPaidOn: null, shares: [], ...(i.bonusAmount !== undefined ? { bonusAmount: null } : {}), ...(i.formulaNote !== undefined ? { formulaNote: null } : {}) }))).then(() => undefined),
         )
       : false;
     if (ok) {
@@ -1363,11 +1418,21 @@ export async function runApplicationSheetSave(
         steps.push({ section: "shares", label: `付款階段${item.label}獎金分潤`, status: "skipped", message: "付款階段沒存成，這格未送出。" });
         continue;
       }
-      ready.push({ key: item.key, input: { billingId: id, bonusPaidOn: item.bonusPaidOn, shares: item.shares } });
+      ready.push({
+        key: item.key,
+        input: {
+          billingId: id, bonusPaidOn: item.bonusPaidOn, shares: item.shares,
+          ...(item.bonusAmount !== undefined ? { bonusAmount: item.bonusAmount } : {}),
+          ...(item.formulaNote !== undefined ? { formulaNote: item.formulaNote } : {}),
+        },
+      });
     }
-    if (ready.length > 0 && api.saveBillingShares) {
+    const capPct = plan.shares?.capPct;
+    if ((ready.length > 0 || capPct !== undefined) && api.saveBillingShares) {
       const save = api.saveBillingShares;
-      const ok = await attempt("shares", "付款階段（獎金分潤／發獎金日）", () => save(ready.map((r) => r.input)).then(() => undefined));
+      const ok = await attempt("shares", "付款階段（獎金分潤／本期獎金／發獎金日）", () =>
+        (capPct !== undefined ? save(ready.map((r) => r.input), { capPct }) : save(ready.map((r) => r.input))).then(() => undefined),
+      );
       if (ok) {
         const next = { ...(residual.shareEdits ?? {}) };
         for (const r of ready) {
@@ -1375,8 +1440,14 @@ export async function runApplicationSheetSave(
           delete next[r.input.billingId];
         }
         residual = { ...residual, shareEdits: next };
+        if (capPct !== undefined) residual = { ...residual, billingCapPct: undefined };
       }
     }
+  } else if (plan.shares?.capPct !== undefined && api.saveBillingShares) {
+    const save = api.saveBillingShares;
+    const capPct = plan.shares.capPct;
+    const ok = await attempt("shares", "專案獎金上限比例", () => save([], { capPct }).then(() => undefined));
+    if (ok) residual = { ...residual, billingCapPct: undefined };
   }
 
   if (plan.subcontracts) {

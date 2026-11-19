@@ -1,5 +1,6 @@
 import type { BonusBasis } from "./bonus-run.js"
 import type { PaidMember, ProjectPaymentTotals } from "./bonus-run-store.js"
+import type { BillingBonusOverview } from "./billing-bonus.js"
 import { excelPoolOf, sortProjects, taxed, type BonusSheetProject } from "../lib/statements/bonus-sheet.js"
 
 /**
@@ -83,6 +84,12 @@ export type ManageRow = {
   revisionNote: string | null
   /** 專案說明（project note）。 */
   note: string | null
+  /**
+   * 2026-11-19 每期款獎金總覽（合約未稅、獎金上限、已發＝每期分潤＋季獎金、占合約 %、已設定未發、可發餘額）；
+   * 讀取失敗或 migration 0119 未套用時 null。dualSource＝同案同時有季獎金比例制與每期分潤（畫面提醒）。
+   * 注意：上面 paid／unpaid 等欄位仍只是季獎金比例制（口徑不變）。
+   */
+  billingBonus?: BillingBonusOverview | null
 }
 
 export type ManageTotals = {
@@ -95,6 +102,9 @@ export type ManageTotals = {
   awaiting: number
   /** 合計含毛利制估算（獎金總額是估計值；待收款不含毛利制）→ 合計列標註。 */
   includesEstimate: boolean
+  /** 2026-11-19：每期款獎金已發／已設定未發合計（沒有 billingBonus 的列以 0 計）。 */
+  billingPaid?: number
+  billingSetUnpaid?: number
 }
 
 const roleRank = (role: string | null) => (role === "manager" ? 0 : role === "lead" ? 1 : role === "member" ? 2 : role === "support" ? 3 : 4)
@@ -205,6 +215,9 @@ export function manageTotalsOf(rows: readonly ManageRow[]): ManageTotals {
     available: sum((r) => r.available),
     awaiting: sum((r) => r.awaiting),
     includesEstimate: rows.some((r) => r.bonusTotalEstimated && r.bonusTotal !== null),
+    ...(rows.some((r) => r.billingBonus)
+      ? { billingPaid: sum((r) => r.billingBonus?.paidBilling ?? 0), billingSetUnpaid: sum((r) => r.billingBonus?.setUnpaid ?? 0) }
+      : {}),
   }
 }
 

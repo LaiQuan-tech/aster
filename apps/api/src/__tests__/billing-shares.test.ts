@@ -560,3 +560,125 @@ describe("2026-11-11 驗收修正 2（migration 0093）", () => {
     expect(validateBillingShares(B2, 0.3, [{ employeeId: E.member, amount: 0.1 }, { employeeId: E.boss, amount: 0.2 }])).toBeNull()
   })
 })
+
+describe("2026-11-19 本期獎金／算法說明／獎金上限／已發鎖定（migration 0119）", () => {
+  /** 模擬 0119 的 set_billing_bonus_shares_batch：bonus_amount／formula_note 鍵不存在＝沿用已存的。 */
+  function registerRpc0119() {
+    const base = fake.rpcHandlers[RPC]!
+    fake.rpcHandlers[RPC] = async (a: Row) => {
+      const before = new Map((fake.db[DATES] as Row[]).map((d) => [d.billing_id, { ...d }]))
+      const res = await base(a)
+      if (res.error) return res
+      for (const it of a.p_items as Row[]) {
+        const old = before.get(it.billing_id)
+        const amount = "bonus_amount" in it ? it.bonus_amount : (old?.bonus_amount ?? null)
+        const formula = "formula_note" in it ? it.formula_note : (old?.formula_note ?? null)
+        fake.db[DATES] = (fake.db[DATES] as Row[]).filter((d) => d.billing_id !== it.billing_id)
+        if (it.bonus_paid_on || (amount !== null && Number(amount) > 0) || formula) {
+          fake.db[DATES].push({ billing_id: it.billing_id, tenant_id: a.p_tenant_id, project_id: a.p_project_id, bonus_paid_on: it.bonus_paid_on ?? null, bonus_amount: amount === null ? null : String(amount), formula_note: formula })
+        }
+      }
+      return res
+    }
+    fake.rpcHandlers.set_billing_bonus_cap = (a: Row) => {
+      fake.db.project_billing_bonus_caps = (fake.db.project_billing_bonus_caps ?? []).filter((c: Row) => c.project_id !== a.p_project_id)
+      if (a.p_cap_pct !== null) fake.db.project_billing_bonus_caps.push({ project_id: a.p_project_id, tenant_id: a.p_tenant_id, cap_pct: String(a.p_cap_pct) })
+      return { data: a.p_cap_pct !== null, error: null }
+    }
+  }
+  const RUN = "eeeeeeee-0000-4000-8000-000000000301"
+  const RUN_REV = "eeeeeeee-0000-4000-8000-000000000302"
+
+  beforeEach(() => {
+    registerRpc0119()
+    fake.db.project_billing_bonus_caps = []
+    fake.db.bonus_runs = []
+    fake.db.bonus_run_items = []
+    fake.db.bonus_run_billing_items = []
+    fake.db.contracts = [{ id: "c-1", tenant_id: TENANT_ID, project_id: PROJECT, our_role: "contractor", doc_type: "contract", amount: "1000000", is_primary: true, deleted_at: null }]
+  })
+
+  it("本期獎金有填：分給成員合計 ≤ 本期獎金（不是該期金額）；超過 400 shares_exceed_bonus_amount、不寫", async () => {
+    const over = await put(T.boss, [{ billingId: B1, bonusPaidOn: "2026-12-20", bonusAmount: 5000, formulaNote: "50萬×1%", shares: [{ employeeId: E.member, amount: 5001 }] }])
+    expect([over.status, over.body.error, over.body.limit]).toEqual([400, "shares_exceed_bonus_amount", 5000])
+    expect(rpcCalls()).toHaveLength(0)
+    const ok = await put(T.boss, [{ billingId: B1, bonusPaidOn: "2026-12-20", bonusAmount: 5000, formulaNote: "50萬×1%", shares: [{ employeeId: E.member, amount: 3000 }, { employeeId: E.hr, amount: 2000 }] }])
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(ok.body.billings.find((b: Row) => b.billingId === B1)).toMatchObject({ bonusAmount: 5000, formulaNote: "50萬×1%", total: 5000, overLimit: false, paid: false })
+    expect((rpcCalls()[0].args.p_items as Row[])[0]).toMatchObject({ bonus_amount: 5000, formula_note: "50萬×1%" })
+  })
+
+  it("本期獎金可 0；沒帶 bonusAmount 鍵＝沿用已存（舊前端不會清掉）；未填本期獎金沿用 ≤ 該期金額", async () => {
+    expect((await put(T.boss, [{ billingId: B2, bonusPaidOn: null, bonusAmount: 0, shares: [] }])).status).toBe(200)
+    // 已存 5000 → 沒帶鍵：上限仍是 5000
+    await put(T.boss, [{ billingId: B1, bonusPaidOn: "2026-12-20", bonusAmount: 5000, shares: [{ employeeId: E.member, amount: 100 }] }])
+    const old = await put(T.boss, [{ billingId: B1, bonusPaidOn: "2026-12-20", shares: [{ employeeId: E.member, amount: 6000 }] }])
+    expect([old.status, old.body.error]).toEqual([400, "shares_exceed_bonus_amount"])
+    expect("bonus_amount" in (rpcCalls().at(-1)!.args.p_items as Row[])[0]).toBe(true) // 上一次成功的呼叫有帶
+    // 清掉本期獎金 → 回到「≤ 該期金額 100000」
+    const cleared = await put(T.boss, [{ billingId: B1, bonusPaidOn: "2026-12-20", bonusAmount: null, shares: [{ employeeId: E.member, amount: 60000 }] }])
+    expect(cleared.status).toBe(200)
+    expect(cleared.body.billings.find((b: Row) => b.billingId === B1)).toMatchObject({ bonusAmount: null, total: 60000 })
+  })
+
+  it("算法說明 > 200 字、本期獎金負數或小數 3 位 → 400 invalid_body", async () => {
+    expect((await put(T.boss, [{ billingId: B1, shares: [], formulaNote: "x".repeat(201) }])).status).toBe(400)
+    expect((await put(T.boss, [{ billingId: B1, shares: [], bonusAmount: -1 }])).status).toBe(400)
+    expect((await put(T.boss, [{ billingId: B1, shares: [], bonusAmount: 1.234 }])).status).toBe(400)
+  })
+
+  it("獎金上限比例：只有老闆／platform_admin 能設；GET overview＝合約未稅×比例、已設定未發、可發餘額", async () => {
+    expect((await as(T.grantedHr).put(url()).send({ billings: [], capPct: 10 })).status).toBe(403)
+    const set = await as(T.boss).put(url()).send({ billings: [], capPct: 10 })
+    expect(set.status, JSON.stringify(set.body)).toBe(200)
+    expect(fake.rpcCalls.find((c) => c.name === "set_billing_bonus_cap")?.args).toMatchObject({ p_cap_pct: 10, p_project_id: PROJECT })
+    expect(set.body.overview).toMatchObject({
+      contractTotal: 1000000, capPct: 10, cap: 100000,
+      paidBilling: 0, paidQuarterly: 0, paidTotal: 0, paidPct: 0,
+      setUnpaid: 30000, available: 70000, dualSource: true,
+    })
+    expect((await as(T.boss).put(url()).send({ billings: [], capPct: 100.5 })).status).toBe(400)
+    expect((await as(T.boss).put(url()).send({ billings: [] })).status).toBe(400)
+  })
+
+  it("已隨季獎金批次發放的期別：改人／金額／本期獎金／發獎金日 → 409 billing_bonus_paid；只改說明可以；沖銷後解鎖", async () => {
+    fake.db.bonus_runs = [{ id: RUN, tenant_id: TENANT_ID, status: "paid", kind: "regular", deleted_at: null }]
+    fake.db.bonus_run_billing_items = [
+      { id: "bi-1", tenant_id: TENANT_ID, run_id: RUN, project_id: PROJECT, billing_id: B1, employee_id: E.member, amount: "30000", bonus_paid_on: "2026-12-20", snapshot: {} },
+    ]
+    const g = await as(T.boss).get(url())
+    expect(g.body.billings.find((b: Row) => b.billingId === B1)).toMatchObject({ paid: true, paidAmount: 30000 })
+    expect(g.body.overview).toMatchObject({ paidBilling: 30000, setUnpaid: 0 })
+    for (const body of [
+      { billingId: B1, bonusPaidOn: "2026-12-20", shares: [{ employeeId: E.member, amount: 29999 }] },
+      { billingId: B1, bonusPaidOn: "2026-12-21", shares: [{ employeeId: E.member, amount: 30000 }] },
+      { billingId: B1, bonusPaidOn: "2026-12-20", bonusAmount: 40000, shares: [{ employeeId: E.member, amount: 30000 }] },
+      { billingId: B1, bonusPaidOn: "2026-12-20", shares: [] },
+    ]) {
+      const r = await put(T.boss, [body])
+      expect([r.status, r.body.error], JSON.stringify(body)).toEqual([409, "billing_bonus_paid"])
+    }
+    expect(rpcCalls()).toHaveLength(0)
+    const note = await put(T.boss, [{ billingId: B1, bonusPaidOn: "2026-12-20", formulaNote: "補說明", shares: [{ employeeId: E.member, amount: 30000 }] }])
+    expect(note.status).toBe(200)
+    // DB 端的 BL409（競態）也對應成 409
+    fake.rpcHandlers[RPC] = () => ({ data: null, error: { code: "BL409", message: "paid" } })
+    expect((await put(T.boss, [{ billingId: B2, shares: [] }])).body.error).toBe("billing_bonus_paid")
+    registerRpc()
+    registerRpc0119()
+    // 沖銷批次 paid → 淨額 0 → 解鎖
+    fake.db.bonus_runs.push({ id: RUN_REV, tenant_id: TENANT_ID, status: "paid", kind: "reversal", deleted_at: null })
+    fake.db.bonus_run_billing_items.push({ id: "bi-2", tenant_id: TENANT_ID, run_id: RUN_REV, project_id: PROJECT, billing_id: B1, employee_id: E.member, amount: "-30000", bonus_paid_on: "2026-12-20", snapshot: {} })
+    const unlocked = await put(T.boss, [{ billingId: B1, bonusPaidOn: "2026-12-21", shares: [{ employeeId: E.member, amount: 1000 }] }])
+    expect(unlocked.status, JSON.stringify(unlocked.body)).toBe(200)
+    expect(unlocked.body.billings.find((b: Row) => b.billingId === B1)).toMatchObject({ paid: false, paidAmount: 0 })
+  })
+
+  it("代墊款期別：本期獎金 > 0 或算法說明也算「設定」→ 400；全清可以", async () => {
+    fake.db.project_billings.push(billingRow("f0000000-0000-4000-8000-000000000304", PROJECT, 3, "0", { kind: "guild_advance" }))
+    const id = "f0000000-0000-4000-8000-000000000304"
+    expect((await put(T.boss, [{ billingId: id, shares: [], bonusAmount: 10 }])).body.error).toBe("advance_billing_no_shares")
+    expect((await put(T.boss, [{ billingId: id, shares: [], formulaNote: "x" }])).body.error).toBe("advance_billing_no_shares")
+    expect((await put(T.boss, [{ billingId: id, shares: [], bonusAmount: null, formulaNote: null }])).status).toBe(200)
+  })
+})

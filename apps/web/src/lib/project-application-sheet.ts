@@ -252,6 +252,8 @@ export interface ApplicationSheetDraft {
   subDeleteReason: string;
   /** 每期款獎金分潤的修改（2026-11-11；key 同 stageEdits）。只有 access.editBillingShares 的人會有內容。 */
   shareEdits: Record<string, ShareEdit>;
+  /** 2026-11-19 專案獎金上限比例（%，字串保存）；undefined＝沒動過（沿用已存的）。 */
+  billingCapPct?: string;
 }
 
 /** 申請單上屬於客戶名冊的格子（「採購承辦」＝聯絡人姓名＋電話兩個欄位）。 */

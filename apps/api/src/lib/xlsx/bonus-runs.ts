@@ -1,6 +1,7 @@
 import type ExcelJS from "exceljs"
 import { workbookToBuffer } from "./index.js"
 import type { SerializedItem, SerializedRun } from "../../services/bonus-run-store.js"
+import type { SerializedRunBillingItem } from "../../services/billing-bonus.js"
 
 /** 獎金撥款表：欄位、雙層表頭與角色欄位對齊客戶檔「115 7-9」。 */
 const MONEY_FMT = "#,##0;[Red]-#,##0"
@@ -122,7 +123,7 @@ function setupHeaders(ws: ExcelJS.Worksheet, label: string, showProfit: boolean)
 export async function buildBonusRunWorkbook(
   run: SerializedRun,
   items: SerializedItem[],
-  opts: { showProfit?: boolean } = {},
+  opts: { showProfit?: boolean; billingItems?: readonly SerializedRunBillingItem[] } = {},
 ): Promise<ExcelJS.Workbook> {
   const showProfit = opts.showProfit !== false
   const col = columnMap(showProfit)
@@ -204,7 +205,54 @@ export async function buildBonusRunWorkbook(
   })
   ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: Math.max(2, rowNo - 1), column: col(FULL_COLS)! } }
   ws.pageSetup = { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 }
+  if (opts.billingItems && opts.billingItems.length > 0) addBillingSheet(wb, run, opts.billingItems)
   return wb
+}
+
+/**
+ * 2026-11-19：本批帶入的每期款獎金另開一張工作表「每期款獎金」（來源、期別、員工、發獎金日、金額），
+ * 與季獎金比例制的主表分開列，避免看成同一筆重複發放。
+ */
+function addBillingSheet(wb: ExcelJS.Workbook, run: SerializedRun, billingItems: readonly SerializedRunBillingItem[]): void {
+  const ws = wb.addWorksheet("每期款獎金", { views: [{ state: "frozen", ySplit: 1 }] })
+  const headers = ["序", "期別", "來源", "專案代號", "專案名稱", "付款階段", "員工", "工號", "發獎金日", "本次獎金", "備註"]
+  const widths = [6, 10, 34, 12, 28, 18, 12, 10, 12, 14, 16]
+  widths.forEach((w, i) => (ws.getColumn(i + 1).width = w))
+  const head = ws.getRow(1)
+  headers.forEach((h, i) => (head.getCell(i + 1).value = h))
+  head.eachCell({ includeEmpty: true }, (cell) => {
+    cell.font = { name: "新細明體", bold: true }
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true }
+    cell.border = BORDER
+  })
+  let rowNo = 2
+  billingItems.forEach((b, i) => {
+    const row = ws.getRow(rowNo++)
+    row.getCell(1).value = i + 1
+    row.getCell(2).value = run.label
+    row.getCell(3).value = b.sourceLabel
+    row.getCell(4).value = b.projectCode ?? ""
+    row.getCell(5).value = b.projectName ?? ""
+    row.getCell(6).value = `${b.installmentNo ? `第${b.installmentNo}期` : ""}${b.milestone ? ` ${b.milestone}` : ""}`.trim()
+    row.getCell(7).value = b.employeeName ?? ""
+    row.getCell(8).value = b.empNo ?? ""
+    row.getCell(9).value = b.bonusPaidOn ?? ""
+    money(row.getCell(10), b.amount)
+    row.getCell(11).value = b.overdue ? "逾期補發" : ""
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.font = { name: "新細明體", size: 10 }
+      cell.border = BORDER
+    })
+  })
+  const total = ws.getRow(rowNo)
+  total.getCell(1).value = `合計（${billingItems.length} 筆）`
+  ws.mergeCells(rowNo, 1, rowNo, 9)
+  money(total.getCell(10), Math.round(billingItems.reduce((s, b) => s + Math.round(b.amount * 100), 0)) / 100)
+  total.eachCell({ includeEmpty: true }, (cell) => {
+    cell.font = { name: "新細明體", bold: true }
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDDEBF7" } }
+    cell.border = { ...BORDER, bottom: { style: "double" } }
+  })
 }
 
 export function bonusRunFilename(run: SerializedRun): string {
@@ -214,7 +262,7 @@ export function bonusRunFilename(run: SerializedRun): string {
 export async function bonusRunWorkbookBuffer(
   run: SerializedRun,
   items: SerializedItem[],
-  opts: { showProfit?: boolean } = {},
+  opts: { showProfit?: boolean; billingItems?: readonly SerializedRunBillingItem[] } = {},
 ): Promise<Buffer> {
   return workbookToBuffer(await buildBonusRunWorkbook(run, items, opts))
 }

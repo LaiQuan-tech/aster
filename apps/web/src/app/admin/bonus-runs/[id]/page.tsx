@@ -21,9 +21,10 @@ import {
   todayKey,
   withdrawBonusRun,
   type BonusRunDetail,
+  runGrandAmount,
 } from "@/lib/bonus-api";
 import Link from "next/link";
-import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "../_components";
+import { BillingItemsTable, ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "../_components";
 
 /**
  * 批次明細：毛利表（入帳／成本／毛利／比例）＋items 表（專案／員工／入帳比例／累計應發／已發／本季應發／超發紅字）。
@@ -97,12 +98,12 @@ export default function BonusRunDetailPage() {
 
   async function submit() {
     if (!run) return;
-    if (!confirm(`將 ${run.label} 送給老闆核准？（本批合計 ${fmtMoney(run.totals.amount)} 元）`)) return;
+    if (!confirm(`將 ${run.label} 送給老闆核准？（本批合計 ${fmtMoney(runGrandAmount(run.totals))} 元）`)) return;
     await act("submit", async () => keepDetail(await submitBonusRun(id)));
   }
   async function approve() {
     if (!run) return;
-    if (!confirm(`核准 ${run.label}？核准後 HR 才能發放（本批合計 ${fmtMoney(run.totals.amount)} 元）。`)) return;
+    if (!confirm(`核准 ${run.label}？核准後 HR 才能發放（本批合計 ${fmtMoney(runGrandAmount(run.totals))} 元）。`)) return;
     await act("approve", async () => keepDetail(await approveBonusRun(id)));
   }
   async function withdraw() {
@@ -141,7 +142,7 @@ export default function BonusRunDetailPage() {
   }
   async function pay() {
     if (!run) return;
-    if (!confirm(`確定將 ${run.label} 標記為已發放？發放後即凍結，不能再修改或刪除（金額 ${fmtMoney(run.totals.amount)} 元）。`)) return;
+    if (!confirm(`確定將 ${run.label} 標記為已發放？發放後即凍結，不能再修改或刪除（金額 ${fmtMoney(runGrandAmount(run.totals))} 元）。`)) return;
     await act("pay", async () => {
       const d = await payBonusRun(id, { paidOn: fPaidOn });
       keepDetail(d);
@@ -151,7 +152,7 @@ export default function BonusRunDetailPage() {
   async function reverse() {
     if (!run) return;
     const reason = prompt(
-      `對 ${run.label} 開沖銷批次？\n會建立一批金額全部取負的草稿（${fmtMoney(-run.totals.amount)} 元），你確認後再「發放」才生效；發放後這批在累計口徑上歸零。\n請填沖銷理由（會留在稽核紀錄）：`,
+      `對 ${run.label} 開沖銷批次？\n會建立一批金額全部取負的草稿（${fmtMoney(-runGrandAmount(run.totals))} 元），你確認後再「發放」才生效；發放後這批在累計口徑上歸零。\n請填沖銷理由（會留在稽核紀錄）：`,
     );
     if (reason === null) return;
     if (!reason.trim()) {
@@ -244,7 +245,11 @@ export default function BonusRunDetailPage() {
       )}
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Stat label="本季應發合計" value={`${fmtMoney(run.totals.amount)} 元`} />
+        <Stat
+          label={run.totals.billingAmount ? "本批實發合計" : "本季應發合計"}
+          value={`${fmtMoney(runGrandAmount(run.totals))} 元`}
+          hint={run.totals.billingAmount ? `季獎金 ${fmtMoney(run.totals.amount)}＋每期款獎金 ${fmtMoney(run.totals.billingAmount)}` : undefined}
+        />
         <Stat label="人數／案數" value={`${run.totals.employeeCount} 人／${run.totals.projectCount} 案`} />
         <Stat label="累計應發／已發放" value={`${fmtMoney(run.totals.entitledCumulative)}／${fmtMoney(run.totals.paidBefore)}`} />
         <Stat label="超發列" value={run.totals.overpaidCount > 0 ? `${run.totals.overpaidCount} 列（不自動追討）` : "無"} tone={run.totals.overpaidCount > 0 ? "down" : undefined} />
@@ -430,6 +435,16 @@ export default function BonusRunDetailPage() {
           <ExcludedArchivedList snapshot={detail.snapshot} />
         </div>
       </Card>
+
+      {(detail.billingItems?.length ?? 0) > 0 && (
+        <Card>
+          <h2 className="mb-1 text-base font-semibold text-gray-800">每期款獎金（{detail.billingItems!.length} 列，合計 {fmtMoney(run.totals.billingAmount ?? 0)} 元）</h2>
+          <p className="mb-3 text-xs text-gray-500">
+            專案申請單付款階段「發獎金日」落在本季（或之前未發）的每期款獎金，自動列入本批；與上方季獎金比例制分開計算，發放後該期即鎖定。
+          </p>
+          <BillingItemsTable items={detail.billingItems!} />
+        </Card>
+      )}
     </div>
   );
 }

@@ -105,3 +105,19 @@ describe("管理檢視補充說明（2026-10-27 驗收）", () => {
     expect(SKIPPED_LABEL).toEqual({ no_contract: "缺合約", no_pool: "缺獎金池" });
   });
 });
+
+/* 2026-11-19 每期款獎金說明行（管理檢視）。假資料。 */
+import { billingBonusLines } from "../bonus-sheet-api"
+
+describe("2026-11-19 管理檢視每期款獎金說明", () => {
+  const ov = { contractTotal: 1_000_000, capPct: 10, cap: 100_000, paidBilling: 30_000, paidQuarterly: 5_000, paidTotal: 35_000, paidPct: 3.5, setUnpaid: 10_000, available: 55_000, dualSource: true }
+  it("有上限：每期款已發／已設定未發＋上限、已發合計（占合約 %）、可發餘額；沒有每期款資料 → 空", () => {
+    expect(billingBonusLines({ billingBonus: ov })).toEqual([
+      "每期款已發 30,000・已設定未發 10,000",
+      "上限 100,000（合約未稅×10%）・已發合計 35,000（占合約 3.5%）・可發餘額 55,000",
+    ])
+    expect(billingBonusLines({ billingBonus: { ...ov, cap: null, capPct: null, available: null } })[1]).toBe("已發合計 35,000（占合約 3.5%）・未設獎金上限")
+    expect(billingBonusLines({ billingBonus: null })).toEqual([])
+    expect(billingBonusLines({})).toEqual([])
+  })
+})

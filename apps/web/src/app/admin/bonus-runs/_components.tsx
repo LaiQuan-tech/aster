@@ -11,6 +11,7 @@ import {
   fmtMoney,
   fmtPct,
   type BonusRun,
+  type BonusRunBillingItem,
   type BonusRunPreview,
   type BonusRunSnapshot,
   type BonusWarning,
@@ -24,12 +25,64 @@ import { sheet } from "@/lib/sheet-styles";
  */
 
 
-export function Stat({ label, value, tone }: { label: string; value: string; tone?: "up" | "down" }) {
+export function Stat({ label, value, tone, hint }: { label: string; value: string; tone?: "up" | "down"; hint?: string }) {
   const color = tone === "up" ? "text-emerald-700" : tone === "down" ? "text-red-600" : "text-gray-900";
   return (
     <div className="rounded-xl bg-gray-50 p-3">
       <p className="text-xs text-gray-500">{label}</p>
       <p className={`mt-0.5 text-lg font-bold ${color}`}>{value}</p>
+      {hint ? <p className="mt-0.5 text-[11px] text-gray-500">{hint}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * 2026-11-19：季獎金批次自動帶入的每期款獎金（來源「每期款獎金：專案X第N期」）。與比例制明細分開一張表，
+ * 避免看成同一筆重複發放。金額為負＝沖銷。
+ */
+export function BillingItemsTable({ items }: { items: readonly BonusRunBillingItem[] }) {
+  if (items.length === 0) return <Empty>本批沒有每期款獎金。</Empty>;
+  const total = Math.round(items.reduce((s, i) => s + Math.round(i.amount * 100), 0)) / 100;
+  return (
+    <div className="overflow-x-auto" data-testid="bonus-run-billing-items">
+      <table className="w-full min-w-[640px] text-sm">
+        <thead>
+          <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
+            <th className="py-1.5 pr-2 font-medium">來源</th>
+            <th className="py-1.5 pr-2 font-medium">付款階段</th>
+            <th className="py-1.5 pr-2 font-medium">員工</th>
+            <th className="py-1.5 pr-2 font-medium">發獎金日</th>
+            <th className="py-1.5 pr-2 text-right font-medium">本次獎金</th>
+            <th className="py-1.5 font-medium">說明</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((i) => (
+            <tr key={`${i.billingId}-${i.employeeId}`} className="border-b border-gray-100">
+              <td className="py-1.5 pr-2">{i.sourceLabel}</td>
+              <td className="py-1.5 pr-2">{`${i.installmentNo ? `第${i.installmentNo}期` : ""}${i.milestone ? ` ${i.milestone}` : ""}`.trim() || "—"}</td>
+              <td className="py-1.5 pr-2">
+                {i.employeeName ?? "—"}
+                {i.empNo ? <span className="ml-1 text-xs text-gray-400">{i.empNo}</span> : null}
+              </td>
+              <td className="py-1.5 pr-2 tabular-nums">{i.bonusPaidOn ?? "—"}</td>
+              <td className={`py-1.5 pr-2 text-right tabular-nums ${i.amount < 0 ? "text-red-600" : ""}`}>{fmtMoney(i.amount)}</td>
+              <td className="py-1.5 text-xs text-gray-600">
+                {[i.overdue ? "逾期補發" : null, i.formulaNote].filter(Boolean).join("；") || "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="text-sm font-semibold">
+            <td className="py-1.5 pr-2" colSpan={4}>
+              合計
+            </td>
+            <td className="py-1.5 pr-2 text-right tabular-nums">{fmtMoney(total)}</td>
+            <td />
+          </tr>
+        </tfoot>
+      </table>
     </div>
   );
 }

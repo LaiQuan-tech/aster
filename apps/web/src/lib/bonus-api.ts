@@ -41,6 +41,40 @@ export interface BonusTotals {
   skipped: BonusSkipped[]
   /** 入帳超過合約等提醒（舊批次沒有）。 */
   warnings?: BonusWarning[]
+  /** 2026-11-19：本批帶入的每期款獎金（沒有帶入時沒有這些鍵）；amount 只是季獎金比例制。 */
+  billingAmount?: number
+  billingItemCount?: number
+  billingEmployeeCount?: number
+  billingProjectCount?: number
+}
+
+/** 2026-11-19：季獎金批次自動帶入的每期款獎金一列（API services/billing-bonus.ts SerializedRunBillingItem）。 */
+export interface BonusRunBillingItem {
+  id: string | null
+  runId: string | null
+  source: "billing"
+  projectId: string
+  projectCode: string | null
+  projectName: string | null
+  billingId: string
+  installmentNo: number | null
+  milestone: string | null
+  employeeId: string
+  employeeName: string | null
+  empNo: string | null
+  amount: number
+  bonusPaidOn: string | null
+  /** 看不到毛利的人為 null。 */
+  formulaNote: string | null
+  /** 發獎金日在本季以前、之前沒發到（逾期補發）。 */
+  overdue: boolean
+  /** 「每期款獎金：專案X第N期」。 */
+  sourceLabel: string
+}
+
+/** 本批實發＝季獎金比例制＋每期款獎金。 */
+export function runGrandAmount(totals: Pick<BonusTotals, "amount" | "billingAmount">): number {
+  return Math.round(((totals.amount ?? 0) + (totals.billingAmount ?? 0)) * 100) / 100
 }
 
 export type BonusRunKind = "regular" | "reversal"
@@ -145,6 +179,8 @@ export interface BonusRunSnapshot {
 export interface BonusRunDetail {
   run: BonusRun
   items: BonusRunItem[]
+  /** 2026-11-19：本批帶入的每期款獎金；舊 API 沒有。 */
+  billingItems?: BonusRunBillingItem[]
   snapshot: BonusRunSnapshot | null
   /** 呼叫者是不是老闆（能核准／退回）。 */
   canApprove?: boolean
@@ -163,6 +199,8 @@ export interface BonusRunPreview {
   label: string
   asOf: string
   items: BonusRunItem[]
+  /** 2026-11-19：自動帶入的每期款獎金；舊 API 沒有。 */
+  billingItems?: BonusRunBillingItem[]
   totals: BonusTotals
   snapshot: BonusRunSnapshot
   /** 同 BonusRunDetail.canSeeProfit。 */
@@ -232,6 +270,9 @@ export interface MyBonusHistoryRow {
   /** 該專案截至這一期本人累計已發。 */
   paidCumulative: number
   basis: BonusBasis | null
+  /** 2026-11-19：'billing'＝每期款獎金（隨季獎金批次發放）；舊 API 沒有＝季獎金。 */
+  source?: "quarterly" | "billing"
+  sourceLabel?: string | null
 }
 
 /* -------------------------------------------------------------------- 呼叫 -- */

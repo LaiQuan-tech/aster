@@ -972,10 +972,36 @@ export interface BillingShareSet {
   /** 該期有效金額（後端口徑）；分潤合計不可超過。 */
   billingAmount: number | null
   bonusPaidOn: string | null
+  /** 2026-11-19 本期獎金（手填，可 0）；null＝未填（分潤上限改用該期金額）。舊版 API 沒有這欄。 */
+  bonusAmount?: number | null
+  /** 2026-11-19 算法說明（例「30萬＋20萬×10%」）。 */
+  formulaNote?: string | null
   shares: BillingShare[]
   total: number
-  /** 分潤合計超過目前期別金額（會計事後把期別金額改小）：該格紅底＋「分潤超過本期金額」。舊版 API 沒有這欄。 */
+  /** 分潤合計超過上限（本期獎金；未填時為該期金額）：該格紅底＋提示。舊版 API 沒有這欄。 */
   overLimit?: boolean
+  /** 2026-11-19 已隨季獎金批次發放 → 鎖定（只能改算法說明）。 */
+  paid?: boolean
+  paidAmount?: number
+}
+
+/** 2026-11-19 申請單付款階段下方的專案獎金總覽（API services/billing-bonus.ts billingOverviewOf）。 */
+export interface BillingBonusOverview {
+  /** 合約金額（未稅）；沒有合約 null。 */
+  contractTotal: number | null
+  capPct: number | null
+  /** 獎金上限＝合約（未稅）× 上限比例。 */
+  cap: number | null
+  paidBilling: number
+  paidQuarterly: number
+  paidTotal: number
+  /** 已發占合約 %。 */
+  paidPct: number | null
+  setUnpaid: number
+  /** 可發餘額＝上限 − 已發 − 已設定未發。 */
+  available: number | null
+  /** 同案同時有季獎金比例制與每期分潤。 */
+  dualSource: boolean
 }
 
 export interface BillingSharesState {
@@ -984,6 +1010,9 @@ export interface BillingSharesState {
   canEdit: boolean
   /** 同一案也有季獎金分潤設定（成員趴數／固定金額）：顯示「不要重複發放」提醒。 */
   quarterlyShares: boolean
+  /** 2026-11-19 migration 0119 已套用（本期獎金／算法說明／上限可用）。舊版 API 沒有這欄＝false。 */
+  quarterReady?: boolean
+  overview?: BillingBonusOverview | null
   billings: BillingShareSet[]
 }
 
@@ -991,16 +1020,20 @@ export interface BillingShareSetInput {
   billingId: string
   bonusPaidOn: string | null
   shares: Array<{ employeeId: string; amount: number; note?: string | null }>
+  /** 不帶＝沿用已存的；null＝清掉。 */
+  bonusAmount?: number | null
+  formulaNote?: string | null
 }
 
 export function getBillingShares(projectId: string) {
   return apiFetch<BillingSharesState>(`/projects/${projectId}/billing-shares`)
 }
 
-export function putBillingShares(projectId: string, billings: BillingShareSetInput[]) {
+/** extra.capPct：專案獎金上限比例（%）；不帶＝不改，null＝清掉。 */
+export function putBillingShares(projectId: string, billings: BillingShareSetInput[], extra: { capPct?: number | null } = {}) {
   return apiFetch<BillingSharesState>(`/projects/${projectId}/billing-shares`, {
     method: "PUT",
-    body: JSON.stringify({ billings }),
+    body: JSON.stringify({ billings, ...(extra.capPct !== undefined ? { capPct: extra.capPct } : {}) }),
   })
 }
 

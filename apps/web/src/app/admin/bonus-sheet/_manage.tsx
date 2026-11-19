@@ -5,6 +5,7 @@ import {
   BASIS_LABEL,
   SKIPPED_LABEL,
   availableOverlapText,
+  billingBonusLines,
   manageMemberAmounts,
   removedPaidText,
   manageMemberHeadParts,
@@ -159,6 +160,18 @@ export function ManageTable({
                     )}
                   </td>
                   <td className="px-2.5 py-2 text-[12px] leading-snug text-gray-700">
+                    {r.billingBonus && (
+                      <div className="mb-1 rounded bg-sky-50 px-1.5 py-1 text-[11px] leading-tight text-sky-900" data-testid={`manage-billing-${r.projectId}`}>
+                        {billingBonusLines(r).map((line) => (
+                          <span key={line} className={`block ${/可發餘額 -/.test(line) ? "font-semibold text-red-700" : ""}`}>
+                            {line}
+                          </span>
+                        ))}
+                        {r.billingBonus.dualSource && (
+                          <span className="mt-0.5 block font-semibold text-amber-800">注意：同案有季獎金比例制＋每期款兩種來源，請確認不要重複發放</span>
+                        )}
+                      </div>
+                    )}
                     <div className="line-clamp-6 whitespace-pre-line break-words" title={[r.note, r.revisionNote].filter(Boolean).join("\n")}>
                       {r.note && <span className="block text-gray-500">{r.note}</span>}
                       {r.revisionNote}
@@ -197,7 +210,9 @@ export function ManageTable({
                   <span className="block text-[11px] font-normal leading-tight text-amber-700">含毛利制估算，待收款不含毛利制</span>
                 )}
               </td>
-              <td colSpan={2} />
+              <td colSpan={2} className="px-2.5 py-2 text-[11px] font-normal text-sky-900">
+                {totals.billingPaid !== undefined && `每期款已發 ${moneyText(totals.billingPaid)}・已設定未發 ${moneyText(totals.billingSetUnpaid ?? 0)}`}
+              </td>
             </tr>
           </tfoot>
         )}
