@@ -429,37 +429,33 @@ export async function loadRunBillingItemRows(tenantId: string, runIds: readonly 
   return out
 }
 
-/** 整批換掉某（未發放）批次的每期分潤列。paid 批次 DB 觸發器會擋（23001）。 */
+/**
+ * 整批換掉某（未發放）批次的每期分潤列：走 DB 函式 replace_bonus_run_billing_items（migration 0121）——同一交易內
+ * 先刪後插（全成全敗），鎖順序同發放（先鎖批次列、再取期別 'billing_shares:' advisory lock）。
+ * 已發批次 → DB 擋（23001 restrict_violation：函式本身檢查＋bonus_run_billing_items_paid_guard 觸發器）；
+ * 批次不存在／已刪 → P0002。沒有要寫的列、批次也沒有舊列時不呼叫（省一次往返）。
+ */
 export async function replaceRunBillingItems(
   tenantId: string,
   runId: string,
   items: ReadonlyArray<{ billingId: string; projectId: string; employeeId: string; amount: number; bonusPaidOn: string | null; snapshot: RunBillingSnapshot }>,
 ): Promise<void> {
   if (!(await billingBonusQuarterReady())) return
-  const existing = await loadRunBillingItemRows(tenantId, [runId])
-  if (existing.length > 0) {
-    const { error } = await supabaseAdmin.from(RUN_BILLING_ITEMS_TABLE).delete().eq("tenant_id", tenantId).eq("run_id", runId)
-    if (error) {
-      const e = new Error(`billing-bonus replaceRunBillingItems (delete): ${error.message}`) as Error & { code?: string }
-      e.code = error.code ?? undefined
-      throw e
-    }
-  }
-  if (items.length === 0) return
-  const { error } = await supabaseAdmin.from(RUN_BILLING_ITEMS_TABLE).insert(
-    items.map((i) => ({
-      tenant_id: tenantId,
-      run_id: runId,
-      project_id: i.projectId,
+  if (items.length === 0 && (await loadRunBillingItemRows(tenantId, [runId])).length === 0) return
+  const { error } = await supabaseAdmin.rpc("replace_bonus_run_billing_items", {
+    p_tenant_id: tenantId,
+    p_run_id: runId,
+    p_items: items.map((i) => ({
       billing_id: i.billingId,
+      project_id: i.projectId,
       employee_id: i.employeeId,
       amount: i.amount,
       bonus_paid_on: i.bonusPaidOn,
       snapshot: i.snapshot,
     })),
-  )
+  })
   if (error) {
-    const e = new Error(`billing-bonus replaceRunBillingItems (insert): ${error.message}`) as Error & { code?: string }
+    const e = new Error(`replace_bonus_run_billing_items: ${error.message}`) as Error & { code?: string }
     e.code = error.code ?? undefined
     throw e
   }

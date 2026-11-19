@@ -100,6 +100,31 @@ function seedBase() {
   fake.db.bonus_runs = []
   fake.db.bonus_run_items = []
   fake.db.notifications = []
+  registerReplaceRpc()
+}
+
+/**
+ * 照 migration 0121 replace_bonus_run_billing_items 模擬：批次不存在／不屬此租戶 → P0002；已發 → 23001；
+ * 否則同一次呼叫內先刪後插（任一列不合法就整批不動）。
+ */
+function registerReplaceRpc() {
+  fake.rpcHandlers.replace_bonus_run_billing_items = (a: Row) => {
+    const run = (fake.db.bonus_runs as Row[]).find((r) => r.id === a.p_run_id && r.tenant_id === a.p_tenant_id && !r.deleted_at)
+    if (!run) return { data: null, error: { code: "P0002", message: "run not found" } }
+    if (run.status === "paid") return { data: null, error: { code: "23001", message: "run already paid" } }
+    const items = a.p_items as Row[]
+    if (items.some((i) => !(fake.db.employees as Row[]).some((e) => e.id === i.employee_id))) {
+      return { data: null, error: { code: "23503", message: "employee fk" } }
+    }
+    fake.db.bonus_run_billing_items = ((fake.db.bonus_run_billing_items ?? []) as Row[]).filter((r) => r.run_id !== a.p_run_id)
+    for (const i of items) {
+      fake.db.bonus_run_billing_items.push({
+        id: `bi-${Math.random().toString(16).slice(2, 10)}`, tenant_id: a.p_tenant_id, run_id: a.p_run_id, project_id: i.project_id,
+        billing_id: i.billing_id, employee_id: i.employee_id, amount: String(i.amount), bonus_paid_on: i.bonus_paid_on ?? null, snapshot: i.snapshot ?? null,
+      })
+    }
+    return { data: items.length, error: null }
+  }
 }
 
 /** P2 的四期每期分潤（金額為每人分配額）。 */
@@ -329,6 +354,17 @@ describe("季獎金批次自動帶入每期款獎金", () => {
     expect([pay.status, pay.body.error]).toEqual([409, "amount_changed"])
     const after = await req("get", `/bonus-runs/${q4.id}`, HR_TOKEN)
     expect((after.body.billingItems as Row[]).map((b) => b.billingId)).toEqual([BQ4])
+  })
+
+  it("帶入列一律經 DB 函式整批換（不直接寫表）；函式失敗（例：批次剛被發放 23001）→ 409 not_draft、原列不動", async () => {
+    const q3 = await createRun("2026-Q3", "2026-09-30")
+    expect(fake.rpcCalls.filter((c) => c.name === "replace_bonus_run_billing_items")).toHaveLength(1)
+    expect(fake.writes.filter((w) => w.table === "bonus_run_billing_items")).toEqual([])
+    const before = (fake.db.bonus_run_billing_items as Row[]).filter((r) => r.run_id === q3.id).map((r) => r.id).sort()
+    fake.rpcHandlers.replace_bonus_run_billing_items = () => ({ data: null, error: { code: "23001", message: "run already paid" } })
+    const r = await req("patch", `/bonus-runs/${q3.id}`, HR_TOKEN).send({ recompute: true })
+    expect([r.status, r.body.error]).toEqual([409, "not_draft"])
+    expect((fake.db.bonus_run_billing_items as Row[]).filter((x) => x.run_id === q3.id).map((x) => x.id).sort()).toEqual(before)
   })
 
   it("DB 發放防線（migration 0120 觸發器 BL409：別批已發／核准後被改）→ 409 stale_billing_items，批次不變成已發", async () => {

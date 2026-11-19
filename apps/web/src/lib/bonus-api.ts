@@ -391,6 +391,7 @@ const BONUS_ERRORS: Record<string, string> = {
   status_changed: "狀態剛被別人改過，請重新整理",
   schema_not_ready: "資料庫尚未套用獎金核准（migration 0073），請先通知管理員套用",
   stale_paid_before: "這份草稿建立後又有別的批次發放了，累計已發已過期——請先「重算」再發放",
+  stale_billing_items: "每期款獎金在核准後有變動或已在別批發放，請先重算",
   not_paid: "只有已發放的批次才能沖銷；草稿直接刪除即可",
   already_reversed: "這批已經有沖銷批次了（可能還是草稿，到批次列表找「-沖銷」那筆）",
   not_latest_paid: "只能沖銷最新一批已發放的批次——後面已經有別批發放了，要沖就從最新的往回沖",

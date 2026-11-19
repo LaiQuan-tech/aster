@@ -121,3 +121,10 @@ describe("2026-11-19 管理檢視每期款獎金說明", () => {
     expect(billingBonusLines({})).toEqual([])
   })
 })
+
+import { humanizeBonusError } from "../bonus-api"
+describe("2026-11-19 獎金批次錯誤訊息", () => {
+  it("stale_billing_items → 中文提示請先重算", () => {
+    expect(humanizeBonusError(new Error("[409] stale_billing_items"), "x")).toBe("每期款獎金在核准後有變動或已在別批發放，請先重算")
+  })
+})
