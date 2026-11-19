@@ -52,7 +52,7 @@ const subcontracts: Subcontract[] = [{
   amount: 20000, billingBasis: "完工", orderType: null, withholdingRate: 0.1, withholdingThreshold: 20000, note: null,
 }]
 
-function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft>; money?: ProjectMoney; load?: () => Promise<void>; readOnly?: boolean } = {}) {
+function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft>; money?: ProjectMoney; load?: () => Promise<void>; readOnly?: boolean; billings?: BillingExt[] } = {}) {
   const draft = { ...applicationSheetDraftOf(project, []), ...opts.draft }
   return renderToStaticMarkup(
     <ApplicationSheet
@@ -60,7 +60,7 @@ function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "
       canFinance={opts.canFinance ?? true}
       showProfit
       money={opts.money ?? money}
-      billings={billings}
+      billings={opts.billings ?? billings}
       subcontracts={subcontracts}
       contracts={contracts}
       companies={[]}
@@ -243,7 +243,29 @@ describe("申請單表格：權限與提示", () => {
   it("沒有合約（只有報價單）時改金額＝人工指定：出現理由輸入框，未填前列出原因", () => {
     const html = render({ money: { ...money, amountSource: "quotation" }, draft: { stageEdits: { b1: { amount: "45000" } } } })
     expect(html).toContain('aria-label="付款階段第 1 列人工指定理由"')
-    expect(html).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
+    expect(html).toContain("付款階段第 1 列改了金額（人工指定），請在該列金額下方的「指定理由」填寫。")
+    // 2026-11-19：理由框就在該列金額格裡（不在表格最下方），未填時紅框；點錯誤提示會捲到它。
+    const amountCell = cell(html, "sheet-stage-1-amount")
+    expect(amountCell).toContain('aria-label="付款階段第 1 列人工指定理由"')
+    expect(amountCell).toContain('data-err-field="stage:b1:overrideReason"')
+    expect(amountCell).toContain("ring-red-400")
+    expect(html).not.toContain('data-testid="sheet-override-reasons"')
+  })
+
+  it("只有報價單、已開票的期別：金額欄顯示銷售金額 × % 試算（不再空白），可改但標「需確認」；列印也顯示試算", () => {
+    const quotationMoney = { ...money, amountUntaxed: 350000, amountSource: "quotation" as const }
+    const invoiced: BillingExt[] = [
+      { ...base, id: "b1", installmentNo: 1, milestone: "簽約款", percentage: 20, calculatedAmount: null, effectiveAmount: null, invoiceNo: "ZM00000001", invoicedOn: "2026-03-03" },
+      { ...base, id: "b2", installmentNo: 2, milestone: "第二期簽證完成", percentage: 80, calculatedAmount: null, effectiveAmount: null, invoiceNo: "ZM00000002", invoicedOn: "2026-03-03" },
+    ]
+    const html = render({ money: quotationMoney, billings: invoiced })
+    expect(cell(html, "sheet-stage-1-amount")).toContain('placeholder="試算 70,000"')
+    expect(cell(html, "sheet-stage-2-amount")).toContain('placeholder="試算 280,000"')
+    expect(cell(html, "sheet-stage-1-amount")).toContain("需確認")
+    expect(cell(html, "sheet-stage-1-amount")).toContain('aria-label="付款階段第 1 列金額"')
+    const printed = render({ money: quotationMoney, billings: invoiced, mode: "print" })
+    expect(cell(printed, "sheet-stage-1-amount")).toContain("試算 70,000")
+    expect(cell(printed, "sheet-stage-2-amount")).toContain("試算 280,000")
   })
 
   it("表格包在 fieldset 裡（存檔中整張鎖住）", () => {

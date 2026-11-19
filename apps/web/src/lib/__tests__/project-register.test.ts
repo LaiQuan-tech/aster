@@ -30,15 +30,15 @@ const cells: ProjectRegisterCells = {
 };
 
 describe("專案列表＝專案申請單總表欄位", () => {
-  it("欄頭＝原 Excel 第 4 列＋「專案單號」後的「專案編號」（2026-11-18），科別接在備註後", () => {
+  it("欄頭＝原 Excel 第 4 列＋「專案單號」後的「合約編號」（2026-11-18），科別接在備註後", () => {
     expect([...REGISTER_FIXED_HEADERS]).toEqual([
-      "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+      "項次", "專案單號", "合約編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
       "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
     ]);
     expect(registerColumns(["空調", "消防", "汙水"]).map((c) => c.header).slice(17)).toEqual(["空調", "消防", "汙水"]);
-    // 凍結窗格：項次…工程名稱（含專案單號、專案編號）。
+    // 凍結窗格：項次…工程名稱（含專案單號、合約編號）。
     expect(registerColumns([]).slice(0, REGISTER_FROZEN_COLUMNS).map((c) => c.header)).toEqual([
-      "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱",
+      "項次", "專案單號", "合約編號", "日期", "客戶", "工程名稱",
     ]);
   });
 
@@ -46,7 +46,7 @@ describe("專案列表＝專案申請單總表欄位", () => {
     const disc = ["電機", "空調", "消防", "汙水", "未分類"];
     const hidden = visibleRegisterColumns(disc, false);
     expect(hidden.map((c) => c.header)).toEqual([
-      "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註",
+      "專案單號", "合約編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註",
     ]);
     expect(hidden.map((c) => c.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 15, 16]);
     expect(visibleRegisterColumns(disc, true).map((c) => c.header)).toEqual([...REGISTER_FIXED_HEADERS.slice(1)]);
@@ -59,7 +59,7 @@ describe("專案列表＝專案申請單總表欄位", () => {
     for (const showHidden of [false, true]) {
       const cols = visibleRegisterColumns(["空調"], showHidden);
       expect(cols.slice(0, frozenRegisterColumnCount(cols)).map((c) => c.header)).toEqual([
-        "專案單號", "專案編號", "日期", "客戶", "工程名稱",
+        "專案單號", "合約編號", "日期", "客戶", "工程名稱",
       ]);
     }
   });

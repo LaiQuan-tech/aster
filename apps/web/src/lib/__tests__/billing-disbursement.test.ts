@@ -245,7 +245,7 @@ describe("filterLedger：快速篩選與關鍵字", () => {
     expect(filterLedger(ledger, { q: "d-test-001" }).map((p) => p.code)).toEqual(["T-001"]);
     expect(filterLedger(ledger, { q: "  " })).toHaveLength(2);
   });
-  it("關鍵字同時比對專案序號與專案編號（2026-11-18）", () => {
+  it("關鍵字同時比對專案序號與合約編號（2026-11-18）", () => {
     expect(filterLedger(ledger, { q: "業主-乙" }).map((p) => p.code)).toEqual(["T-002"]);
     expect(filterLedger(ledger, { q: "甲-11" }).map((p) => p.code)).toEqual(["T-001"]);
     expect(filterLedger(ledger, { q: "t-002" }).map((p) => p.code)).toEqual(["T-002"]);

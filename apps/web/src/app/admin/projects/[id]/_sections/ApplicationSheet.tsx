@@ -13,7 +13,7 @@ import { ReinvoiceDialog, type ReinvoiceTarget } from "./ReinvoiceDialog";
 import { useInvoicedAck } from "@/components/InvoicedAckDialog";
 import { billingScheduleVersion } from "@/lib/billing-version";
 import { COMMITTED_CONFLICT_MESSAGE, conflictKindOf, type InvoicedAckBody } from "@/lib/invoiced-ack";
-import { isBillingInvoiced } from "@/lib/billing-invoice";
+import { INVOICED_AMOUNT_CHANGED_NOTICE, isBillingInvoiced } from "@/lib/billing-invoice";
 import { PROJECT_NO_MAX } from "@/lib/project-no";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
@@ -98,6 +98,7 @@ import {
   type SheetSaveApi,
   type SheetSaveStep,
 } from "@/lib/project-application-sheet-save";
+import { estimatedStageAmount } from "@/lib/project-application-stage-amounts";
 import { applyStageAmountEdit, applyStagePctEdit, formatStagePct, releaseTypedPercentages, stageAmountDisplay, stagePctDisplay, stageScheduleSummary } from "@/lib/project-application-stage-amounts";
 
 import {
@@ -471,10 +472,22 @@ export function ApplicationSheet({
   };
   const withInvoicedAck = async <T,>(call: (ack?: InvoicedAckBody) => Promise<T>): Promise<T> => {
     let acked = false;
+    const result = await withInvoicedAckInner(call, () => {
+      acked = true;
+    });
+    // 已開票期別金額經確認改動（銷售金額變了）：存完提示是否要修正發票。
+    if (acked && !committedNotices.includes(INVOICED_AMOUNT_CHANGED_NOTICE)) committedNotices.push(INVOICED_AMOUNT_CHANGED_NOTICE);
+    return result;
+  };
+  const withInvoicedAckInner = async <T,>(call: (ack?: InvoicedAckBody) => Promise<T>, onAck: () => void): Promise<T> => {
+    let acked = false;
     const result = await toleratingCommitted(
       () =>
         invoicedAck.run((ack) => {
-          if (ack) acked = true;
+          if (ack) {
+            acked = true;
+            onAck();
+          }
           return call(ack);
         }),
       async () => undefined as T,
@@ -497,11 +510,18 @@ export function ApplicationSheet({
     updateContract: (id, body) => withInvoicedAck((ack) => updateContract(id, body, ack)),
     createQuotation: (body) => withInvoicedAck((ack) => createContract(project.id, { docType: "quotation", title: "報價單", amount: body.amount }, ack)),
     saveBillingSchedule: async (installments) => {
+      let acked = false;
       const res = await toleratingCommitted(
-        () => invoicedAck.run((ack) => saveBillingSchedule(project.id, installments, { expectedVersion, ack })),
+        () =>
+          invoicedAck.run((ack) => {
+            if (ack) acked = true;
+            return saveBillingSchedule(project.id, installments, { expectedVersion, ack });
+          }),
         // 已寫入：用重新讀到的期程當作這一步的結果（新建期別的 id 從這裡對回草稿）。
         () => getBillingSchedule(project.id),
       );
+      // 已開票期別金額經確認改動：存完提示是否要修正發票。
+      if (acked && !committedNotices.includes(INVOICED_AMOUNT_CHANGED_NOTICE)) committedNotices.push(INVOICED_AMOUNT_CHANGED_NOTICE);
       // 期程存好後版本換新：同一次存檔接著登記發票時帶新版本。
       expectedVersion = res.version ?? billingScheduleVersion(res.installments);
       return res;
@@ -562,6 +582,8 @@ export function ApplicationSheet({
   const clientChoices = project.client && !clients.some((c) => c.id === project.client?.id) ? [project.client, ...clients] : clients;
   const orderDoc = latestDocument !== undefined ? latestDocument : latestOrderDocument(contracts);
   // 付款階段列（2026-11-18 期數不限）：「＋ 新增一期」多開的空白列只在可編輯時畫；標記移除的列仍畫（可復原），但不算進合計。
+  /** 這次存檔要填「指定理由」的列（人工指定金額、沒有可沿用的理由）。 */
+  const needsReasonKeys = new Set(editable ? plan.stages.needsReason.map((r) => r.key) : []);
   const stageRows = sheetStageRows(billings, { stageExtraRows: editable ? (draft.stageExtraRows ?? 0) : 0 });
   const stageRemovedIds = new Set(editable ? (draft.stageRemovedIds ?? []) : []);
   const stageRowsKept = stageRows.filter((s) => !(s.id && stageRemovedIds.has(s.id)));
@@ -965,6 +987,8 @@ export function ApplicationSheet({
     const base = stageBaseValues(s);
     const edit: StageEdit = editable ? (draft.stageEdits[key] ?? {}) : {};
     const locks = stageLocks(s);
+    /** 金額格顯示：已有金額照用；只有報價單（後端算不出期別金額）→ 銷售金額 × % 試算（灰字）。 */
+    const stageEstimate = estimatedStageAmount(s.amount, s.percentage, money?.amountUntaxed);
     const val = (f: Exclude<keyof StageEdit, "overrideReason">) => edit[f] ?? base[f];
     const rowEdit = editable ? draft.stageEdits[key] : undefined;
     const patchStage = (next: StageEdit) => setDraft((d) => ({ ...d, stageEdits: { ...d.stageEdits, [key]: next } }));
@@ -1031,18 +1055,57 @@ export function ApplicationSheet({
           <span className="truncate" title={`${s.no}.${s.milestone}`}>{`${s.no}.${s.milestone}`}</span>
         )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={S[1]} row={r} kind="value" align="right" testId={`sheet-stage-${s.no}-amount`} editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`, `stage:${key}:overrideReason`)}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={S[1]} row={r} kind="value" align="right" testId={`sheet-stage-${s.no}-amount`} editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`)}>
         {mLabel("金額")}
         {editable && !locks.amount ? (
-          <MoneyInput
-            aria-label={`${rowLabel}金額`}
-            title="輸入金額，% 自動算出（金額 ÷ 銷售金額（未稅））"
-            className={`${cellInput} text-right tabular-nums`}
-            value={stageAmountDisplay(s, rowEdit)}
-            onValueChange={(v) => patchStage(applyStageAmountEdit(rowEdit, v))}
-          />
+          <span className="flex w-full min-w-0 flex-col gap-0.5">
+          <span className="flex w-full min-w-0 items-center gap-0.5">
+            <MoneyInput
+              aria-label={`${rowLabel}金額`}
+              title={
+                locks.confirmAmount
+                  ? "這一期已開發票：改金額存檔時要確認並填理由，改完請確認是否需要修正發票（作廢／重開）"
+                  : "輸入金額，% 自動算出（金額 ÷ 銷售金額（未稅））"
+              }
+              className={`${cellInput} text-right tabular-nums`}
+              placeholder={stageEstimate.estimated && stageEstimate.value !== null ? `試算 ${fmtMoney(stageEstimate.value)}` : undefined}
+              value={stageAmountDisplay(s, rowEdit)}
+              onValueChange={(v) => patchStage(applyStageAmountEdit(rowEdit, v))}
+            />
+            {locks.confirmAmount ? (
+              <span className="shrink-0 rounded bg-amber-50 px-1 text-[10px] text-amber-700 print:hidden" title="已開發票：改金額／% 存檔時要確認並填理由" data-testid={`sheet-stage-${s.no}-confirm-badge`}>
+                需確認
+              </span>
+            ) : null}
+          </span>
+          {/* 人工指定金額要理由（2026-11-19 業主找不到在哪填）：就在這一列金額下方直接填，必填、紅框提示。 */}
+          {needsReasonKeys.has(key) || rowEdit?.overrideReason !== undefined ? (
+            <input
+              aria-label={`${rowLabel}人工指定理由`}
+              data-err-field={`stage:${key}:overrideReason`}
+              data-testid={`sheet-stage-${s.no}-override-reason`}
+              className={`${cellInput} text-xs ${isBad(`stage:${key}:overrideReason`) || (needsReasonKeys.has(key) && !(rowEdit?.overrideReason ?? "").trim()) ? INVALID_INPUT_CLS : ""}`}
+              maxLength={1000}
+              placeholder="指定理由（必填，例：議價、業主要求）"
+              value={rowEdit?.overrideReason ?? ""}
+              onChange={(e) => setStage(key, "overrideReason", e.target.value)}
+            />
+          ) : null}
+          </span>
         ) : (
-          <span className="tabular-nums" title={editable && locks.amount ? "已請款／已開票／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
+          <span
+            className={`tabular-nums ${stageEstimate.estimated ? "text-gray-400" : ""}`}
+            data-testid={`sheet-stage-${s.no}-amount-value`}
+            title={
+              stageEstimate.estimated
+                ? "沒有合約，以銷售金額（未稅）× % 試算，僅供參考"
+                : editable && locks.amount
+                  ? "已請款／已入帳，金額凍結"
+                  : undefined
+            }
+          >
+            {stageEstimate.value !== null ? `${stageEstimate.estimated ? "試算 " : ""}${fmtMoney(stageEstimate.value)}` : ""}
+          </span>
         )}
       </Cell>,
       <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={S[2]} row={r} kind="value" align="center" testId={`sheet-stage-${s.no}-pct`} editable={editable && !locks.percentage && !locks.amount} {...errAttr(`stage:${key}:percentage`)}>
@@ -1492,11 +1555,11 @@ export function ApplicationSheet({
           </label>
           {/* 2026-11-12 序號可手動調整：鉛筆鈕只給能編輯本案基本資料的人（editable＝access.finance 且非列印／舊版檢視）；外層 fieldset 存檔中會一併鎖住 */}
           <ProjectCodeField projectId={project.id} code={project.code ?? null} canEdit={editable && !!load} onSaved={load ? () => load() : undefined} />
-          {/* 2026-11-18 專案編號：序號之外可自由輸入的另一套編號（選填），跟著申請單一起存（PATCH projectNo，版本快照一併保存）。 */}
+          {/* 2026-11-18 合約編號：序號之外可自由輸入的另一套編號（選填），跟著申請單一起存（PATCH projectNo，版本快照一併保存）。 */}
           <label className="flex min-w-0 items-center gap-1" data-testid="sheet-project-no">
-            <span className="shrink-0 text-gray-600">專案編號：</span>
+            <span className="shrink-0 text-gray-600">合約編號：</span>
             {editable ? (
-              <input aria-label="專案編號" data-err-field="projectNo" className={`${cellInput} w-48 text-sm ${isBad("projectNo") ? INVALID_INPUT_CLS : ""}`} maxLength={PROJECT_NO_MAX} placeholder="選填" value={draft.projectNo ?? ""} onChange={(e) => set("projectNo", e.target.value)} />
+              <input aria-label="合約編號" data-err-field="projectNo" className={`${cellInput} w-48 text-sm ${isBad("projectNo") ? INVALID_INPUT_CLS : ""}`} maxLength={PROJECT_NO_MAX} placeholder="選填" value={draft.projectNo ?? ""} onChange={(e) => set("projectNo", e.target.value)} />
             ) : (
               <span className="font-medium text-gray-900">{draft.projectNo || "—"}</span>
             )}
@@ -1545,24 +1608,6 @@ export function ApplicationSheet({
         )}
         {editable && !canEditClients && client && (
           <p className="text-xs text-gray-500">客戶的電話、發票地址、採購承辦、傳真、統一編號屬客戶名冊，只有 HR／會計能修改。</p>
-        )}
-        {editable && plan.stages.needsReason.length > 0 && (
-          <div className="space-y-1 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm" data-testid="sheet-override-reasons">
-            <p className="text-amber-900">付款階段改了金額＝人工指定金額，請說明理由（例如議價、業主要求）：</p>
-            {plan.stages.needsReason.map((r) => (
-              <label key={r.key} className="flex items-center gap-2">
-                <span className="shrink-0 text-amber-900">{r.label}</span>
-                <input
-                  aria-label={`付款階段${r.label}人工指定理由`}
-                  data-err-field={`stage:${r.key}:overrideReason`}
-                  className={`${cellInput} max-w-md ${isBad(`stage:${r.key}:overrideReason`) ? INVALID_INPUT_CLS : ""}`}
-                  maxLength={1000}
-                  value={draft.stageEdits[r.key]?.overrideReason ?? ""}
-                  onChange={(e) => setStage(r.key, "overrideReason", e.target.value)}
-                />
-              </label>
-            ))}
-          </div>
         )}
         {editable && draft.subRemovedIds.length > 0 && (
           <label className="flex flex-wrap items-center gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm" data-testid="sheet-sub-delete-reason">

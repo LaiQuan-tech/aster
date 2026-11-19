@@ -234,7 +234,7 @@ export type AttachmentRow = {
 export type ProjectLite = {
   id: string
   code: string | null
-  /** 專案編號（自由輸入，≠ code 專案序號；migration 0117）。 */
+  /** 合約編號（自由輸入，≠ code 專案序號；migration 0117）。 */
   project_no?: string | null
   name: string
   lead_emp_id: string | null
@@ -1188,7 +1188,7 @@ export type PayableRow = {
   subcontractId: string
   projectId: string
   projectCode: string | null
-  /** 專案編號（自由輸入；應付清單關鍵字可搜）。 */
+  /** 合約編號（自由輸入；應付清單關鍵字可搜）。 */
   projectNo: string | null
   projectName: string
   vendorId: string | null

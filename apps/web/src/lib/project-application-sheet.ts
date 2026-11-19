@@ -203,7 +203,7 @@ export interface EngineerDraft {
 export interface ApplicationSheetDraft {
   /** 工程名稱（＝專案名稱）。必填。 */
   name: string;
-  /** 專案編號（≠ 抬頭的專案序號 code）：自由輸入、選填、≤100 字；空白＝清空（存 null）。 */
+  /** 合約編號（≠ 抬頭的專案序號 code）：自由輸入、選填、≤100 字；空白＝清空（存 null）。 */
   projectNo: string;
   /** 抬頭「民國　年　月　日」＝開案日期，'YYYY-MM-DD' 或 ""。 */
   openedOn: string;
@@ -365,7 +365,7 @@ export interface SheetError {
 export function applicationSheetErrors(draft: ApplicationSheetDraft, opts: { canFinance: boolean }): SheetError[] {
   const errors: SheetError[] = [];
   if (!draft.name.trim()) errors.push({ field: "name", message: "工程名稱不可空白。" });
-  if ([...(draft.projectNo ?? "").trim()].length > PROJECT_NO_MAX) errors.push({ field: "projectNo", message: `專案編號最多 ${PROJECT_NO_MAX} 字。` });
+  if ([...(draft.projectNo ?? "").trim()].length > PROJECT_NO_MAX) errors.push({ field: "projectNo", message: `合約編號最多 ${PROJECT_NO_MAX} 字。` });
   if (parseOptionalNumber(draft.siteAreaM2) === "invalid") errors.push({ field: "siteAreaM2", message: "設計面積必須是 0 以上的數字。" });
   if (opts.canFinance && parseOptionalNumber(draft.otherExpenses) === "invalid") errors.push({ field: "otherExpenses", message: "其他支出必須是 0 以上的數字。" });
   draft.designScope.forEach((row, idx) => {
@@ -424,7 +424,7 @@ export function applicationSheetPatch(
   const name = draft.name.trim();
   if (name && name !== project.name) patch.name = name;
 
-  // 專案編號：去頭尾空白、空白＝null；舊版 API 沒回 projectNo（undefined）視同 null。超過上限不送（errors 會擋）。
+  // 合約編號：去頭尾空白、空白＝null；舊版 API 沒回 projectNo（undefined）視同 null。超過上限不送（errors 會擋）。
   const projectNo = textOrNull(draft.projectNo);
   if (projectNo !== textOrNull(project.projectNo) && [...(projectNo ?? "")].length <= PROJECT_NO_MAX) patch.projectNo = projectNo;
 

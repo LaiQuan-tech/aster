@@ -34,7 +34,7 @@ const STATE_CHIPS: Array<{ value: ReceivableState | "all"; label: string }> = [
  * 「先追誰」看比例，不是看金額大小。
  * B5：加了狀態篩選 chips 與三段狀態＋逾期的顏色 badge，逾期基準由後端讀租戶設定。
  * 合併後：頁首統計卡改由整頁共用（未收合計／逾期），這裡只在篩選列顯示本次篩選的筆數與未收；
- * 關鍵字框整頁共用（`q`，比對專案序號／專案編號／名稱／客戶）。
+ * 關鍵字框整頁共用（`q`，比對專案序號／合約編號／名稱／客戶）。
  */
 export default function ReceivablesView({ q }: { q: string }) {
   const [status, setStatus] = useState<"open" | "all">("open");

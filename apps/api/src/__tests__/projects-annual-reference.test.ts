@@ -83,13 +83,13 @@ const table: AnnualTable = {
 }
 
 describe("年度總表參考格式", () => {
-  it("專案列表（layout=register）：原表欄位＋「專案單號」後的「專案編號」（2026-11-18），A:Q＋科別、無系統欄；已收帳款…發包比照原檔隱藏", async () => {
+  it("專案列表（layout=register）：原表欄位＋「專案單號」後的「合約編號」（2026-11-18），A:Q＋科別、無系統欄；已收帳款…發包比照原檔隱藏", async () => {
     const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04", layout: "register" })
     const ws = wb.worksheets[0]
     const headers = ws.getRow(4).values as unknown[]
 
     expect(headers.slice(1)).toEqual([
-      "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+      "項次", "專案單號", "合約編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
       "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
       "空調", "消防", "汙水",
     ])
@@ -136,7 +136,7 @@ describe("年度總表參考格式", () => {
       const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04", layout })
       const ws = wb.worksheets[0]
       expect((ws.getRow(4).values as unknown[]).slice(1)).toEqual([
-        "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+        "項次", "專案單號", "合約編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
         "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
         "空調", "消防", "汙水", "請款進度%", "收款進度%", "狀態", "期數",
       ])

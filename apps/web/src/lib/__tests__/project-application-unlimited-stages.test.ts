@@ -12,7 +12,7 @@ import {
   type ApplicationSheetDraft,
 } from "../project-application-sheet"
 import { stageLocks, stagePlan, type SheetSaveContext } from "../project-application-sheet-save"
-import { stageScheduleSummary } from "../project-application-stage-amounts"
+import { estimatedStageAmount, stageScheduleSummary } from "../project-application-stage-amounts"
 import { humanizeReinvoiceError, isBillingInvoiced, reinvoiceInputError } from "../billing-invoice"
 import { PROJECT_NO_MAX, normalizeProjectNo } from "../project-no"
 import { registerColumns, registerRowCells, REGISTER_FIXED_HEADERS, visibleRegisterColumns, frozenRegisterColumnCount } from "../project-register"
@@ -20,7 +20,7 @@ import type { Contract } from "../projects-api"
 import type { BillingExt, Client, ProjectDetail, ProjectMoney, Subcontract } from "../projects-ext-api"
 
 /**
- * 2026-11-18：申請單「專案編號」、付款階段期數不限（＋ 新增一期／移除）、發票「修正」的前端純函式。
+ * 2026-11-18：申請單「合約編號」、付款階段期數不限（＋ 新增一期／移除）、發票「修正」的前端純函式。
  */
 
 /* 假資料：與任何真實客戶、廠商、金額無關。 */
@@ -205,7 +205,7 @@ function eightStages(): BillingExt[] {
   ]
 }
 
-describe("專案編號（申請單）", () => {
+describe("合約編號（申請單）", () => {
   it("草稿帶出專案現值；改了才 PATCH projectNo（去頭尾空白、空白＝null）", () => {
     const ctx = ctxOf({ project: fakeProject({ projectNo: "客-0001" }) })
     const base = draftOf(ctx)
@@ -344,16 +344,16 @@ describe("發票登記修正", () => {
   })
 })
 
-describe("所有專案列表：專案編號欄", () => {
+describe("所有專案列表：合約編號欄", () => {
   it("接在專案單號後面，凍結欄含到工程名稱；儲存格帶 projectNo（沒有＝空白）", () => {
-    expect(REGISTER_FIXED_HEADERS.slice(0, 6)).toEqual(["項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱"])
+    expect(REGISTER_FIXED_HEADERS.slice(0, 6)).toEqual(["項次", "專案單號", "合約編號", "日期", "客戶", "工程名稱"])
     const cols = visibleRegisterColumns([], false)
-    expect(cols.map((c) => c.header).slice(0, 5)).toEqual(["專案單號", "專案編號", "日期", "客戶", "工程名稱"])
+    expect(cols.map((c) => c.header).slice(0, 5)).toEqual(["專案單號", "合約編號", "日期", "客戶", "工程名稱"])
     expect(frozenRegisterColumnCount(cols)).toBe(5)
     expect(cols.map((c) => c.header)).not.toContain("已收帳款")
     const all = registerColumns([])
     expect(all.find((c) => c.header === "金額")!.money).toBe(true)
-    expect(all.find((c) => c.header === "專案編號")!.money).toBe(false)
+    expect(all.find((c) => c.header === "合約編號")!.money).toBe(false)
     const cells = registerRowCells({ seq: 1, code: "T-115-001", projectNo: "客-0001", clientName: null, name: "測試工程", register: null }, [])
     expect(cells.slice(0, 3)).toEqual(["1", "T-115-001", "客-0001"])
     expect(registerRowCells({ seq: 1, code: "T-115-001", clientName: null, name: "測試工程", register: null }, [])[2]).toBe("")
@@ -381,10 +381,28 @@ describe("2026-11-18 驗收修正", () => {
     expect(plan.installments!.find((i) => i.id === "b8")!.installmentNo).toBe(8)
   })
 
-  it("已開票未請款的期別：百分比與金額比照已入帳凍結", () => {
+  it("已開票未請款的期別：百分比與金額可改但「需確認」（業主 2026-11-19）；已請款／已入帳仍凍結", () => {
     const [row] = applicationStageRows([fakeBilling({ invoiceNo: "ZZ00000001", invoicedOn: null })])
-    expect(stageLocks(row!)).toMatchObject({ percentage: true, amount: true })
+    expect(stageLocks(row!)).toMatchObject({ percentage: false, amount: false, confirmAmount: true })
     const [plain] = applicationStageRows([fakeBilling({})])
-    expect(stageLocks(plain!)).toMatchObject({ percentage: false, amount: false })
+    expect(stageLocks(plain!)).toMatchObject({ percentage: false, amount: false, confirmAmount: false })
+    const [billed] = applicationStageRows([fakeBilling({ invoiceNo: "ZZ00000001", billedOn: "2026-02-01", billedAmount: 30000 })])
+    expect(stageLocks(billed!)).toMatchObject({ amount: true, confirmAmount: false })
+  })
+
+  it("已開票期別改 %：存檔計畫照送（由後端回 409 要求確認），不在前端擋", () => {
+    const billings = [fakeBilling({ id: "b1", invoiceNo: "ZZ00000001", invoicedOn: "2026-02-01" })]
+    const ctx = ctxOf({ billings })
+    const plan = stagePlan(ctx, { ...draftOf(ctx), stageEdits: { b1: { percentage: "40" } } })
+    expect(plan.errors).toEqual([])
+    expect(plan.installments?.[0]).toMatchObject({ id: "b1", percentage: 40 })
+  })
+
+  it("金額顯示試算：已有金額用原值；只有報價單（金額 null）→ 銷售金額 × %", () => {
+    expect(estimatedStageAmount(70000, 20, 350000)).toEqual({ value: 70000, estimated: false })
+    expect(estimatedStageAmount(null, 20, 350000)).toEqual({ value: 70000, estimated: true })
+    expect(estimatedStageAmount(null, 80, 350000)).toEqual({ value: 280000, estimated: true })
+    expect(estimatedStageAmount(null, null, 350000)).toEqual({ value: null, estimated: false })
+    expect(estimatedStageAmount(null, 20, null)).toEqual({ value: null, estimated: false })
   })
 })

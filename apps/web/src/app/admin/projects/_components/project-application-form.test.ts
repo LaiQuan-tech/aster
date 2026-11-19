@@ -373,15 +373,15 @@ describe("母案是選填（業主 2026-09-30 會議：拿掉「必須先有母�
   });
 });
 
-describe("2026-11-18 新建專案：專案編號與付款階段期數不限", () => {
-  it("專案編號：去頭尾空白送 projectNo，空白＝null，與專案序號 code 分開；超過上限擋下", () => {
+describe("2026-11-18 新建專案：合約編號與付款階段期數不限", () => {
+  it("合約編號：去頭尾空白送 projectNo，空白＝null，與專案序號 code 分開；超過上限擋下", () => {
     const draft = emptyProjectApplicationDraft("2026-10-01", []);
     Object.assign(draft, { name: "測試案", code: " AT-115-099 ", projectNo: "  業主-甲-12 " });
     expect(toCreateProjectBody(draft)).toMatchObject({ code: "AT-115-099", projectNo: "業主-甲-12" });
     expect(toCreateProjectBody({ ...draft, projectNo: "   " }).projectNo).toBeNull();
-    expect(projectApplicationErrors({ ...draft, projectNo: "x".repeat(PROJECT_NO_MAX + 1) })).toContain(`專案編號最多 ${PROJECT_NO_MAX} 字`);
+    expect(projectApplicationErrors({ ...draft, projectNo: "x".repeat(PROJECT_NO_MAX + 1) })).toContain(`合約編號最多 ${PROJECT_NO_MAX} 字`);
     expect(projectApplicationErrors({ ...draft, projectNo: "x".repeat(PROJECT_NO_MAX) })).toEqual([]);
-    // 沒有財務權限的人照樣可以填專案編號（不是金額欄位）。
+    // 沒有財務權限的人照樣可以填合約編號（不是金額欄位）。
     expect(toAuthorizedCreateProjectBody(draft, { canFinance: false, canBonus: false }).projectNo).toBe("業主-甲-12");
   });
 

@@ -4,6 +4,7 @@ import { Fragment } from "react";
 import { MoneyInput } from "@/components/MoneyInput";
 import { useInvoicedAck } from "@/components/InvoicedAckDialog";
 import { billingScheduleVersion } from "@/lib/billing-version";
+import { estimatedStageAmount } from "@/lib/project-application-stage-amounts";
 import { Button, Card, PrimaryButton, ErrorText, inputCls } from "@/components/admin-ui";
 import {
   saveBillingSchedule,
@@ -27,7 +28,7 @@ import {
   type ProjectMoney,
 } from "@/lib/projects-ext-api";
 import { billingRowTag, receiptSummaryText } from "@/lib/project-application-sheet";
-import { isBillingInvoiced } from "@/lib/billing-invoice";
+import { INVOICED_AMOUNT_CHANGED_NOTICE, isBillingInvoiced } from "@/lib/billing-invoice";
 import {
   billingUpdateFailedIds,
   billingSaveNotices,
@@ -130,7 +131,11 @@ export function BillingsCard({
       const sent = draft;
       // 樂觀鎖：帶讀取時的期程版本（別人剛改過期程 → 409 conflict_retry，不會把對方新增的期別刪掉）。
       const expectedVersion = schedule ? (schedule.version ?? billingScheduleVersion(schedule.installments)) : undefined;
-      const res = await invoicedAck.run((ack) => saveBillingSchedule(projectId, sent, { expectedVersion, ack }));
+      let acked = false;
+      const res = await invoicedAck.run((ack) => {
+        if (ack) acked = true;
+        return saveBillingSchedule(projectId, sent, { expectedVersion, ack });
+      });
       setSchedule(res);
       await load();
       // 後端回 update_failed 的期別沒寫成：load() 會用已存檔的值重建草稿，這幾期要把剛才的輸入放回去。
@@ -138,6 +143,7 @@ export function BillingsCard({
       if (failed.size > 0) setDraft((fresh) => keepFailedBillingDraftRows(fresh, sent, failed));
       // 有期別寫入失敗（update_failed）與有期別在讀取後被刪除（row_gone）可能同時發生：兩個提示都顯示。
       const notices = billingSaveNotices(res.warnings);
+      if (acked) notices.push(INVOICED_AMOUNT_CHANGED_NOTICE);
       if (notices.length > 0) setError(notices.join(" "));
     } catch (err) {
       await failAndReload(err, "儲存人工指定金額失敗");
@@ -267,8 +273,9 @@ export function BillingsCard({
               const saved = schedule?.installments.find((i) => i.id === rowDraft.id);
               const billed = !!saved?.billedOn;
               const received = !!saved?.receivedOn;
-              // 已開票（號碼或日期任一有值）也鎖：發票金額已開出，百分比／人工金額不能改（後端 409 invoiced_frozen）。
-              const locked = billed || received || (!!saved && isBillingInvoiced(saved));
+              // 已開票的期別可以改人工金額，但存檔時要確認（後端 409 invoiced_amount_would_change → 確認視窗填理由）。
+              const locked = billed || received;
+              const invoicedNeedsConfirm = !locked && !!saved && isBillingInvoiced(saved);
               // B5：同一套三段狀態＋逾期 badge（跟 /admin/projects/receivables 共用顏色）。
               // API 有回 state 就用 API 的（後端依租戶逾期基準＋收足規則算好）；沒有才在前端算，
               // 前端版固定 'billed' 基準，並帶實收／有效金額讓部分入帳不被當成已收
@@ -304,7 +311,13 @@ export function BillingsCard({
                     </td>
                     <td className="py-2 pr-2 text-right text-gray-600">
                       {saved?.calculatedAmount == null ? (
-                        "—"
+                        (() => {
+                          // 沒有合約（只有報價單）時後端算不出金額：以銷售金額 × % 顯示試算（灰字，僅供參考）。
+                          const est = estimatedStageAmount(saved?.overrideAmount ?? null, rowDraft.percentage ?? null, money?.amountUntaxed);
+                          return est.value === null ? "—" : est.estimated ? (
+                            <span className="text-gray-400" title="沒有合約，以銷售金額（未稅）× % 試算，僅供參考">試算 {fmtMoney(est.value)}</span>
+                          ) : fmtMoney(est.value);
+                        })()
                       ) : (
                         <>
                           {fmtMoney(saved.calculatedAmount)}
@@ -326,6 +339,7 @@ export function BillingsCard({
                         placeholder="—"
                         value={rowDraft.overrideAmount ?? ""}
                         disabled={locked}
+                        title={invoicedNeedsConfirm ? "這一期已開發票：改金額存檔時要確認並填理由，改完請確認是否需要修正發票（作廢／重開）" : undefined}
                         onValueChange={(v) =>
                           patchDraft(idx, {
                             overrideAmount: v === "" ? null : Number(v),

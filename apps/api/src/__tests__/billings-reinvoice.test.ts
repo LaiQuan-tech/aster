@@ -238,18 +238,37 @@ describe("PUT /projects/:id/billings — 期數不限與移除限制", () => {
 })
 
 describe("已開票期別金額凍結（2026-11-18 驗收）", () => {
-  it("已開票未請款的期別：改百分比或覆寫金額 → 409 invoiced_frozen，不寫", async () => {
+  it("已開票未請款的期別改百分比／人工金額：需確認——不帶確認 → 409 invoiced_amount_would_change、不寫；確認後放行並記備註（業主 2026-11-19）", async () => {
+    // 合約 200,000；第 2 期 50%（100,000）已開票。改成第 1 期 60%、第 2 期 40%：第 2 期變 80,000。
     Object.assign(billing(B2), { invoice_no: "ZZ00000300", invoiced_on: "2026-02-03" })
-    const pct = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { percentage: 40 })])
-    expect(pct.status).toBe(409)
-    expect(pct.body).toMatchObject({ error: "invoiced_frozen", installmentNo: 2 })
+    const pct = await put(T.accountant, PROJECT, [item(billing(B1), { percentage: 60 }), item(billing(B2), { percentage: 40 })])
+    expect(pct.status, JSON.stringify(pct.body)).toBe(409)
+    expect(pct.body).toMatchObject({ error: "invoiced_amount_would_change", installmentNo: 2, before: 100000, after: 80000 })
+    expect(billingWrites()).toHaveLength(0)
+    const ack = {
+      acknowledgeInvoicedChange: true,
+      invoicedChangeReason: "業主改比例",
+      acknowledgedChanges: (pct.body.changes as Row[]).map((c) => ({ billingId: c.billingId, after: c.after })),
+    }
+    const ok = await request(app).put(`/projects/${PROJECT}/billings`).set("Authorization", `Bearer ${T.accountant}`)
+      .send({ installments: [item(billing(B1), { percentage: 60 }), item(billing(B2), { percentage: 40 })], ...ack })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(billing(B2).percentage).toBe(40)
+    expect(billing(B2).note).toContain("已開票期別金額由 100,000 變 80,000：業主改比例")
+  })
+
+  it("已開票期別改人工金額、或沒有合約（金額未定）只改百分比：一樣要確認；類型仍硬擋 invoiced_frozen", async () => {
+    Object.assign(billing(B2), { invoice_no: "ZZ00000301", invoiced_on: null })
     const ov = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { overrideAmount: 90000, overrideReason: "談價" })])
     expect(ov.status).toBe(409)
-    expect(ov.body.error).toBe("invoiced_frozen")
-    // 只有號碼沒日期也算已開票。
-    Object.assign(billing(B2), { invoiced_on: null })
-    const noDate = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { percentage: 40 })])
-    expect(noDate.body.error).toBe("invoiced_frozen")
+    expect(ov.body.error).toBe("invoiced_amount_would_change")
+    fake.db.contracts = []
+    const noTotal = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { percentage: 40 })])
+    expect(noTotal.status).toBe(409)
+    expect(noTotal.body.error).toBe("invoiced_amount_would_change")
+    const kind = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { kind: "guild_advance" })])
+    expect(kind.status).toBe(409)
+    expect(kind.body.error).toBe("invoiced_frozen")
     expect(billingWrites()).toHaveLength(0)
   })
 

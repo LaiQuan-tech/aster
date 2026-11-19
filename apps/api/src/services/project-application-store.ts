@@ -472,7 +472,7 @@ export type AnnualProjectRow = {
   id: string
   name: string
   code: string | null
-  /** 專案編號（自由輸入，≠ code 專案序號；migration 0117）。舊資料／舊查詢沒有＝undefined。 */
+  /** 合約編號（自由輸入，≠ code 專案序號；migration 0117）。舊資料／舊查詢沒有＝undefined。 */
   project_no?: string | null
   fiscal_year: number | null
   status: string
@@ -493,7 +493,7 @@ export type AnnualRow = {
   seq: number
   projectId: string
   code: string | null
-  /** 專案編號（自由輸入，≠ code 專案序號）；未設定＝null。總表／Excel 接在「專案單號」後面。 */
+  /** 合約編號（自由輸入，≠ code 專案序號）；未設定＝null。總表／Excel 接在「專案單號」後面。 */
   projectNo: string | null
   /** 開案日（opened_on，缺值退回建立日的台北日期），民國寫法 'yyy.m.d'。 */
   dateRoc: string | null
@@ -911,7 +911,7 @@ export async function batch<T>(
 export type ReceivableRow = {
   projectId: string
   code: string | null
-  /** 專案編號（自由輸入，≠ code 專案序號）；應收關鍵字可搜。 */
+  /** 合約編號（自由輸入，≠ code 專案序號）；應收關鍵字可搜。 */
   projectNo: string | null
   projectName: string
   clientName: string | null

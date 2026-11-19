@@ -8,6 +8,9 @@ export function isBillingInvoiced(b: { invoiceNo?: string | null; invoicedOn?: s
   return !!b.invoicedOn || (b.invoiceNo ?? "").trim() !== "";
 }
 
+/** 已開票期別金額經確認改動後的提示（2026-11-19）。 */
+export const INVOICED_AMOUNT_CHANGED_NOTICE = "已開發票的期別金額已改，請確認是否需要修正發票（作廢／重開）。";
+
 export interface ReinvoiceInput {
   invoiceNo: string;
   invoicedOn: string;

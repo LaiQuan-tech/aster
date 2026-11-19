@@ -43,7 +43,7 @@ export interface ProjectApplicationEngineerDraft {
 export interface ProjectApplicationDraft {
   name: string;
   code: string;
-  /** 專案編號（≠ 專案序號 code）：自由輸入、選填；送出時去頭尾空白、空字串＝不送值（null）。 */
+  /** 合約編號（≠ 專案序號 code）：自由輸入、選填；送出時去頭尾空白、空字串＝不送值（null）。 */
   projectNo: string;
   /** 承接公司（申請單左上角）。"" ＝ 使用者還沒選，送出時用 `selectedCompanyId` 解出預設公司。 */
   companyId: string;
@@ -293,7 +293,7 @@ function invalidNonnegative(value: string): boolean {
 export function projectApplicationErrors(draft: ProjectApplicationDraft): string[] {
   const errors: string[] = [];
   if (!draft.name.trim()) errors.push("請輸入專案名稱");
-  if ([...draft.projectNo.trim()].length > PROJECT_NO_MAX) errors.push(`專案編號最多 ${PROJECT_NO_MAX} 字`);
+  if ([...draft.projectNo.trim()].length > PROJECT_NO_MAX) errors.push(`合約編號最多 ${PROJECT_NO_MAX} 字`);
   // 母案是選填（業主 2026-09-30 會議）：變更設計／追加／代墊可以先開案、之後在專案明細補母案。
   if (invalidNonnegative(draft.siteAreaM2)) errors.push("設計面積須為 0 以上的數字");
   if (invalidNonnegative(draft.contractAmount)) errors.push("合約金額須為 0 以上的數字");

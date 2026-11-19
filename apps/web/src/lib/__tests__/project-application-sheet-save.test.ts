@@ -311,15 +311,15 @@ describe("付款階段", () => {
 
   it("鎖定規則：已入帳不能改%/金額/入帳日，已開票不能改發票，公會代墊那格是審迄還款", () => {
     const rows = applicationStageRows(billings)
-    expect(stageLocks(rows[0])).toEqual({ milestone: false, percentage: false, amount: false, receivedOn: false, invoiceNo: false, invoicedOn: false })
-    expect(stageLocks(rows[1])).toEqual({ milestone: false, percentage: true, amount: true, receivedOn: true, invoiceNo: true, invoicedOn: true })
+    expect(stageLocks(rows[0])).toEqual({ milestone: false, percentage: false, amount: false, confirmAmount: false, receivedOn: false, invoiceNo: false, invoicedOn: false })
+    expect(stageLocks(rows[1])).toEqual({ milestone: false, percentage: true, amount: true, confirmAmount: false, receivedOn: true, invoiceNo: true, invoicedOn: true })
     expect(stageLocks(rows[rows.length - 1]).invoiceNo).toBe(true)
   })
 
   it("改說明／%／金額 → 整批 PUT 含全部既有期別（預定日原值帶回）；金額＝人工指定，理由由使用者填", () => {
     const ctx = ctxOf({ billings })
     const noReason = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { amount: "41000" } } }))
-    expect(noReason.errors.map((e) => e.message)).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
+    expect(noReason.errors.map((e) => e.message)).toContain("付款階段第 1 列改了金額（人工指定），請在該列金額下方的「指定理由」填寫。")
     expect(noReason.errors[0].field).toBe("stage:b1:overrideReason")
     expect(noReason.stages.needsReason).toEqual([{ key: "b1", label: "第 1 列" }])
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: " 訂金 ", percentage: "40", amount: "41000", overrideReason: " 業主議價 " } } }))
@@ -744,8 +744,9 @@ describe("付款階段清空名稱／整列清空", () => {
     const ctx = ctxOf({ billings: [done] })
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: "", percentage: "" } } }))
     expect(plan.stages.removed).toEqual([])
-    // 2026-11-18：已開票的期別百分比凍結，清空 % 不生效（不算整列清空），只有名稱存成空白。
-    expect(plan.stages.installments?.[0]).toMatchObject({ id: "b1", milestone: null, percentage: 30 })
+    // 2026-11-19：已開票的期別 % 可以改（存檔時要確認）；整列清空但已請款／開票 → 不移除，名稱存空白並提示。
+    expect(plan.stages.installments?.[0]).toMatchObject({ id: "b1", milestone: null })
+    expect(plan.warnings.join()).toMatch(/第 1 列.*不能整列移除/)
   })
 
   it("已入帳（未開票）的期別整列清空：不移除，名稱照存空白，畫面提示原因", () => {

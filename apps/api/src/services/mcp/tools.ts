@@ -459,7 +459,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
   reg(
     "list_projects",
     "查專案",
-    "查專案清單（可依年度、關鍵字篩選）。",
+    "查專案清單（可依年度、關鍵字篩選；關鍵字比對專案序號 code、合約編號 projectNo、名稱、客戶等）。",
     { year: z.number().int().min(2000).max(2100).optional(), includeArchived: z.boolean().optional(), keyword: z.string().max(100).optional(), ...paging },
     READ,
     async (a) =>

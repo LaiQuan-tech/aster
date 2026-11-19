@@ -161,7 +161,7 @@ const sharePctByRoleSchema = z.object({
   member: sharePctValue,
 })
 
-/** 專案編號：去頭尾空白、空字串＝null、≤100 字（DB CHECK projects_project_no_len_chk 同步）。 */
+/** 合約編號：去頭尾空白、空字串＝null、≤100 字（DB CHECK projects_project_no_len_chk 同步）。 */
 export const PROJECT_NO_MAX = 100
 const projectNoSchema = z
   .string()
@@ -181,7 +181,7 @@ const applicationFields = {
   parentProjectId: z.string().uuid().nullish(),
   kind: z.enum(PROJECT_KINDS).optional(),
   siteAddress: z.string().trim().max(300).nullish(),
-  /** 專案編號（≠ code 專案序號）：自由輸入、選填、不唯一、去頭尾空白後 ≤100 字；空字串＝null。 */
+  /** 合約編號（≠ code 專案序號）：自由輸入、選填、不唯一、去頭尾空白後 ≤100 字；空字串＝null。 */
   projectNo: projectNoSchema,
   siteAreaM2: z.number().nonnegative().max(1e9).nullish(),
   designScope: z.array(designScopeItem).max(50).optional(),
@@ -362,7 +362,7 @@ type ProjectRow = {
   engineers: unknown
   /** 承接公司（companies.id）；null＝沿用租戶預設公司（見 services/project-company.ts）。 */
   company_id: string | null
-  /** 專案編號（2026-11-18，migration 0117）：code（專案序號）之外可自由輸入的另一套編號；選填、不唯一、≤100 字。 */
+  /** 合約編號（2026-11-18，migration 0117）：code（專案序號）之外可自由輸入的另一套編號；選填、不唯一、≤100 字。 */
   project_no?: string | null
 }
 
@@ -558,7 +558,7 @@ function serializeProject(
     engineers: engineersOf(row.engineers),
     /** 承接公司：存的值（null＝沿用租戶預設公司）。顯示用的公司名稱由呼叫端以 `companyName` 另補。 */
     companyId: row.company_id ?? null,
-    /** 專案編號（自由輸入，≠ code 專案序號）。全員可見；未設定＝null。 */
+    /** 合約編號（自由輸入，≠ code 專案序號）。全員可見；未設定＝null。 */
     projectNo: row.project_no ?? null,
   }
 }
@@ -1273,7 +1273,7 @@ projectsRouter.post(
         other_expenses: b.otherExpenses ?? 0,
         engineers: b.engineers ?? {},
         company_id: companyId,
-        // 專案編號（migration 0117 建案函式才認得；之前的版本會忽略這個鍵）。
+        // 合約編號（migration 0117 建案函式才認得；之前的版本會忽略這個鍵）。
         project_no: b.projectNo ?? null,
         // migration 0075 之前的建案函式不認得這個鍵，會直接忽略（不會失敗）。
         share_pct_by_role: sharePctByRole,

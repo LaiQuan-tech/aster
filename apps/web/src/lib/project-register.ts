@@ -25,11 +25,11 @@ export interface ProjectRegisterCells {
 }
 
 /**
- * 原 Excel 第 4 列 A:P 的欄頭，一字不差；2026-11-18 業主要「再多一個專案編號」：接在「專案單號」後面（C 欄），
+ * 原 Excel 第 4 列 A:P 的欄頭，一字不差；2026-11-18 業主要「再多一個合約編號」：接在「專案單號」後面（C 欄），
  * 之後各欄往右移一欄（後端 Excel 同步）。
  */
 export const REGISTER_FIXED_HEADERS = [
-  "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+  "項次", "專案單號", "合約編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
   "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
 ] as const
 
@@ -37,10 +37,10 @@ export const REGISTER_FIXED_HEADERS = [
 export const REGISTER_FIXED_WIDTHS = [5.18, 13, 13, 11.18, 15.82, 25.45, 13.82, 13.18, 14.45, 12.82, 13.45, 12.82, 6.91, 11.45, 10.82, 8.63, 19] as const
 export const REGISTER_DISCIPLINE_WIDTH = 13
 
-/** 原檔預設隱藏的欄（0 起算；專案編號插入後）：已收帳款、應收帳款、已開發票、合約、簽證、發包。 */
+/** 原檔預設隱藏的欄（0 起算；合約編號插入後）：已收帳款、應收帳款、已開發票、合約、簽證、發包。 */
 export const REGISTER_HIDDEN_COLUMNS: readonly number[] = [9, 10, 11, 12, 13, 14]
 
-/** 凍結窗格：原檔 F5 → 凍結項次、專案單號、（新增的）專案編號、日期、客戶、工程名稱與表頭。 */
+/** 凍結窗格：原檔 F5 → 凍結項次、專案單號、（新增的）合約編號、日期、客戶、工程名稱與表頭。 */
 export const REGISTER_FROZEN_COLUMNS = 6
 
 export type RegisterAlign = "center" | "left" | "right"
@@ -129,7 +129,7 @@ export function formatRegisterMoney(value: number | null | undefined): string {
 export interface RegisterInput {
   seq: number
   code: string | null
-  /** 專案編號（自由輸入，≠ code 專案序號）；舊版 API 沒回＝缺席。 */
+  /** 合約編號（自由輸入，≠ code 專案序號）；舊版 API 沒回＝缺席。 */
   projectNo?: string | null
   clientName: string | null
   name: string

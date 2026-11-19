@@ -135,3 +135,14 @@ export function stageScheduleSummary(
   const pctTotal = total !== null && total > 0 ? Math.round((amountTotal / total) * 10000) / 100 : 0;
   return { amountTotal, pctTotal, diff: total !== null ? Math.round(total - amountTotal) : null };
 }
+
+/**
+ * 期別金額的顯示用試算（2026-11-19 業主回報已開票期別「金額」欄空白）：系統的期程分母只認合約（含追加減），
+ * 只有報價單的專案後端算不出期別金額（null）。畫面上改以「銷售金額（未稅，含報價單）× %」四捨五入顯示，標成試算、僅供參考；
+ * 已有金額（試算／人工／請款）就用它，算不出來回 null。
+ */
+export function estimatedStageAmount(amount: number | null, percentage: number | null, salesUntaxed: number | null | undefined): { value: number | null; estimated: boolean } {
+  if (amount !== null) return { value: amount, estimated: false };
+  if (percentage === null || salesUntaxed === null || salesUntaxed === undefined || !(salesUntaxed > 0)) return { value: null, estimated: false };
+  return { value: Math.round((salesUntaxed * percentage) / 100), estimated: true };
+}

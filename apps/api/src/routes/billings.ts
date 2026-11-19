@@ -101,7 +101,7 @@ const invoiceSchema = z.object({
   expectedAmount: z.number().finite().nullable().optional(),
 })
 
-const INVOICED_FROZEN_MESSAGE = "這一期已開發票，百分比與金額不能改；要改請先撤銷開票或用「修正」換發票。"
+const INVOICED_FROZEN_MESSAGE = "這一期已開發票，類型（一般期款／技師公會代墊）不能改；要改請先撤銷開票。"
 
 /** 修正開票（2026-11-18）：新號碼、新日期、理由全部必填。 */
 const reinvoiceSchema = z.object({
@@ -408,19 +408,21 @@ billingsRouter.put(
           return
         }
       }
-      // 已開票（尚未入帳；含未請款先開票）的期別同樣凍結：發票金額已經開出去，百分比／覆寫金額不可改（2026-11-18）。
+      // 已開票（尚未入帳）的期別：類型凍結（一般期別不可改成代墊款，代墊款不開發票，反之亦然）→ 409 invoiced_frozen。
+      // 百分比／人工金額可以改（業主 2026-11-19），但要走確認：見下方 invoiced_amount_would_change（帶 ack＋理由才放行）。
+      const invoicedEdited: BillingRow[] = []
       for (const item of payload) {
         if (!item.id) continue
         const row = byId.get(item.id)
         if (!row || row.received_on !== null || !isInvoicedBilling(row)) continue
-        const pctChanged = (item.percentage ?? null) !== num(row.percentage)
-        const overrideChanged = (item.overrideAmount ?? null) !== num(row.override_amount)
-        // 類型也凍結：已開票的一般期別不可改成代墊款（代墊款不開發票），反之亦然。
         const kindChanged = item.kind !== undefined && item.kind !== (row.kind ?? "installment")
-        if (pctChanged || overrideChanged || kindChanged) {
+        if (kindChanged) {
           res.status(409).json({ error: "invoiced_frozen", installmentNo: row.installment_no, message: INVOICED_FROZEN_MESSAGE })
           return
         }
+        const pctChanged = (item.percentage ?? null) !== num(row.percentage)
+        const overrideChanged = (item.overrideAmount ?? null) !== num(row.override_amount)
+        if ((pctChanged || overrideChanged) && row.billed_on === null) invoicedEdited.push(row)
       }
       // 新增／移除其他期別、改其他期別百分比，會讓「已開票但未請款」期別的有效金額變動（例：它在吸收尾差）→ 409，
       // 除非帶 acknowledgeInvoicedChange＋理由（寫入後在該期備註與稽核留紀錄）。已請款的期別金額凍結在請款金額，不會變。
@@ -448,6 +450,12 @@ billingsRouter.put(
           total,
           (r) => (keepIds.has(r.id.toLowerCase()) ? (payload.find((item) => item.id === r.id.toLowerCase())?.installmentNo ?? null) : null),
         )
+        // 已開票期別自己改了百分比／人工金額、但算出的金額沒變（例：沒有合約、金額未定）：一樣要確認。
+        for (const r of invoicedEdited) {
+          if (invoicedChanges.some((c) => c.billingId === r.id)) continue
+          const amount = storedEffectiveAmount(r)
+          invoicedChanges.push({ billingId: r.id, installmentNo: r.installment_no, before: amount, after: amount })
+        }
         if (invoicedChanges.length > 0 && !ackCovers(ack, invoicedChanges)) {
           res.status(409).json(invoicedChangeConflictBody(invoicedChanges))
           return

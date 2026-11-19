@@ -111,7 +111,7 @@ export interface VendorRow {
 export interface ProjectLedger {
   projectId: string;
   code: string | null;
-  /** 專案編號（自由輸入，≠ code 專案序號）；關鍵字可搜。舊版 API 沒回＝null。 */
+  /** 合約編號（自由輸入，≠ code 專案序號）；關鍵字可搜。舊版 API 沒回＝null。 */
   projectNo: string | null;
   name: string;
   clientName: string | null;
@@ -370,7 +370,7 @@ export const LEDGER_CHIPS: ReadonlyArray<{ value: LedgerChip; label: string }> =
   { value: "blocked", label: "卡驗收／簽核" },
 ];
 
-/** 關鍵字比對專案序號／專案編號／名稱／客戶／廠商／放款單號（不分大小寫）。 */
+/** 關鍵字比對專案序號／合約編號／名稱／客戶／廠商／放款單號（不分大小寫）。 */
 export function filterLedger(ledger: ProjectLedger[], opts: { q?: string; chip?: LedgerChip }): ProjectLedger[] {
   const q = opts.q?.trim().toLowerCase() ?? "";
   const chip = opts.chip ?? "all";

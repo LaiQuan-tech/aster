@@ -256,14 +256,19 @@ export function stageBaseValues(row: ApplicationStageRow): StageBase {
 /** 一列哪些格子能在表格裡改（其他狀態要撤銷事件、填理由，留在下方「分期請款期程」卡）。 */
 export function stageLocks(row: ApplicationStageRow) {
   const received = !!row.receivedOn;
-  /** 已開票（號碼或日期任一有值）：發票金額已開出，百分比／金額比照已入帳凍結（後端 409 invoiced_frozen；2026-11-18）。 */
+  /**
+   * 已開票（號碼或日期任一有值）、未請款未入帳：百分比／金額可以改，但「需確認」——存檔時後端回 409
+   * invoiced_amount_would_change，跳確認視窗填理由後才寫入（業主 2026-11-19：已開票的金額也要能修正）。
+   */
   const invoiced = isBillingInvoiced(row);
   return {
     milestone: false,
-    /** 已入帳／已開票的期別金額凍結（後端 409 received／invoiced_frozen）。 */
-    percentage: received || invoiced,
-    /** 已請款＝金額凍結在請款金額；已入帳、已開票同上。 */
-    amount: received || row.billed || invoiced,
+    /** 已入帳的期別金額凍結（後端 409 received）。 */
+    percentage: received,
+    /** 已請款＝金額凍結在請款金額；已入帳同上。 */
+    amount: received || row.billed,
+    /** 已開票、仍可改金額／%：改了要確認（畫面標示用）。 */
+    confirmAmount: invoiced && !received && !row.billed,
     /** 已入帳的要先撤銷入帳（要理由）。 */
     receivedOn: received,
     /** 已開票（號碼或日期任一有值）→ 鎖住，改用格子旁的「修正」（POST /billings/:id/reinvoice）；公會代墊列那格在 Word 上是「審迄還款」。 */
@@ -595,7 +600,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       overrideReason = trimmed(e.overrideReason) || row.overrideReason || "";
       if (!overrideReason) {
         out.needsReason.push({ key, label });
-        out.errors.push({ field: `stage:${key}:overrideReason`, message: `付款階段${label}改了金額（人工指定），請填理由。` });
+        out.errors.push({ field: `stage:${key}:overrideReason`, message: `付款階段${label}改了金額（人工指定），請在該列金額下方的「指定理由」填寫。` });
       }
     }
 

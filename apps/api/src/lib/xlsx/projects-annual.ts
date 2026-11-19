@@ -23,10 +23,10 @@ const ANNUAL_MONEY_FMT = "#,##0"
 const PCT_FMT = "0.0"
 /**
  * 原檔隱藏的欄：已收帳款、應收帳款、已開發票、合約、簽證、發包。
- * 2026-11-18 起「專案單號」後面多一欄「專案編號」（C 欄），之後各欄往右移一欄。
+ * 2026-11-18 起「專案單號」後面多一欄「合約編號」（C 欄），之後各欄往右移一欄。
  */
 const HIDDEN_COLUMNS = [10, 11, 12, 13, 14, 15]
-/** 固定欄數（項次…備註，含 2026-11-18 新增的專案編號）。 */
+/** 固定欄數（項次…備註，含 2026-11-18 新增的合約編號）。 */
 const FIXED_COLUMN_COUNT = 17
 const FONT_NAME = "標楷體"
 const BLACK = "FF000000"
@@ -57,7 +57,7 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
   const money = (cell: ExcelJS.Cell, value: number | null) => writeMoney(cell, value, moneyFmt)
   const disciplines = table.disciplines
   const headers = [
-    "項次", "專案單號", "專案編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+    "項次", "專案單號", "合約編號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
     "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
     ...disciplines,
     ...(register ? [] : ["請款進度%", "收款進度%", "狀態", "期數"]),
@@ -83,7 +83,7 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
   ws.getCell("A2").font = { name: FONT_NAME, size: 18 }
   ws.getCell("A2").alignment = { horizontal: "left", vertical: "middle" }
 
-  // 日期／已入帳／未入帳分別在「含稅」「已收帳款」「應收帳款」上方（專案編號插入後為 I3:K3）。
+  // 日期／已入帳／未入帳分別在「含稅」「已收帳款」「應收帳款」上方（合約編號插入後為 I3:K3）。
   ws.getCell("I3").value = `日期：${rocToday(opts.today)}`
   ws.getCell("J3").value = "已入帳"
   ws.getCell("K3").value = "未入帳"

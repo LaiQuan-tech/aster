@@ -252,7 +252,7 @@ export { PROJECT_NO_MAX, normalizeProjectNo } from "./project-no"
 export interface CreateProjectExtBody {
   name: string
   code?: string | null
-  /** 專案編號（自由輸入，≠ code 專案序號）；空字串／null＝清空。 */
+  /** 合約編號（自由輸入，≠ code 專案序號）；空字串／null＝清空。 */
   projectNo?: string | null
   fiscalYear?: number | null
   description?: string | null
@@ -1006,7 +1006,7 @@ export function putBillingShares(projectId: string, billings: BillingShareSetInp
 
 export interface UpdateProjectExtBody {
   name?: string
-  /** 專案編號（自由輸入，≠ code 專案序號）；空字串／null＝清空。 */
+  /** 合約編號（自由輸入，≠ code 專案序號）；空字串／null＝清空。 */
   projectNo?: string | null
   fiscalYear?: number | null
   description?: string | null
@@ -1227,7 +1227,7 @@ export const RECEIVABLE_STATE_BADGE_CLASS: Record<ReceivableState, string> = {
 export interface ReceivableRow {
   projectId: string
   code: string | null
-  /** 專案編號（自由輸入，≠ code 專案序號）；舊版 API 沒回＝缺席。 */
+  /** 合約編號（自由輸入，≠ code 專案序號）；舊版 API 沒回＝缺席。 */
   projectNo?: string | null
   projectName: string
   clientName: string | null

@@ -3,7 +3,7 @@ import request from "supertest"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 /**
- * 2026-11-18「專案編號」（projects.project_no，migration 0117）：專案序號（code）之外可自由輸入的另一套編號。
+ * 2026-11-18「合約編號」（projects.project_no，migration 0117）：專案序號（code）之外可自由輸入的另一套編號。
  * 選填、不唯一、去頭尾空白、≤100 字；建立（RPC p_project.project_no）、PATCH、GET 明細／列表都帶。
  * 純測試：fake-supabase，不連 DB。識別碼與名稱都是假值。
  */
@@ -60,7 +60,7 @@ beforeEach(() => {
 })
 
 describe("POST /projects — projectNo", () => {
-  it("帶專案編號：去頭尾空白後寫進 p_project.project_no；與專案序號 code 各自獨立", async () => {
+  it("帶合約編號：去頭尾空白後寫進 p_project.project_no；與專案序號 code 各自獨立", async () => {
     const res = await as(HR_TOKEN, request(app).post("/projects")).send({ name: "新案", code: "TEST-NEW", projectNo: "  業主-甲-0012  " })
     expect(res.status, JSON.stringify(res.body)).toBe(201)
     const p = projectInserts()[0]?.args.p_project as Row
@@ -74,7 +74,7 @@ describe("POST /projects — projectNo", () => {
     expect(projectInserts().map((c) => (c.args.p_project as Row).project_no)).toEqual([null, null])
   })
 
-  it("不設唯一：與既有專案相同的專案編號照建", async () => {
+  it("不設唯一：與既有專案相同的合約編號照建", async () => {
     const res = await as(HR_TOKEN, request(app).post("/projects")).send({ name: "新案", code: "TEST-NEW", projectNo: "客-0001" })
     expect(res.status).toBe(201)
   })
@@ -90,7 +90,7 @@ describe("POST /projects — projectNo", () => {
 })
 
 describe("PATCH /projects/:id — projectNo", () => {
-  it("改專案編號：去頭尾空白後寫入 project_no", async () => {
+  it("改合約編號：去頭尾空白後寫入 project_no", async () => {
     const res = await as(HR_TOKEN, request(app).patch(`/projects/${PROJECT_ID}`)).send({ projectNo: "  內-115-7 " })
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect(projectUpdates()).toHaveLength(1)
